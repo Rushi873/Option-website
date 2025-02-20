@@ -42,6 +42,51 @@ async function loadAssets() {
     }
 }
 
+
+// ✅ Include a Markdown parser (marked.js)
+document.addEventListener("DOMContentLoaded", function () {
+    if (!window.marked) {
+        const script = document.createElement("script");
+        script.src = "https://cdn.jsdelivr.net/npm/marked/marked.min.js";
+        script.onload = () => console.log("Markdown parser loaded.");
+        document.head.appendChild(script);
+    }
+});
+
+// ✅ Trigger analysis when an asset is selected
+document.getElementById("asset").addEventListener("change", fetchAnalysis);
+
+// ✅ Fetch Stock Analysis from Backend and Render as Markdown
+async function fetchAnalysis() {
+    const asset = document.getElementById("asset").value;
+    if (!asset) return;
+
+    const analysisContainer = document.getElementById("analysisResult");
+    analysisContainer.innerText = "Fetching analysis...";
+
+    try {
+        const response = await fetch(`${API_BASE}/get_stock_analysis`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ asset })
+        });
+
+        if (!response.ok) throw new Error("Failed to fetch stock analysis.");
+
+        const data = await response.json();
+        
+        // ✅ Convert Markdown to HTML
+        const markdownText = data.analysis;
+        analysisContainer.innerHTML = marked.parse(markdownText);
+
+    } catch (error) {
+        console.error("Error fetching stock analysis:", error);
+        analysisContainer.innerText = "Error fetching data.";
+    }
+}
+
+
+
 // ✅ Update Selected Asset in Backend
 async function updateSelectedAsset() {
     let asset = document.getElementById("asset").value;

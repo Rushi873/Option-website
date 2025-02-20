@@ -7,12 +7,16 @@ from database import get_db_connection
 from fetch_data import update_option_data
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from nsepython import option_chain  
+from nsepython import option_chain, nse_fno 
 from datetime import datetime
 from typing import List
 import openai
 import os
 from dotenv import load_dotenv
+import yfinance as yf
+import google.generativeai as genai
+import requests
+from bs4 import BeautifulSoup
 
 load_dotenv()
 app = FastAPI()
@@ -329,9 +333,38 @@ def remove_position(position_id: int):
 # ✅ PAYOFF CHART & GREEKS
 # ---------------------------------------------------------------
 
-# ✅ Calculate Payoff Chart
+
+LOT_SIZE = 50  # Assume each lot contains 50 contracts (modify as needed)
+
+# ✅ Function to Calculate Option P&L
+def calculate_option_pnl(position: StrategyPosition, price: float) -> float:
+    """
+    Calculates the payoff for each option position considering:
+    - Call (CE) & Put (PE) options.
+    - Long (Buy) & Short (Sell) positions.
+    - Lot size to correctly scale P&L.
+    """
+    # Determine intrinsic value based on option type
+    if position.option_type == "CE":  # Call Option
+        intrinsic_value = max(price - position.strike_price, 0)
+    elif position.option_type == "PE":  # Put Option
+        intrinsic_value = max(position.strike_price - price, 0)
+    else:
+        return 0  # Invalid option type
+
+    # Calculate P&L with lot size multiplication
+    pnl = (intrinsic_value - position.entry_price) * (position.lots * LOT_SIZE)
+
+    return pnl
+
+# ✅ Payoff Calculation API
 @app.post("/calculate_payoff")
 def calculate_payoff(positions: List[StrategyPosition], spot_price: float):
+    """
+    Generates a payoff chart for the given strategy positions.
+    - Evaluates across a ±10% price range.
+    - Aggregates P&L across multiple positions.
+    """
     price_range = np.linspace(spot_price * 0.9, spot_price * 1.1, 50)  # ±10% range, 50 steps
     payoff_data = []
 
@@ -341,47 +374,149 @@ def calculate_payoff(positions: List[StrategyPosition], spot_price: float):
 
     return {"payoff_chart": payoff_data}
 
-# ✅ Calculate Greeks (Delta, Gamma, Theta, Vega)
-@app.post("/calculate_greeks")
-def calculate_greeks(positions: List[StrategyPosition], spot_price: float, iv: float):
-    greek_data = []
 
-    for pos in positions:
-        greeks = calculate_option_greeks(pos, spot_price, iv)  # Custom function
-        greek_data.append({
-            "strike": pos.strike_price,
-            "delta": round(greeks["delta"], 4),
-            "gamma": round(greeks["gamma"], 4),
-            "theta": round(greeks["theta"], 4),
-            "vega": round(greeks["vega"], 4),
-        })
 
-    return {"greeks": greek_data}
 
 # ---------------------------------------------------------------
-# ✅ HELPER FUNCTIONS (Option Pricing & Greeks Calculation)
+# ✅ LLM
 # ---------------------------------------------------------------
 
-def calculate_option_pnl(position, price):
-    """
-    Calculate P&L based on option type (CE/PE), entry price, and underlying price.
-    """
-    if position.option_type == "CE":
-        return max(price - position.strike_price, 0) - position.entry_price
-    elif position.option_type == "PE":
-        return max(position.strike_price - price, 0) - position.entry_price
-    return 0
+# Configure Gemini API
+genai.configure(api_key="AIzaSyDd_UVZ_1OeLahVrJ0A-hbazQcr1FOpgPE")
 
-def calculate_option_greeks(position, spot_price, iv):
+# Define request model
+class StockRequest(BaseModel):
+    asset: str  # Example: "ITC"
+
+# Fetch stock data from Yahoo Finance
+def fetch_stock_data(stock_symbol):
+    try:
+        stock = yf.Ticker(stock_symbol)
+        stock_data = stock.history(period="1d")
+
+        if stock_data.empty:
+            return None
+
+        current_price = stock_data["Close"].iloc[-1]
+        volume = stock_data["Volume"].iloc[-1]
+        moving_avg_50 = stock.history(period="50d")["Close"].mean()
+        moving_avg_200 = stock.history(period="200d")["Close"].mean()
+
+        info = stock.info
+        market_cap = info.get("marketCap", "N/A")
+        pe_ratio = info.get("trailingPE", "N/A")
+        eps = info.get("trailingEps", "N/A")
+
+        return {
+            "current_price": current_price,
+            "volume": volume,
+            "moving_avg_50": moving_avg_50,
+            "moving_avg_200": moving_avg_200,
+            "market_cap": market_cap,
+            "pe_ratio": pe_ratio,
+            "eps": eps
+            
+        }
+    except Exception as e:
+        print(f"Error fetching stock data: {e}")
+        return None
+
+def fetch_latest_news(asset):
+    stock_symbol = "^NSEI" if asset.upper() == "NIFTY" else f"{asset.upper()}.NS"
+    yahoo_news_url = f"https://finance.yahoo.com/quote/{stock_symbol}/news/"
+
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(yahoo_news_url, headers=headers)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, "html.parser")
+        news_section = soup.select_one("#nimbus-app > section > section > section > article > section.mainContent.yf-tnbau3 > section")
+        
+        news_list = []
+        if news_section:
+            news_items = news_section.find_all("h3", limit=3)  # Get the first 3 news headlines
+            
+            for news_item in news_items:
+                headline = news_item.text.strip()
+                summary_tag = news_item.find_next("p")
+                summary = summary_tag.text.strip() if summary_tag else "No summary available."
+                news_list.append({"headline": headline, "summary": summary})
+
+        if not news_list:
+            news_list.append({"headline": "No major updates found.", "summary": ""})
+
+        return news_list
+
+    except Exception as e:
+        print(f"Error fetching news: {e}")
+        return [{"headline": "No major updates found.", "summary": ""}]
+
+
+# API Endpoint to get stock analysis
+@app.post("/get_stock_analysis")
+def get_stock_analysis(request: StockRequest):
+    stock_symbol = "^NSEI" if request.asset.upper() == "NIFTY" else f"{request.asset.upper()}.NS"
+
+    stock_data = fetch_stock_data(stock_symbol)
+    if not stock_data:
+        raise HTTPException(status_code=404, detail="Stock data not found")
+
+    latest_news = fetch_latest_news(request.asset)
+
+    # ✅ Structured AI Prompt (Forces Detailed Analysis)
+    prompt = f"""
+    Provide a detailed stock analysis for {stock_symbol}, breaking it into the following sections:
+
+    **1️⃣ Technical Analysis:** 
+    - **Current Price:** ₹{stock_data["current_price"]}
+    - **Trading Volume:** {stock_data["volume"]}
+    - **50-day & 200-day Moving Averages:** ₹{stock_data["moving_avg_50"]:.2f} | ₹{stock_data["moving_avg_200"]:.2f}
+    - **Trend Analysis:** Identify if there is a **Golden Cross (bullish)** or **Death Cross (bearish)** based on moving average crossover.
+    - **Support & Resistance Levels:** Identify the **nearest support and resistance levels** based on historical price action.
+    - **Momentum Analysis:** Determine if the stock has **strong buying or selling pressure** based on volume and trend strength.
+
+    **2️⃣ Fundamental Analysis:**  
+    - **Market Capitalization:** ₹{stock_data["market_cap"]}
+    - **P/E Ratio:** {stock_data["pe_ratio"]} (Compare to sector average)
+    - **Earnings Per Share (EPS):** ₹{stock_data["eps"]}
+    - **Valuation Analysis:** Determine whether the stock is **undervalued, fairly valued, or overvalued** based on its P/E ratio and industry comparison.
+    - **Revenue & Profit Trends:** Assess whether the company's **revenue and profit** are **growing, stagnating, or declining**.
+    - **Debt & Financial Stability:** Analyze the company's **debt levels, cash flow, and overall financial health**.
+
+    **4️⃣ Market Sentiment & News:**  
+    - **Latest Headline:** {latest_news[0]["headline"]}
+    - **Summary:** {latest_news[0]["summary"]}
+    - **Sentiment Analysis:** Determine whether the latest news is **positive, neutral, or negative** and its potential impact on stock price.
+
+    - **Latest Headline:** {latest_news[1]["headline"]}
+    - **Summary:** {latest_news[1]["summary"]}
+    - **Sentiment Analysis:** Determine whether the latest news is **positive, neutral, or negative** and its potential impact on stock price.
+
+
+    **5️⃣ Market Outlook & Trading Strategy:**  
+    - **Short-Term Trend (1-3 months):** Provide an analysis of expected price movement based on technical indicators and market sentiment.
+    - **Medium-Term Trend (3-12 months):** Identify whether the stock is a **buy, hold, or sell** based on valuation, industry trends, and competitor performance.
+    - **Risk Factors:** Highlight any risks that could **impact future stock performance**.
+    - **Action Plan:** Recommend whether investors should **buy on dips, wait for confirmation, or exit the stock**.
+
+    Provide a professional and insightful analysis rather than generic responses. You should not add a date in the heading.
     """
-    Dummy function for calculating Greeks (Use a library like QuantLib in real implementation).
-    """
-    return {
-        "delta": np.random.uniform(-1, 1),  # Replace with actual formula
-        "gamma": np.random.uniform(0, 1),
-        "theta": np.random.uniform(-1, 1),
-        "vega": np.random.uniform(0, 1),
-    }
+
+
+    # Fetch AI response
+    model = genai.GenerativeModel("gemini-1.5-pro")
+    response = model.generate_content(prompt)
+
+    return {"analysis": response.text}
+
+
+
+# ---------------------------------------------------------------
+# ✅ LLM ends
+# ---------------------------------------------------------------
+
+
 
 # ✅ Background Live Update (Update Only Selected Asset)
 def live_update():
@@ -400,3 +535,4 @@ threading.Thread(target=live_update, daemon=True).start()
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000)
+

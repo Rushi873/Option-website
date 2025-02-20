@@ -18,13 +18,18 @@ header {
 /* Layout Containers */
 .container {
     display: flex;
+    min-height: 90vh;
     justify-content: space-between;
     padding: 20px;
+    overflow: hidden;
 }
 
 /* Chat Container */
 #chat-container {
     position: fixed;
+    min-height: 300px;
+    max-height: 400px;
+    overflow: hidden;
     bottom: 10px;
     right: 10px;
     width: 300px;
@@ -169,10 +174,10 @@ button:hover {
     background: darkred;
 }
 
-/* Payoff Chart */
-#payoffChart {
-    height: 250px;
+/* Payoff Chart - Always Visible */
+#payoffChartContainer {
     width: 100%;
+    min-height: 350px; /* Ensures it does not shrink */
     background-color: #eee;
     display: flex;
     align-items: center;
@@ -180,7 +185,16 @@ button:hover {
     margin-top: 10px;
     border-radius: 8px;
     box-shadow: 0px 0px 10px rgba(0, 0, 0, 0.1);
+    padding: 15px;
+    overflow: hidden;
 }
+
+#payoffChart {
+    width: 100%;
+    height: 100%;
+}
+
+
 
 /* Responsive Design */
 @media screen and (max-width: 768px) {
