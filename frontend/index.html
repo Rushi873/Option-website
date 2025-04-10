@@ -15,6 +15,8 @@
     </header>
 
     <div class="container">
+
+        <!-- Option Chain Section -->
         <div class="option-chain-container">
             <h2 id="niftyPrice">Spot Price: -</h2>
 
@@ -44,8 +46,18 @@
             </table>
         </div>
 
+        <!-- Strategy Builder Section -->
         <div class="strategy-container">
-            <h2>Strategy Builder</h2>
+
+            <!-- Header and Clear Button -->
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 20px;">
+                <h2 style="margin: 0;">Strategy Builder</h2>
+                <button id="clearStrategyBtn" onclick="clearAllPositions()" style="background-color: #e74c3c; color: white; padding: 6px 12px; border: none; border-radius: 4px;">
+                    Clear
+                </button>
+            </div>
+
+            <!-- Strategy Table -->
             <table id="strategyTable">
                 <thead>
                     <tr>
@@ -53,17 +65,56 @@
                         <th>Type</th>
                         <th>Expiry</th>
                         <th>Lots</th>
+                        <th>Premium</th>
                         <th>Action</th>
                     </tr>
                 </thead>
                 <tbody></tbody>
             </table>
 
+            <!-- Payoff Chart Section -->
             <h2>Payoff Chart</h2>
-            <div class="chart-container">
+            <div id="payoffChartContainer">
                 <canvas id="payoffChart"></canvas>
             </div>
 
+            <!-- Centered Wide Update Button -->
+            <div style="display: flex; justify-content: center; margin-top: 20px;">
+                <button id="updateChartBtn" onclick="fetchPayoffChart()" style="width: 200px; padding: 10px 0; font-size: 16px;">
+                    Update
+                </button>
+            </div>
+
+            <!-- Strategy Metrics -->
+            <div id="strategyMetrics" class="metrics-card" style="margin-top: 20px;">
+                <h3>Strategy Metrics</h3>
+                <ul style="list-style: none; padding-left: 0;">
+                    <li id="maxProfit">Max Profit: </li>
+                    <li id="maxLoss">Max Loss: </li>
+                    <li id="breakeven">Breakeven Points: </li>
+                    <li id="rewardToRisk">Reward:Risk Ratio: </li>
+                    <li id="totalOptionPrice">Total Option Cost: </li>
+                    <li style="margin-top: 15px;">
+                        <details id="costBreakdownContainer">
+                            <summary><strong>Option Cost Breakdown</strong></summary>
+                            <ul id="costBreakdownList" style="list-style: disc; margin-left: 20px; margin-top: 10px;"></ul>
+                        </details>
+                    </li>
+                </ul>
+            </div>
+
+            <!-- Tax Info -->
+            <div id="taxInfo" style="margin-top: 20px; font-size: 14px;">
+                <!-- Filled by JS -->
+            </div>
+
+            <!-- Option Greeks -->
+            <h3 style="margin-top: 30px;">Options Greeks</h3>
+            <table id="greeksTable" style="width: 100%; border-collapse: collapse; margin-top: 10px;">
+                <!-- Filled by JS -->
+            </table>
+
+            <!-- Stock Analysis -->
             <h2>Stock Analysis</h2>
             <div id="analysisResult">Select an asset to load analysis...</div>
         </div>
