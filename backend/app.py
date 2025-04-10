@@ -7,19 +7,32 @@ from database import get_db_connection
 from fetch_data import update_option_data
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from nsepython import option_chain, nse_fno 
-from datetime import datetime
-from typing import List
-import openai
+#from nsepython import *
+from jugaad_data.nse import NSELive
+from datetime import datetime, date
+from typing import List, Dict
+from py_vollib.black_scholes.greeks.analytical import delta, gamma, theta, vega, rho
+from py_vollib.black_scholes import black_scholes
+from py_vollib.black_scholes.implied_volatility import implied_volatility
 import os
+import base64
+import io
 from dotenv import load_dotenv
 import yfinance as yf
 import google.generativeai as genai
+import opstrat
 import requests
+import numpy as np
+from scipy.stats import norm
+import math
 from bs4 import BeautifulSoup
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 load_dotenv()
 app = FastAPI()
+n = NSELive()
 
 # ✅ Logging Setup
 logging.basicConfig(level=logging.INFO)
@@ -34,8 +47,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ✅ Track Selected Asset
+# ✅ Track Selected Asset, # Global cache
 selected_asset = None
+OPTION_CACHE = {}
+
+def get_cached_option(asset):
+    now = time.time()
+    if asset in OPTION_CACHE:
+        option, timestamp = OPTION_CACHE[asset]
+        if now - timestamp < 3:  
+            return option
+
+    # Else fetch fresh and cache
+    if asset in ["NIFTY", "BANKNIFTY"]:
+        option = n.index_option_chain(asset)
+    else:
+        option = n.equities_option_chain(asset)
+
+    OPTION_CACHE[asset] = (option, now)
+    return option
 
 
 @app.post("/update_selected_asset")
@@ -54,11 +84,9 @@ def update_asset_data(asset):
     try:
         logger.info(f"Fetching new data for {asset}...")
 
-        # ✅ Get Spot Price from NSEPython
-        spot_price = option_chain(asset)["records"]["underlyingValue"]
-
-        # ✅ Get Option Chain Data
-        option_data = option_chain(asset)["records"]["data"]
+        option = get_cached_option(asset)
+        spot_price = option["records"]["underlyingValue"]
+        option_data = option["records"]["data"]
 
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -130,18 +158,52 @@ def update_asset_data(asset):
 
 
 
-# ✅ Fetch Available Assets
+# ✅ Fetch Available Assets, and remove expiry dates, that are expired
 @app.get("/get_assets")
 def get_assets():
+    today = datetime.today().strftime("%Y-%m-%d")
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT asset_name FROM option_data.assets")  
-    assets = [row["asset_name"] for row in cursor.fetchall()]
-    cursor.close()
-    conn.close()
-    if not assets:
-        raise HTTPException(status_code=404, detail="No assets found")
-    return {"assets": assets}
+
+    try:
+        # ✅ Fetch all assets
+        cursor.execute("SELECT asset_name FROM option_data.assets")  
+        assets = [row["asset_name"] for row in cursor.fetchall()]
+
+        if not assets:
+            raise HTTPException(status_code=404, detail="No assets found")
+
+        # ✅ For each asset, clean expired data
+        for asset in assets:
+            # Step 1: Delete from option_chain for expired expiries
+            cursor.execute("""
+                DELETE FROM option_data.option_chain 
+                WHERE expiry_id IN (
+                    SELECT id FROM option_data.expiries 
+                    WHERE expiry_date < %s 
+                    AND asset_id = (SELECT id FROM option_data.assets WHERE asset_name = %s)
+                )
+            """, (today, asset))
+
+            # Step 2: Delete expired expiry rows
+            cursor.execute("""
+                DELETE FROM option_data.expiries 
+                WHERE expiry_date < %s 
+                AND asset_id = (SELECT id FROM option_data.assets WHERE asset_name = %s)
+            """, (today, asset))
+
+        conn.commit()
+
+        return {"assets": assets}
+    
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Error cleaning data: {str(e)}")
+
+    finally:
+        cursor.close()
+        conn.close()
+
 
 # ✅ Fetch Unique Expiry Dates (from MySQL)
 @app.get("/expiry_dates")
@@ -217,14 +279,17 @@ def get_option_chain(asset: str = Query(...), expiry: str = Query(...)):
     return {"option_chain": option_chain}
 
 
-# ✅ Fetch Spot Price
 @app.get("/get_spot_price")
 def get_spot_price(asset: str = Query(...)):
     try:
-        spot_price = option_chain(asset)["records"]["underlyingValue"]
-        if not spot_price:
+        option = get_cached_option(asset)  # ✅ This checks the cache
+        spot_price = option["records"].get("underlyingValue")
+
+        if spot_price is None or spot_price == 0:
             raise HTTPException(status_code=500, detail="Spot price not found.")
-        return {"spot_price": spot_price}
+
+        return {"spot_price": round(spot_price, 2)}
+
     except Exception as e:
         logger.error(f"Error fetching spot price for {asset}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error fetching spot price: {str(e)}")
@@ -316,6 +381,7 @@ def add_position(position: StrategyPosition):
     conn.commit()
     cursor.close()
     conn.close()
+    print('hi')
     return {"message": "Position added successfully"}
 
 # ✅ Remove Position from Strategy
@@ -327,52 +393,567 @@ def remove_position(position_id: int):
     conn.commit()
     cursor.close()
     conn.close()
+    print('bye')
     return {"message": "Position removed successfully"}
 
 # ---------------------------------------------------------------
 # ✅ PAYOFF CHART & GREEKS
 # ---------------------------------------------------------------
 
+# ✅ Define Strategy Model
+class StrategyItem(BaseModel):
+    option_type: str  # "CE" or "PE"
+    strike_price: float
+    tr_type: str  # "b" or "s"
+    option_price: float
+    expiry_date: str
 
-LOT_SIZE = 50  # Assume each lot contains 50 contracts (modify as needed)
+class PayoffRequest(BaseModel):
+    asset: str
+    strategy: List[Dict[str, str]]
 
-# ✅ Function to Calculate Option P&L
-def calculate_option_pnl(position: StrategyPosition, price: float) -> float:
+
+# ✅ Fetch lot size from the database
+def get_lot_size(asset_name):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT lot_size FROM option_data.assets WHERE asset_name=%s", (asset_name,))
+        result = cursor.fetchone()
+        conn.close()
+        if result:
+            return result[0]
+        else:
+            print(f"Error: No data found for asset_name: {asset_name}")
+            return None
+    except Exception as e:
+        print(f"Error in get_lot_size: {e}")
+        return None
+
+def extract_iv(asset_name, strike_price, expiry_date, option_type):
     """
-    Calculates the payoff for each option position considering:
-    - Call (CE) & Put (PE) options.
-    - Long (Buy) & Short (Sell) positions.
-    - Lot size to correctly scale P&L.
+    Extract implied volatility from NSE option chain data.
+
+    Params:
+        data (dict): result from n.equities_option_chain() or n.index_option_chain()
+        strike_price (float): strike to match
+        expiry_date (str): in YYYY-MM-DD format
+        option_type (str): 'CE' or 'PE'
     """
-    # Determine intrinsic value based on option type
-    if position.option_type == "CE":  # Call Option
-        intrinsic_value = max(price - position.strike_price, 0)
-    elif position.option_type == "PE":  # Put Option
-        intrinsic_value = max(position.strike_price - price, 0)
+    try:
+        # Convert expiry_date to the format used in NSE data: '24-Apr-2025'
+        target_expiry = datetime.strptime(expiry_date, "%Y-%m-%d").strftime("%d-%b-%Y")
+        option = get_cached_option(asset_name)  
+
+        for item in option["records"]["data"]:
+            if item["strikePrice"] == strike_price and item["expiryDate"] == target_expiry:
+                if option_type.upper() in item:
+                    return item[option_type.upper()].get("impliedVolatility")
+
+        print(f"No match found for {strike_price}, {target_expiry}, {option_type}")
+        return None
+    except Exception as e:
+        print(f"Error extracting IV: {e}")
+        return None
+
+
+
+
+def calculate_option_taxes(strategy_data, asset):
+    stt_short_rate = 0.001           # 0.1%
+    stt_exercise_rate = 0.00125      # 0.125%
+    stamp_duty_rate = 0.00003        # 0.003%
+    sebi_rate = 0.000001             # ₹10 / crore = 0.0001%
+    txn_charge_rate = 0.0003503      # NSE: 0.03503%
+    gst_rate = 0.18
+    brokerage_flat = 20              # ₹20 per order
+
+    total = {
+        "stt": 0,
+        "stamp_duty": 0,
+        "sebi_fee": 0,
+        "txn_charges": 0,
+        "brokerage": 0,
+        "gst": 0
+    }
+
+    breakdown = []
+    spot_price = get_cached_option(asset)["records"]["underlyingValue"]
+
+    for leg in strategy_data:
+        tr_type = leg["tr_type"]
+        option_type = leg["op_type"]
+        strike = leg["strike"]
+        premium = leg.get("op_pr", 0)
+        lots = leg.get("lot", 1)
+        lot_size = leg.get("lot_size", 1)
+
+        turnover = premium * lots * lot_size
+        leg_costs = {}
+
+        # STT
+        stt_val = 0
+        if tr_type == "s":  # Sell
+            stt_val = turnover * stt_short_rate
+            note = "0.1% STT on premium (sell)"
+        elif tr_type == "b":
+            intrinsic = 0
+            if option_type == "c" and spot_price > strike:
+                intrinsic = (spot_price - strike) * lots * lot_size
+            elif option_type == "p" and spot_price < strike:
+                intrinsic = (strike - spot_price) * lots * lot_size
+            if intrinsic > 0:
+                stt_val = intrinsic * stt_exercise_rate
+                note = "0.125% STT on intrinsic value (exercised ITM)"
+            else:
+                note = "No STT (OTM unexercised)"
+
+        # Stamp Duty (only for Buy)
+        stamp = turnover * stamp_duty_rate if tr_type == "b" else 0
+
+        # SEBI Fee
+        sebi_fee = turnover * sebi_rate
+
+        # Transaction Charges (same for buy/sell)
+        txn_fee = turnover * txn_charge_rate
+
+        # Brokerage (₹20 per leg)
+        brokerage = brokerage_flat
+
+        # GST on (brokerage + sebi + txn)
+        gst = gst_rate * (brokerage + sebi_fee + txn_fee)
+
+        # Accumulate
+        total["stt"] += stt_val
+        total["stamp_duty"] += stamp
+        total["sebi_fee"] += sebi_fee
+        total["txn_charges"] += txn_fee
+        total["brokerage"] += brokerage
+        total["gst"] += gst
+
+        # Breakdown
+        leg_costs.update({
+            "type": option_type.upper(),
+            "strike": strike,
+            "lots": lots,
+            "lot_size": lot_size,
+            "premium": f"{premium:.2f}",
+            "turnover": f"{turnover:.2f}",
+            "stt": round(stt_val, 2),
+            "stamp_duty": round(stamp, 2),
+            "sebi_fee": round(sebi_fee, 2),
+            "txn_charge": round(txn_fee, 2),
+            "brokerage": brokerage,
+            "gst": round(gst, 2),
+            "note": note
+        })
+        breakdown.append(leg_costs)
+
+    total_all = sum(total.values())
+
+    return {
+        "spot_price_used": spot_price,
+        "total_cost": round(total_all, 2),
+        "charges": {k: round(v, 2) for k, v in total.items()},
+        "breakdown": breakdown
+    }
+
+
+
+
+
+def generate_payoff_chart(strategy_data, asset):
+    """ Generate the payoff chart and return it as a base64 image """
+    try:
+        # Close all existing figures first
+        plt.close('all')
+        plt.ioff()  # Prevent popups
+
+        # Expand each leg according to the number of lots
+        expanded_strategy = []
+        for leg in strategy_data:
+            lots = leg.get("lot", 1)
+            single_leg = leg.copy()
+            single_leg.pop("lot")  # Remove 'lot' to match opstrat format
+            single_leg.pop("lot_size", None)  # Remove 'lot_size' if present
+            expanded_strategy.extend([single_leg] * lots)
+
+        # Plot using opstrat
+        option = get_cached_option(asset)
+        spot_price = option["records"]["underlyingValue"]
+        opstrat.multi_plotter(spot=spot_price, op_list=expanded_strategy)
+
+        fig = plt.gcf()
+        fig.set_size_inches(10, 6)
+        ax = plt.gca()
+        ax.set_title(f"Option Strategy Payoff (Spot: {spot_price})")
+        ax.grid(True, linestyle='--', alpha=0.7)
+
+        img_buffer = io.BytesIO()
+        plt.savefig(img_buffer, format="png", bbox_inches="tight", dpi=100)
+        img_buffer.seek(0)
+        img_base64 = base64.b64encode(img_buffer.read()).decode("utf-8")
+
+        plt.close(fig)
+
+        return img_base64
+    except Exception as e:
+        logging.error(f"Error generating payoff chart: {e}", exc_info=True)
+        return None
+
+
+
+def calculate_strategy_metrics(strategy_data, asset):
+    """
+    Calculate P&L metrics for multi-leg Indian option strategies.
+    Enhanced with contract cost breakdown and lot size display.
+
+    Returns:
+        dict: Strategy P&L metrics.
+    """
+
+    option = get_cached_option(asset)
+    spot_price = option["records"]["underlyingValue"]
+    asset_lot_size = strategy_data[0].get('lot_size', 1)  # Assume same across legs for display
+
+    # Price range for simulation
+    lower_bound = max(1, spot_price * 0.1)
+    upper_bound = spot_price * 3
+    price_range = np.linspace(lower_bound, upper_bound, 2000)
+
+    total_payoff = np.zeros_like(price_range)
+    total_option_cost = 0
+    breakdowns = []
+
+    for leg in strategy_data:
+        op_type = leg['op_type'].lower()
+        strike = float(leg['strike'])
+        tr_type = leg['tr_type'].lower()
+        op_pr = float(leg['op_pr'])
+        lot = int(leg.get('lot', 1))
+        lot_size = int(leg.get('lot_size', asset_lot_size))
+        quantity = lot * lot_size
+
+        leg_cost = op_pr * quantity
+        action = "Received" if tr_type == 's' else "Paid"
+        sign = "+" if tr_type == 's' else "-"
+
+        # Track total option cost (net premium)
+        total_option_cost += leg_cost if tr_type == 's' else -leg_cost
+
+        # Detailed leg breakdown
+        breakdowns.append(
+            f"{tr_type.upper()} {op_type.upper()} | Strike ₹{strike} | Premium ₹{op_pr} × Lots {lot} × LotSize {lot_size} = ₹{leg_cost:.2f} ({action})"
+        )
+
+        # Calculate intrinsic value at expiry
+        if op_type == 'c':
+            intrinsic = np.maximum(price_range - strike, 0)
+        elif op_type == 'p':
+            intrinsic = np.maximum(strike - price_range, 0)
+        else:
+            raise ValueError("op_type must be 'c' or 'p'.")
+
+        # Payoff per leg
+        if tr_type == 'b':
+            payoff = (intrinsic - op_pr) * quantity
+        elif tr_type == 's':
+            payoff = (op_pr - intrinsic) * quantity
+        else:
+            raise ValueError("tr_type must be 'b' or 's'.")
+
+        total_payoff += payoff
+
+    raw_max_profit = np.max(total_payoff)
+    raw_max_loss = np.min(total_payoff)
+
+    # Detect infinite-like boundary behavior
+    start_slope = total_payoff[1] - total_payoff[0]
+    end_slope = total_payoff[-1] - total_payoff[-2]
+
+    is_infinite_profit = end_slope > 1 and total_payoff[-1] > raw_max_profit * 0.95
+    is_infinite_loss = start_slope < -1 and total_payoff[0] < raw_max_loss * 0.95
+
+    max_profit = "∞" if is_infinite_profit else round(raw_max_profit, 2)
+    if is_infinite_loss:
+        max_loss = "-∞"
+    elif abs(raw_max_loss) >= abs(total_option_cost) and raw_max_loss < 0:
+        max_loss = f"{round(raw_max_loss, 2)} (100% loss)"
     else:
-        return 0  # Invalid option type
+        max_loss = round(raw_max_loss, 2)
 
-    # Calculate P&L with lot size multiplication
-    pnl = (intrinsic_value - position.entry_price) * (position.lots * LOT_SIZE)
+    # Breakeven points
+        # Breakeven points - Improved logic to detect zero-crossings robustly
+    payoff_diff = np.diff(np.sign(total_payoff))
+    zero_cross_indices = np.where(payoff_diff != 0)[0]
 
-    return pnl
+    # Interpolate the breakeven points between the two points that cross zero
+    breakeven_raw = []
+    for i in zero_cross_indices:
+        x1, x2 = price_range[i], price_range[i+1]
+        y1, y2 = total_payoff[i], total_payoff[i+1]
+        if y2 - y1 == 0:
+            continue  # Avoid division by zero
+        x_breakeven = x1 - y1 * (x2 - x1) / (y2 - y1)
+        breakeven_raw.append(x_breakeven)
 
-# ✅ Payoff Calculation API
-@app.post("/calculate_payoff")
-def calculate_payoff(positions: List[StrategyPosition], spot_price: float):
+    # Clean up breakeven points with clustering
+    def cluster_points(points, gap=0.75):
+        if not points:
+            return []
+        points.sort()
+        clustered = [[points[0]]]
+        for p in points[1:]:
+            if abs(p - clustered[-1][-1]) <= gap:
+                clustered[-1].append(p)
+            else:
+                clustered.append([p])
+        return [round(np.mean(group), 2) for group in clustered]
+
+    breakeven_points = cluster_points(breakeven_raw)
+
+
+    # Reward-to-risk
+    try:
+        if isinstance(max_profit, str) or isinstance(max_loss, str):
+            reward_to_risk = "∞" if max_profit == "∞" and max_loss != "-∞" else 0
+        elif raw_max_loss == 0:
+            reward_to_risk = "∞"
+        else:
+            reward_to_risk = round(raw_max_profit / abs(raw_max_loss), 2)
+    except:
+        reward_to_risk = "N/A"
+
+    return {
+        "spot_price": round(spot_price, 2),
+        "lot_size": asset_lot_size,
+        "max_profit": max_profit,
+        "max_loss": max_loss,
+        "breakeven_points": breakeven_points,
+        "reward_to_risk_ratio": reward_to_risk,
+        "total_option_price": round(total_option_cost, 2),
+        "cost_breakdown": breakdowns
+    }
+
+
+
+
+
+
+def calculate_option_greeks(strategy_data, asset, interest_rate=0.06588):
     """
-    Generates a payoff chart for the given strategy positions.
-    - Evaluates across a ±10% price range.
-    - Aggregates P&L across multiple positions.
+    Calculate option Greeks for a given strategy.
+
+    Parameters:
+    - strategy_data: list of dicts containing strategy legs
+    - spot_price: current underlying asset price (S)
+    - interest_rate: annualized risk-free rate (r)
+
+    Returns:
+    - List of dictionaries, each with delta, gamma, theta, vega, and rho
     """
-    price_range = np.linspace(spot_price * 0.9, spot_price * 1.1, 50)  # ±10% range, 50 steps
-    payoff_data = []
+    greeks_list = []
 
-    for price in price_range:
-        total_pnl = sum(calculate_option_pnl(pos, price) for pos in positions)
-        payoff_data.append({"underlying_price": round(price, 2), "pnl": round(total_pnl, 2)})
+    option = get_cached_option(asset)  # Live feed
+    spot_price = option["records"]["underlyingValue"]
+    for option in strategy_data:
+        try:
+            S = float(spot_price)                            # Spot price
+            K = float(option['strike'])                      # Strike price
+            T = float(option['days_to_expiry']) / 365.0      # Time to expiry in years
+            r = float(interest_rate)                         # Risk-free rate
+            sigma = float(option['iv'])                      # Implied volatility (as a decimal)
+            flag = option['op_type'].lower()                 # 'c' or 'p'
+            lot = int(option['lot'])                         # Number of lots
+            tr_type = option['tr_type'].lower()              # 'b' or 's'
 
-    return {"payoff_chart": payoff_data}
+            # Compute Greeks
+            d = delta(flag, S, K, T, r, sigma)
+            g = gamma(flag, S, K, T, r, sigma)
+            t = theta(flag, S, K, T, r, sigma)
+            v = vega(flag, S, K, T, r, sigma)
+            rh = rho(flag, S, K, T, r, sigma)
+
+            # Invert for short (sell) positions
+            if tr_type == 's':
+                d *= -1
+                g *= -1
+                t *= -1
+                v *= -1
+                rh *= -1
+
+            # Append result
+            greeks_list.append({
+                'option': option,
+                'delta': d * lot,
+                'gamma': g * lot,
+                'theta': t * lot,
+                'vega': v * lot,
+                'rho': rh * lot
+            })
+
+        except Exception as e:
+            logging.warning(f"Skipping Greek calculation for option due to error: {e}")
+            continue
+
+    return greeks_list
+
+
+
+def sanitize_strategy_item(item):
+    try:
+        required_keys = ['option_type', 'strike_price', 'tr_type', 'option_price', 'expiry_date']
+        if not all(key in item for key in required_keys):
+            print("Missing required strategy keys.")
+            return None
+
+        option_type = item['option_type'].strip().upper()
+        if option_type not in ['CE', 'PE']:
+            print("Invalid option_type. Must be 'CE' or 'PE'.")
+            return None
+
+        tr_type = item['tr_type'].strip().lower()
+        if tr_type not in ['b', 's']:
+            print("Invalid tr_type. Must be 'b' or 's'.")
+            return None
+
+        strike_price = float(item['strike_price'])
+        option_price = float(item['option_price'])
+
+        # Convert expiry_date string to datetime.date
+        expiry_date = datetime.strptime(item['expiry_date'], "%Y-%m-%d").date()
+
+        # Optional lot size, defaults to 1
+        lots = int(item["lots"])
+
+        return {
+            "option_type": option_type,
+            "strike_price": strike_price,
+            "tr_type": tr_type,
+            "option_price": option_price,
+            "expiry_date": expiry_date,
+            "lots": lots
+        }
+
+    except Exception as e:
+        print(f"Error sanitizing strategy item: {e}")
+        return None
+
+
+def sanitize_json_floats(data):
+    if isinstance(data, dict):
+        return {k: sanitize_json_floats(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [sanitize_json_floats(i) for i in data]
+    elif isinstance(data, float):
+        if math.isnan(data) or math.isinf(data):
+            return 0.0
+        return float(data)
+    else:
+        return data
+
+
+
+
+
+@app.post("/get_payoff_chart")
+async def get_payoff_chart(request: PayoffRequest):
+    try:
+        print(f"--- Received request for asset: {request.asset} ---")
+        print(f"--- Raw strategy data: {request.strategy} ---")
+
+        lot_size = get_lot_size(request.asset)
+        option = get_cached_option(request.asset)
+        spot_price = option["records"]["underlyingValue"]
+        print(f"Calculated spot price: {spot_price}")
+        
+        strategy_data = []
+        strikes = []
+
+        for item in request.strategy:
+            print(f"Processing leg: {item}")
+            sanitized = sanitize_strategy_item(item)
+            if not sanitized:
+                print("Skipping leg due to sanitization failure.")
+                continue
+        
+            strike = sanitized["strike_price"]
+            option_type = sanitized["option_type"]
+            tr_type = sanitized["tr_type"]
+            op_pr = sanitized["option_price"]
+            expiry_date = sanitized["expiry_date"]
+            lots = sanitized["lots"]
+        
+            days_to_expiry = (expiry_date - datetime.now().date()).days
+        
+            iv = extract_iv(request.asset, strike, expiry_date.strftime("%Y-%m-%d"), option_type)
+            print(f"IV for strike {strike}, type {option_type}: {iv}")
+            if iv is None:
+                print("Skipping leg due to missing IV.")
+                continue
+        
+            strategy_leg = {
+                "op_type": "p" if option_type.upper() == "PE" else "c",
+                "strike": strike,
+                "tr_type": tr_type,
+                "op_pr": op_pr,
+                "lot": abs(lots),
+                "lot_size": lot_size,
+                "iv": max(iv, 1e-6),
+                "days_to_expiry": days_to_expiry
+            }
+        
+            strategy_data.append(strategy_leg)
+            strikes.append(strike)
+
+        print(f"--- Final strategy data used for processing: {strategy_data} ---")
+
+        if not strategy_data:
+            print("No valid strategy legs with IV found.")
+            return JSONResponse(status_code=400, content={"detail": "No valid strategy legs with IV found."})
+
+        img_base64 = generate_payoff_chart(strategy_data, request.asset)
+        if img_base64:
+            print("Payoff chart generated successfully.")
+
+            # Pass spot_price to all functions that may need it
+            metrics = calculate_strategy_metrics(strategy_data, asset=request.asset)
+            print(f"Calculated metrics: {metrics}")
+            
+            tax = calculate_option_taxes(strategy_data, asset=request.asset)
+            print(f"Calculated taxes: {tax}")
+            
+            greeks = calculate_option_greeks(strategy_data, asset=request.asset, interest_rate = 0.06588)
+            print(f"Calculated greeks: {greeks}")
+            
+            response_data = {
+                "image": img_base64,
+                "success": True,
+                "metrics": metrics,
+                "tax": tax,
+                "greeks": greeks
+            }
+
+            return sanitize_json_floats(response_data)
+
+        else:
+            print("Error generating payoff chart.")
+            return JSONResponse(status_code=500, content={"detail": "Error generating chart."})
+
+    except Exception as e:
+        print(f"Unhandled error in get_payoff_chart: {e}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"detail": str(e)})
+
+
+
+
+
+
+
+
+
 
 
 
