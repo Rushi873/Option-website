@@ -9,7 +9,7 @@ python-dotenv==1.0.1
 yfinance==0.2.37
 bs4==0.0.2
 beautifulsoup4==4.12.3
-jugaad-data==0.2.7
+jugaad-data==0.27
 opstrat==1.2.5
 google-generativeai==0.5.4
 mibian==0.3.4
