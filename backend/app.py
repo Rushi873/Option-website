@@ -12,7 +12,7 @@ import uvicorn
 from jugaad_data.nse import NSELive
 from datetime import datetime, date
 from typing import List, Dict
-import QuantLib as ql
+#import QuantLib as ql
 import mibian
 import os
 import base64
