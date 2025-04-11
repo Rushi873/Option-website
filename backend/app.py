@@ -7,13 +7,13 @@ from database import get_db_connection
 from fetch_data import update_option_data
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+import uvicorn
 #from nsepython import *
 from jugaad_data.nse import NSELive
 from datetime import datetime, date
 from typing import List, Dict
-from py_vollib.black_scholes.greeks.analytical import delta, gamma, theta, vega, rho
-from py_vollib.black_scholes import black_scholes
-from py_vollib.black_scholes.implied_volatility import implied_volatility
+import QuantLib as ql
+import mibian
 import os
 import base64
 import io
@@ -34,18 +34,37 @@ load_dotenv()
 app = FastAPI()
 n = NSELive()
 
-# ✅ Logging Setup
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-# ✅ Enable CORS for frontend (Port 8080)
+# FOR LOCAL HOSTING
+# # ✅ Enable CORS for frontend (Port 8080)
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=["http://127.0.0.1:8080"],  
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
+
+
+# Change from here to 
+# ✅ Serve static files
+app.mount("/", StaticFiles(directory="../frontend", html=True), name="static")
+
+# ✅ CORS setup — allow frontend to call backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:8080"],  
+    allow_origins=["*"],  # You can narrow this to your frontend domain later
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# and finish
+
+
+
+# ✅ Logging Setup
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ✅ Track Selected Asset, # Global cache
 selected_asset = None
@@ -611,7 +630,6 @@ def calculate_strategy_metrics(strategy_data, asset):
     Returns:
         dict: Strategy P&L metrics.
     """
-
     option = get_cached_option(asset)
     spot_price = option["records"]["underlyingValue"]
     asset_lot_size = strategy_data[0].get('lot_size', 1)  # Assume same across legs for display
@@ -682,16 +700,15 @@ def calculate_strategy_metrics(strategy_data, asset):
     else:
         max_loss = round(raw_max_loss, 2)
 
-    # Breakeven points
-        # Breakeven points - Improved logic to detect zero-crossings robustly
+    # Breakeven points - Improved logic to detect zero-crossings robustly
     payoff_diff = np.diff(np.sign(total_payoff))
     zero_cross_indices = np.where(payoff_diff != 0)[0]
 
     # Interpolate the breakeven points between the two points that cross zero
     breakeven_raw = []
     for i in zero_cross_indices:
-        x1, x2 = price_range[i], price_range[i+1]
-        y1, y2 = total_payoff[i], total_payoff[i+1]
+        x1, x2 = price_range[i], price_range[i + 1]
+        y1, y2 = total_payoff[i], total_payoff[i + 1]
         if y2 - y1 == 0:
             continue  # Avoid division by zero
         x_breakeven = x1 - y1 * (x2 - x1) / (y2 - y1)
@@ -712,15 +729,36 @@ def calculate_strategy_metrics(strategy_data, asset):
 
     breakeven_points = cluster_points(breakeven_raw)
 
-
-    # Reward-to-risk
+    # Reward to Risk Ratio Handling
     try:
-        if isinstance(max_profit, str) or isinstance(max_loss, str):
-            reward_to_risk = "∞" if max_profit == "∞" and max_loss != "-∞" else 0
-        elif raw_max_loss == 0:
+        if isinstance(raw_max_profit, str):
+            raw_max_profit = raw_max_profit.replace("₹", "").replace(",", "").strip()
+            if raw_max_profit in ["∞", "-∞"]:
+                max_profit = raw_max_profit
+            else:
+                max_profit = float(raw_max_profit)
+        else:
+            max_profit = raw_max_profit
+
+        if isinstance(raw_max_loss, str):
+            raw_max_loss = raw_max_loss.replace("₹", "").replace(",", "").strip()
+            if raw_max_loss in ["∞", "-∞"]:
+                max_loss = raw_max_loss
+            else:
+                max_loss = float(raw_max_loss)
+        else:
+            max_loss = raw_max_loss
+
+        # Reward to Risk Calculation
+        if max_profit == "∞" and max_loss not in ["-∞", None]:
+            reward_to_risk = "∞"
+        elif max_profit in [None, ""] or max_loss in [None, ""]:
+            reward_to_risk = "N/A"
+        elif max_loss == 0:
             reward_to_risk = "∞"
         else:
-            reward_to_risk = round(raw_max_profit / abs(raw_max_loss), 2)
+            reward_to_risk = round(max_profit / abs(max_loss), 2)
+
     except:
         reward_to_risk = "N/A"
 
@@ -737,66 +775,71 @@ def calculate_strategy_metrics(strategy_data, asset):
 
 
 
-
-
-
-def calculate_option_greeks(strategy_data, asset, interest_rate=0.06588):
+def calculate_option_greeks(strategy_data, asset, interest_rate=6.588):
     """
-    Calculate option Greeks for a given strategy.
-
-    Parameters:
-    - strategy_data: list of dicts containing strategy legs
-    - spot_price: current underlying asset price (S)
-    - interest_rate: annualized risk-free rate (r)
-
-    Returns:
-    - List of dictionaries, each with delta, gamma, theta, vega, and rho
+    Calculate option Greeks using mibian.BS model.
+    Each Greek is scaled by 100 (no lot or lot_size used).
     """
+
     greeks_list = []
 
-    option = get_cached_option(asset)  # Live feed
-    spot_price = option["records"]["underlyingValue"]
+    # Live spot
+    option_data = get_cached_option(asset)
+    spot_price = float(option_data["records"]["underlyingValue"])
+
     for option in strategy_data:
         try:
-            S = float(spot_price)                            # Spot price
-            K = float(option['strike'])                      # Strike price
-            T = float(option['days_to_expiry']) / 365.0      # Time to expiry in years
-            r = float(interest_rate)                         # Risk-free rate
-            sigma = float(option['iv'])                      # Implied volatility (as a decimal)
-            flag = option['op_type'].lower()                 # 'c' or 'p'
-            lot = int(option['lot'])                         # Number of lots
-            tr_type = option['tr_type'].lower()              # 'b' or 's'
+            S = spot_price
+            K = float(option['strike'])
+            T_days = int(option['days_to_expiry'])
+            sigma = float(option['iv'])               # in %
+            flag = option['op_type'].lower()          # 'c' or 'p'
+            tr_type = option['tr_type'].lower()       # 'b' or 's'
+            lot = int(option['lot'])
+            scale = lot * 100
 
-            # Compute Greeks
-            d = delta(flag, S, K, T, r, sigma)
-            g = gamma(flag, S, K, T, r, sigma)
-            t = theta(flag, S, K, T, r, sigma)
-            v = vega(flag, S, K, T, r, sigma)
-            rh = rho(flag, S, K, T, r, sigma)
+            # Greeks calculation via mibian
+            bs = mibian.BS([S, K, interest_rate, T_days], volatility=sigma)
 
-            # Invert for short (sell) positions
+            if flag == 'c':
+                delta = bs.callDelta
+                theta = bs.callTheta
+                rho = bs.callRho
+            elif flag == 'p':
+                delta = bs.putDelta
+                theta = bs.putTheta
+                rho = bs.putRho
+            else:
+                raise ValueError("Invalid option type (must be 'c' or 'p')")
+
+            gamma = bs.gamma
+            vega = bs.vega
+
+            # Flip sign for sell
             if tr_type == 's':
-                d *= -1
-                g *= -1
-                t *= -1
-                v *= -1
-                rh *= -1
+                delta *= -1
+                gamma *= -1
+                theta *= -1
+                vega *= -1
+                rho *= -1
 
-            # Append result
+            # Multiply each Greek by 100 (Opstra-style scaling)
             greeks_list.append({
                 'option': option,
-                'delta': d * lot,
-                'gamma': g * lot,
-                'theta': t * lot,
-                'vega': v * lot,
-                'rho': rh * lot
+                'delta': round(delta * scale, 2),
+                'gamma': round(gamma * scale, 4),
+                'theta': round(theta * scale, 2),   # Daily decay
+                'vega': round(vega * scale, 2),
+                'rho': round(rho * scale, 2)
             })
 
         except Exception as e:
-            logging.warning(f"Skipping Greek calculation for option due to error: {e}")
+            logging.warning(f"Skipping Greek calc due to error: {e}")
             continue
 
     return greeks_list
+
+
 
 
 
@@ -1034,6 +1077,59 @@ def fetch_latest_news(asset):
         return [{"headline": "No major updates found.", "summary": ""}]
 
 
+        
+def build_stock_analysis_prompt(stock_symbol: str, stock_data: dict, latest_news: list) -> str:
+    news_block = "".join([
+        f"- **Headline:** {news['headline']}\n"
+        f"  - **Summary:** {news['summary']}\n"
+        f"  - **Sentiment:** Assess whether this news is **positive, neutral, or negative**.\n\n"
+        for news in latest_news[:2]
+    ])
+
+    return f"""
+Provide a detailed stock analysis for **{stock_symbol}**, organized in the following sections:
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 **1️⃣ Technical Analysis**
+
+- **Current Price:** ₹{stock_data["current_price"]}
+- **Trading Volume:** {stock_data["volume"]}
+- **50-day & 200-day Moving Averages:** ₹{stock_data["moving_avg_50"]:.2f} | ₹{stock_data["moving_avg_200"]:.2f}
+- **Trend Analysis:** Indicate whether there is a **Golden Cross** (bullish) or **Death Cross** (bearish) using the moving averages.
+- **Support & Resistance:** Identify the **nearest support and resistance** levels using historical price action.
+- **Momentum:** Evaluate the strength of **buying or selling pressure** using volume and price trends.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📉 **2️⃣ Fundamental Analysis**
+
+- **Market Capitalization:** ₹{stock_data["market_cap"]}
+- **P/E Ratio:** {stock_data["pe_ratio"]} (Compare with sector average)
+- **Earnings Per Share (EPS):** ₹{stock_data["eps"]}
+- **Valuation:** Is the stock **undervalued, fairly valued, or overvalued** based on industry comparisons?
+- **Revenue & Profit Trends:** Are revenue and profit **growing, flat, or declining**?
+- **Financial Health:** Evaluate **debt, cash flow, and solvency**.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📰 **3️⃣ Market Sentiment & News**
+
+{news_block}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📈 **4️⃣ Market Outlook & Strategy**
+
+- **Short-Term Trend (1–3 months):** Based on charts and sentiment, where is price likely headed?
+- **Medium-Term View (3–12 months):** Should investors **buy, hold, or sell**?
+- **Key Risks:** Mention external or internal risks to the company.
+- **Suggested Action:** Recommend whether to **buy on dips**, **wait for breakout**, or **exit**.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Write like a professional research analyst. Be specific, avoid generic advice, and structure your analysis in clear paragraphs.
+"""
+
+    
+
+
 # API Endpoint to get stock analysis
 @app.post("/get_stock_analysis")
 def get_stock_analysis(request: StockRequest):
@@ -1044,52 +1140,13 @@ def get_stock_analysis(request: StockRequest):
         raise HTTPException(status_code=404, detail="Stock data not found")
 
     latest_news = fetch_latest_news(request.asset)
+    prompt = build_stock_analysis_prompt(stock_symbol, stock_data, latest_news)
 
-    # ✅ Structured AI Prompt (Forces Detailed Analysis)
-    prompt = f"""
-    Provide a detailed stock analysis for {stock_symbol}, breaking it into the following sections:
-
-    **1️⃣ Technical Analysis:** 
-    - **Current Price:** ₹{stock_data["current_price"]}
-    - **Trading Volume:** {stock_data["volume"]}
-    - **50-day & 200-day Moving Averages:** ₹{stock_data["moving_avg_50"]:.2f} | ₹{stock_data["moving_avg_200"]:.2f}
-    - **Trend Analysis:** Identify if there is a **Golden Cross (bullish)** or **Death Cross (bearish)** based on moving average crossover.
-    - **Support & Resistance Levels:** Identify the **nearest support and resistance levels** based on historical price action.
-    - **Momentum Analysis:** Determine if the stock has **strong buying or selling pressure** based on volume and trend strength.
-
-    **2️⃣ Fundamental Analysis:**  
-    - **Market Capitalization:** ₹{stock_data["market_cap"]}
-    - **P/E Ratio:** {stock_data["pe_ratio"]} (Compare to sector average)
-    - **Earnings Per Share (EPS):** ₹{stock_data["eps"]}
-    - **Valuation Analysis:** Determine whether the stock is **undervalued, fairly valued, or overvalued** based on its P/E ratio and industry comparison.
-    - **Revenue & Profit Trends:** Assess whether the company's **revenue and profit** are **growing, stagnating, or declining**.
-    - **Debt & Financial Stability:** Analyze the company's **debt levels, cash flow, and overall financial health**.
-
-    **4️⃣ Market Sentiment & News:**  
-    - **Latest Headline:** {latest_news[0]["headline"]}
-    - **Summary:** {latest_news[0]["summary"]}
-    - **Sentiment Analysis:** Determine whether the latest news is **positive, neutral, or negative** and its potential impact on stock price.
-
-    - **Latest Headline:** {latest_news[1]["headline"]}
-    - **Summary:** {latest_news[1]["summary"]}
-    - **Sentiment Analysis:** Determine whether the latest news is **positive, neutral, or negative** and its potential impact on stock price.
-
-
-    **5️⃣ Market Outlook & Trading Strategy:**  
-    - **Short-Term Trend (1-3 months):** Provide an analysis of expected price movement based on technical indicators and market sentiment.
-    - **Medium-Term Trend (3-12 months):** Identify whether the stock is a **buy, hold, or sell** based on valuation, industry trends, and competitor performance.
-    - **Risk Factors:** Highlight any risks that could **impact future stock performance**.
-    - **Action Plan:** Recommend whether investors should **buy on dips, wait for confirmation, or exit the stock**.
-
-    Provide a professional and insightful analysis rather than generic responses. You should not add a date in the heading.
-    """
-
-
-    # Fetch AI response
     model = genai.GenerativeModel("gemini-1.5-pro")
     response = model.generate_content(prompt)
 
     return {"analysis": response.text}
+
 
 
 
@@ -1113,7 +1170,14 @@ def live_update():
 # ✅ Start background thread
 threading.Thread(target=live_update, daemon=True).start()
 
+# FOR LOCAL HOSTING
+# if __name__ == "__main__":
+#     import uvicorn
+#     uvicorn.run(app, host="127.0.0.1", port=8000)
+    
+
+# ✅ Entry point
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
