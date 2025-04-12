@@ -26,6 +26,7 @@ import yfinance as yf
 import google.generativeai as genai
 import opstrat
 import requests
+from collections import defaultdict
 import numpy as np
 from scipy.stats import norm
 import math
@@ -98,85 +99,200 @@ def update_selected_asset(asset: str):
     selected_asset = asset
     logger.info(f"User selected asset: {asset}")
 
-    # ✅ Fetch new option chain data for selected asset and store it in MySQL
-    update_asset_data(asset)
-
-    return {"message": f"Selected asset updated to {asset}"}
-
-
-def update_asset_data(asset):
     try:
-        logger.info(f"Fetching new data for {asset}...")
+        # Fetch new option chain data for selected asset and store it in MySQL
+        update_asset_data(asset)
+        return {"message": f"Selected asset updated to {asset} and data refreshed."}
+    except Exception as e:
+        # Log the specific error during the update process
+        logger.error(f"❌ Failed to update data for asset {asset}: {str(e)}")
+        # Return an error response to the client
+        # Depending on your framework, you might raise an HTTPException (FastAPI)
+        # or return a specific error JSON with a status code (Flask)
+        return {"error": f"Failed to update data for asset {asset}. See server logs for details."}, 500
 
-        option = get_cached_option(asset)
-        spot_price = option["records"]["underlyingValue"]
-        option_data = option["records"]["data"]
+
+def update_asset_data(asset_name: str):
+    """
+    Fetches option data for the given asset, deletes old data,
+    and inserts the new data efficiently using batch operations.
+    """
+    conn = None # Initialize conn to None for finally block
+    cursor = None # Initialize cursor to None for finally block
+    try:
+        logger.info(f"Fetching new data for {asset_name}...")
+        option_source_data = get_cached_option(asset_name) # Renamed for clarity
+        # Consider adding error handling if get_cached_option fails or returns unexpected data
+        if not option_source_data or "records" not in option_source_data or "data" not in option_source_data["records"]:
+             logger.error(f"❌ Received invalid data structure from get_cached_option for {asset_name}")
+             raise ValueError(f"Invalid data structure received for {asset_name}")
+
+        # spot_price = option_source_data["records"]["underlyingValue"] # Not used in DB ops, keep if needed elsewhere
+        option_data_list = option_source_data["records"]["data"] # Renamed for clarity
+
+        if not option_data_list:
+            logger.warning(f"No option data found for {asset_name} in the fetched source. Clearing existing data.")
+            # Decide if you still want to delete old data if the new fetch is empty
+            # The code below will proceed to delete, which might be desired.
 
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # ✅ Delete old data for this asset before inserting new
-        cursor.execute("DELETE FROM option_data.option_chain WHERE asset_id = (SELECT id FROM option_data.assets WHERE asset_name = %s)", (asset,))
-        cursor.execute("DELETE FROM option_data.expiries WHERE asset_id = (SELECT id FROM option_data.assets WHERE asset_name = %s)", (asset,))
+        # --- Optimization 1: Fetch asset_id ONCE ---
+        cursor.execute("SELECT id FROM option_data.assets WHERE asset_name = %s", (asset_name,))
+        result = cursor.fetchone()
+        if not result:
+            logger.error(f"❌ Asset '{asset_name}' not found in option_data.assets table.")
+            # Depending on requirements, you might want to INSERT the asset here or raise an error
+            raise ValueError(f"Asset '{asset_name}' not found in database.")
+        asset_id = result[0]
+        logger.info(f"Found asset_id: {asset_id} for asset_name: {asset_name}")
 
-        # ✅ Insert Expiry Dates (Convert to YYYY-MM-DD format)
-        expiry_dates = set()
-        for item in option_data:
-            raw_expiry = item["expiryDate"]
-            formatted_expiry = datetime.strptime(raw_expiry, "%d-%b-%Y").strftime("%Y-%m-%d")
-            expiry_dates.add(formatted_expiry)
+        # --- Optimization 2: Use asset_id directly in DELETE ---
+        # Wrap deletes in a transaction implicitly handled by commit() later
+        logger.info(f"Deleting old option chain data for asset_id: {asset_id}")
+        cursor.execute("DELETE FROM option_data.option_chain WHERE asset_id = %s", (asset_id,))
+        logger.info(f"Deleting old expiry data for asset_id: {asset_id}")
+        cursor.execute("DELETE FROM option_data.expiries WHERE asset_id = %s", (asset_id,))
 
-        for expiry in expiry_dates:
+        if not option_data_list:
+            # If there's no new data, commit the deletes and we're done for this asset.
+            conn.commit()
+            logger.info(f"✅ Cleared stale data for asset {asset_name} (asset_id: {asset_id}) as no new data was fetched.")
+            return # Exit the function early
+
+        # --- Process Expiry Dates ---
+        expiry_dates_formatted = set()
+        for item in option_data_list:
+            # Add validation for expiryDate format if needed
+            try:
+                raw_expiry = item["expiryDate"]
+                formatted_expiry = datetime.strptime(raw_expiry, "%d-%b-%Y").strftime("%Y-%m-%d")
+                expiry_dates_formatted.add(formatted_expiry)
+            except (KeyError, ValueError) as e:
+                 logger.warning(f"Skipping item due to invalid expiryDate '{item.get('expiryDate')}': {e}")
+                 continue # Skip this item if expiry date is bad
+
+        # --- Optimization 3: Batch Insert Expiries ---
+        if expiry_dates_formatted:
+            expiry_data_to_insert = [(asset_id, expiry) for expiry in sorted(list(expiry_dates_formatted))] # Sort for deterministic order (optional)
+            logger.info(f"Batch inserting {len(expiry_data_to_insert)} expiry dates for asset_id: {asset_id}")
+            try:
+                # Use executemany for batch insertion
+                cursor.executemany("""
+                    INSERT INTO option_data.expiries (asset_id, expiry_date)
+                    VALUES (%s, %s)
+                """, expiry_data_to_insert)
+            except conn.IntegrityError as e:
+                 # This might happen if an expiry date for this asset already exists
+                 # (e.g., if DELETE failed or if there's a unique constraint)
+                 # Decide how to handle: log and continue? Rollback?
+                 logger.warning(f"Integrity error inserting expiries (maybe duplicates?): {e}. Check data or constraints.")
+                 # Depending on needs, you might want to fetch existing ones instead of failing.
+                 # For now, we assume DELETE worked and these are genuinely new or being replaced.
+
+        # --- Optimization 4: Fetch expiry_ids ONCE after insert ---
+        expiry_id_map = {}
+        if expiry_dates_formatted: # Only query if we attempted to insert expiries
             cursor.execute("""
-                INSERT INTO option_data.expiries (asset_id, expiry_date)
-                VALUES ((SELECT id FROM option_data.assets WHERE asset_name = %s), %s)
-            """, (asset, expiry))
+                SELECT id, expiry_date FROM option_data.expiries
+                WHERE asset_id = %s AND expiry_date IN %s
+            """, (asset_id, tuple(expiry_dates_formatted))) # Query only the relevant dates
+            
+            # Note: cursor.fetchall() returns tuples where date might be datetime.date object
+            # Ensure the key format matches how you'll look it up later.
+            for row in cursor.fetchall():
+                expiry_id = row[0]
+                expiry_date_obj = row[1] # This is likely a date object from DB
+                expiry_date_str = expiry_date_obj.strftime("%Y-%m-%d") # Format consistently
+                expiry_id_map[expiry_date_str] = expiry_id
+            logger.info(f"Fetched {len(expiry_id_map)} expiry IDs for asset_id: {asset_id}")
 
-        # ✅ Insert Option Chain Data (Ensure all required fields have values)
-        for option in option_data:
-            strike_price = option["strikePrice"]
-            raw_expiry = option["expiryDate"]
-            expiry_date = datetime.strptime(raw_expiry, "%d-%b-%Y").strftime("%Y-%m-%d")
 
-            for option_type in ["CE", "PE"]:
-                if option_type in option:
-                    opt = option[option_type]
+        # --- Prepare Option Chain Data for Batch Insert ---
+        option_chain_data_to_insert = []
+        for item in option_data_list:
+            try:
+                strike_price = item["strikePrice"]
+                raw_expiry = item["expiryDate"]
+                expiry_date_str = datetime.strptime(raw_expiry, "%d-%b-%Y").strftime("%Y-%m-%d")
 
-                    # ✅ Ensure all required fields have values (defaults if missing)
-                    identifier = opt.get("identifier", f"{asset}_{expiry_date}_{strike_price}_{option_type}")
-                    open_interest = opt.get("openInterest", 0)
-                    change_in_oi = opt.get("changeinOpenInterest", 0)
-                    total_traded_volume = opt.get("totalTradedVolume", 0)
-                    implied_volatility = opt.get("impliedVolatility", 0)
-                    last_price = opt.get("lastPrice", 0)
-                    bid_qty = opt.get("bidQty", 0)
-                    bid_price = opt.get("bidprice", 0)
-                    ask_qty = opt.get("askQty", 0)
-                    ask_price = opt.get("askPrice", 0)
-                    total_buy_qty = opt.get("totalBuyQuantity", 0)
-                    total_sell_qty = opt.get("totalSellQuantity", 0)
+                # --- Optimization 5: Use the pre-fetched expiry_id ---
+                expiry_id = expiry_id_map.get(expiry_date_str)
+                if expiry_id is None:
+                    # This shouldn't happen if insertion and fetching worked, but good to check
+                    logger.warning(f"Could not find expiry_id for date {expiry_date_str} and asset_id {asset_id}. Skipping option chain data for this expiry.")
+                    continue
 
-                    cursor.execute("""
-                        INSERT INTO option_data.option_chain 
-                        (asset_id, expiry_id, strike_price, option_type, identifier, open_interest, change_in_oi, total_traded_volume, 
-                        implied_volatility, last_price, bid_qty, bid_price, ask_qty, ask_price, total_buy_qty, total_sell_qty) 
-                        VALUES (
-                            (SELECT id FROM option_data.assets WHERE asset_name = %s),
-                            (SELECT id FROM option_data.expiries WHERE asset_id = (SELECT id FROM option_data.assets WHERE asset_name = %s) AND expiry_date = %s),
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                for option_type in ["CE", "PE"]:
+                    if option_type in item:
+                        opt = item[option_type]
+
+                        # Use .get() with defaults safely
+                        data_row = (
+                            asset_id,
+                            expiry_id,
+                            strike_price,
+                            option_type,
+                            opt.get("identifier", f"{asset_name}_{expiry_date_str}_{strike_price}_{option_type}"), # Default identifier if missing
+                            opt.get("openInterest", 0),
+                            opt.get("changeinOpenInterest", 0),
+                            opt.get("totalTradedVolume", 0),
+                            opt.get("impliedVolatility", 0.0), # Use float default
+                            opt.get("lastPrice", 0.0), # Use float default
+                            opt.get("bidQty", 0),
+                            opt.get("bidprice", 0.0), # Use float default
+                            opt.get("askQty", 0),
+                            opt.get("askPrice", 0.0), # Use float default
+                            opt.get("totalBuyQuantity", 0),
+                            opt.get("totalSellQuantity", 0)
                         )
-                    """, (asset, asset, expiry_date, strike_price, option_type, identifier, 
-                          open_interest, change_in_oi, total_traded_volume, implied_volatility, last_price, 
-                          bid_qty, bid_price, ask_qty, ask_price, total_buy_qty, total_sell_qty))
+                        option_chain_data_to_insert.append(data_row)
 
+            except KeyError as e:
+                logger.warning(f"Skipping item due to missing key {e} in option data: {item}")
+                continue
+            except ValueError as e: # Catch potential date parsing errors again if needed
+                 logger.warning(f"Skipping item due to value error (e.g., date format) '{e}' in option data: {item}")
+                 continue
+
+        # --- Optimization 6: Batch Insert Option Chain Data ---
+        if option_chain_data_to_insert:
+            logger.info(f"Batch inserting {len(option_chain_data_to_insert)} option chain rows for asset_id: {asset_id}")
+            insert_sql = """
+                INSERT INTO option_data.option_chain
+                (asset_id, expiry_id, strike_price, option_type, identifier, open_interest, change_in_oi, total_traded_volume,
+                implied_volatility, last_price, bid_qty, bid_price, ask_qty, ask_price, total_buy_qty, total_sell_qty)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            # Use executemany for batch insertion
+            cursor.executemany(insert_sql, option_chain_data_to_insert)
+        else:
+             logger.info(f"No valid option chain data prepared for insertion for asset_id: {asset_id}")
+
+        # --- Commit Transaction ---
         conn.commit()
-        cursor.close()
-        conn.close()
-
-        logger.info(f"✅ Updated MySQL data for asset: {asset}")
+        logger.info(f"✅ Successfully updated data for asset: {asset_name} (asset_id: {asset_id})")
 
     except Exception as e:
-        logger.error(f"❌ Error fetching and storing data for {asset}: {str(e)}")
+        logger.error(f"❌ Error updating data for asset {asset_name}: {str(e)}", exc_info=True) # Log traceback
+        if conn:
+            # Rollback transaction on any error during the process
+            try:
+                conn.rollback()
+                logger.info(f"Rolled back transaction for asset {asset_name} due to error.")
+            except Exception as rb_e:
+                 logger.error(f"❌ Failed to rollback transaction for asset {asset_name}: {rb_e}")
+        # Re-raise the exception so the caller (@app.post route) knows about it
+        raise e
+
+    finally:
+        # --- Ensure resources are closed ---
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+        logger.info(f"Database connection closed for asset {asset_name} update process.")
 
 
 
@@ -185,49 +301,90 @@ def update_asset_data(asset):
 # ✅ Fetch Available Assets, and remove expiry dates, that are expired
 @app.get("/get_assets")
 def get_assets():
-    today = datetime.today().strftime("%Y-%m-%d")
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    """
+    Cleans up expired option data across all assets and then returns
+    the list of current asset names.
+    """
+    today_str = datetime.today().strftime("%Y-%m-%d")
+    conn = None
+    cursor = None
+    deleted_options_count = 0
+    deleted_expiries_count = 0
 
     try:
-        cursor.execute("SELECT asset_name, id FROM option_data.assets")  
-        assets = cursor.fetchall()
-    
-        if not assets:
-            raise HTTPException(status_code=404, detail="No assets found")
-    
-        for asset in assets:
-            asset_name = asset["asset_name"]
-            asset_id = asset["id"]
-    
-            # Step 1: Get expired expiry IDs first (avoids subquery locks)
-            cursor.execute("""
-                SELECT id FROM option_data.expiries
-                WHERE expiry_date < %s AND asset_id = %s
-            """, (today, asset_id))
-    
-            expired_expiry_ids = [row["id"] for row in cursor.fetchall()]
-    
-            if expired_expiry_ids:
-                # Step 2: Delete from option_chain using WHERE IN
-                format_ids = ','.join(['%s'] * len(expired_expiry_ids))
-                query_chain = f"DELETE FROM option_data.option_chain WHERE expiry_id IN ({format_ids})"
-                cursor.execute(query_chain, expired_expiry_ids)
-    
-                # Step 3: Delete from expiries
-                query_expiries = f"DELETE FROM option_data.expiries WHERE id IN ({format_ids})"
-                cursor.execute(query_expiries, expired_expiry_ids)
-    
-            conn.commit()
-            return {"assets": [a["asset_name"] for a in assets]}
-    
+        conn = get_db_connection()
+        # Use dictionary=True if you need column names later, but we might not need it
+        # cursor = conn.cursor(dictionary=True)
+        cursor = conn.cursor() # Standard cursor is fine if just fetching names
+
+        logger.info(f"Starting cleanup for expiry dates before: {today_str}")
+
+        # --- Optimization 1: Bulk Delete Expired Option Chain Data ---
+        # Use a JOIN to efficiently find and delete option_chain rows linked
+        # to expired expiries. This is generally faster than `WHERE IN (subquery)`.
+        # MySQL syntax for DELETE with JOIN:
+        delete_options_sql = """
+            DELETE oc
+            FROM option_data.option_chain oc
+            JOIN option_data.expiries e ON oc.expiry_id = e.id
+            WHERE e.expiry_date < %s
+        """
+        cursor.execute(delete_options_sql, (today_str,))
+        deleted_options_count = cursor.rowcount # Get the number of deleted rows
+        logger.info(f"Deleted {deleted_options_count} rows from option_chain with expiry_date < {today_str}")
+
+        # --- Optimization 2: Bulk Delete Expired Expiries ---
+        # Now delete the expired rows from the expiries table itself.
+        delete_expiries_sql = """
+            DELETE FROM option_data.expiries
+            WHERE expiry_date < %s
+        """
+        cursor.execute(delete_expiries_sql, (today_str,))
+        deleted_expiries_count = cursor.rowcount # Get the number of deleted rows
+        logger.info(f"Deleted {deleted_expiries_count} rows from expiries with expiry_date < {today_str}")
+
+        # --- Commit the cleanup transaction ---
+        # Both deletes are now part of one atomic operation
+        conn.commit()
+        logger.info("Cleanup transaction committed successfully.")
+
+        # --- Fetch Asset Names (Only after successful cleanup) ---
+        # Now fetch the asset names. We don't need IDs anymore for the cleanup.
+        # Using dictionary=True here if the caller absolutely needs dicts,
+        # but fetching just the names is more efficient if that's all you return.
+        cursor.execute("SELECT asset_name FROM option_data.assets ORDER BY asset_name") # Added ORDER BY for consistency
+        # fetchall() returns a list of tuples, e.g., [('ASSET1',), ('ASSET2',)]
+        assets_tuples = cursor.fetchall()
+
+        if not assets_tuples:
+            # It's possible there are no assets, which isn't necessarily an error
+            logger.warning("No assets found in the assets table after cleanup.")
+            return {"assets": []} # Return empty list, not 404
+
+        # Extract just the names from the tuples
+        asset_names = [row[0] for row in assets_tuples]
+
+        return {"assets": asset_names}
+
     except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Error cleaning data: {str(e)}")
-    
+        logger.error(f"❌ Error during asset cleanup or fetch: {str(e)}", exc_info=True)
+        if conn:
+            # Rollback any partial changes from the failed transaction
+            try:
+                conn.rollback()
+                logger.info("Transaction rolled back due to error.")
+            except Exception as rb_e:
+                 logger.error(f"❌ Failed to rollback transaction: {rb_e}")
+        # Raise HTTPException to return a proper error response to the client
+        raise HTTPException(status_code=500, detail=f"Internal server error during data processing: {str(e)}")
+
     finally:
-        cursor.close()
-        conn.close()
+        # --- Ensure resources are closed ---
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+        logger.info("Asset fetch/cleanup: Database connection closed.")
 
 
 # ✅ Fetch Unique Expiry Dates (from MySQL)
@@ -256,68 +413,132 @@ def get_expiry_dates(asset: str = Query(...)):
 
 # ✅ Fetch Option Chain (from MySQL)
 @app.get("/get_option_chain")
-def get_option_chain(asset: str = Query(...), expiry: str = Query(...)):
-    update_asset_data(asset)
-    
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute("""
-        SELECT 
-            oc.strike_price,
-            oc.option_type,
-            oc.open_interest,
-            oc.change_in_oi,
-            oc.implied_volatility,
-            oc.last_price
-        FROM option_data.option_chain AS oc
-        JOIN option_data.assets AS a ON oc.asset_id = a.id
-        JOIN option_data.expiries AS e ON oc.expiry_id = e.id
-        WHERE a.asset_name = %s AND e.expiry_date = %s
-        ORDER BY oc.strike_price ASC
-    """, (asset, expiry))
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
+def get_option_chain(asset: str = Query(..., description="Asset name (e.g., NIFTY)"),
+                       expiry: str = Query(..., description="Expiry date in YYYY-MM-DD format")):
+    """
+    Retrieves the option chain (calls and puts) for a specific asset and expiry date.
+    NOTE: Data is read from the last known state in the database.
+          Data freshness depends on a separate background update process.
+    """
+    # --- CRITICAL CHANGE: REMOVED update_asset_data(asset) ---
+    # Calling update_asset_data here forces a slow DB write on every read request.
+    # Data should be updated periodically by a background task/scheduler.
+    # logger.info(f"Received request for option chain: Asset={asset}, Expiry={expiry}")
 
-    if not rows:
-        raise HTTPException(status_code=404, detail="No option chain data found.")
+    # --- Optional: Input Validation ---
+    try:
+        # Validate expiry date format to prevent SQL errors / unexpected behaviour
+        datetime.strptime(expiry, '%Y-%m-%d')
+    except ValueError:
+        logger.warning(f"Invalid expiry date format received: {expiry}")
+        raise HTTPException(status_code=400, detail="Invalid expiry date format. Use YYYY-MM-DD.")
 
-    option_chain = {}
-    for row in rows:
-        strike = row["strike_price"]
-        if strike not in option_chain:
-            option_chain[strike] = {"put": {}, "call": {}}
-        if row["option_type"] == "PE":
-            option_chain[strike]["put"] = {
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True) # Keep dictionary=True for easy access by column name
+
+        # --- Database Query (Ensure Indexes!) ---
+        # This query relies heavily on proper indexing for performance.
+        query = """
+            SELECT
+                oc.strike_price,
+                oc.option_type,
+                oc.open_interest,
+                oc.change_in_oi,
+                oc.implied_volatility,
+                oc.last_price
+            FROM option_data.option_chain AS oc
+            JOIN option_data.assets AS a ON oc.asset_id = a.id
+            JOIN option_data.expiries AS e ON oc.expiry_id = e.id
+            WHERE a.asset_name = %s AND e.expiry_date = %s
+            ORDER BY oc.strike_price ASC
+        """
+        # logger.debug(f"Executing query: {query} with params ({asset}, {expiry})")
+        cursor.execute(query, (asset, expiry))
+        rows = cursor.fetchall()
+
+        if not rows:
+            logger.warning(f"No option chain data found for Asset={asset}, Expiry={expiry}")
+            # Return 404 is appropriate here
+            raise HTTPException(status_code=404, detail="No option chain data found for the specified asset and expiry.")
+
+        # --- Data Transformation (Using defaultdict for slight clarity) ---
+        # option_chain = {} # Original approach
+        option_chain = defaultdict(lambda: {"call": {}, "put": {}}) # Using defaultdict
+
+        for row in rows:
+            strike = row["strike_price"]
+            option_type_data = {
                 "open_interest": row["open_interest"],
                 "change_in_oi": row["change_in_oi"],
                 "implied_volatility": row["implied_volatility"],
                 "last_price": row["last_price"]
             }
-        else:
-            option_chain[strike]["call"] = {
-                "open_interest": row["open_interest"],
-                "change_in_oi": row["change_in_oi"],
-                "implied_volatility": row["implied_volatility"],
-                "last_price": row["last_price"]
-            }
-    return {"option_chain": option_chain}
+
+            if row["option_type"] == "PE":
+                option_chain[strike]["put"] = option_type_data
+            elif row["option_type"] == "CE": # Explicitly check for CE
+                option_chain[strike]["call"] = option_type_data
+            # else: handle potential unexpected option_type? Log a warning?
+
+        logger.info(f"Successfully retrieved option chain for Asset={asset}, Expiry={expiry}. Found {len(option_chain)} strikes.")
+        return {"option_chain": dict(option_chain)} # Convert back to regular dict for JSON output if needed
+
+    except HTTPException:
+         # Re-raise HTTPExceptions directly if they occur (like the 404)
+         raise
+    except Exception as e:
+        logger.error(f"❌ Error retrieving option chain for Asset={asset}, Expiry={expiry}: {str(e)}", exc_info=True)
+        # Return a generic 500 error to the client
+        raise HTTPException(status_code=500, detail="Internal server error while retrieving option chain data.")
+
+    finally:
+        # --- Ensure resources are closed ---
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+        # logger.debug("Option chain: Database connection closed.")
 
 
 @app.get("/get_spot_price")
-def get_spot_price(asset: str = Query(...)):
+def get_spot_price(asset: str = Query(..., description="Asset name (e.g., NIFTY)")):
+    """
+    Retrieves the latest cached spot price for the given asset.
+    """
+    # logger.info(f"Received request for spot price: Asset={asset}")
     try:
-        option = get_cached_option(asset)  # ✅ This checks the cache
-        spot_price = option["records"].get("underlyingValue")
+        # Performance depends heavily on the cache implementation
+        option_cache_data = get_cached_option(asset) # Renamed variable for clarity
 
-        if spot_price is None or spot_price == 0:
-            raise HTTPException(status_code=500, detail="Spot price not found.")
+        # More robust check for nested structure existence before accessing
+        if not option_cache_data or "records" not in option_cache_data:
+             logger.error(f"Invalid cache structure for asset {asset}: 'records' key missing.")
+             raise HTTPException(status_code=500, detail="Could not retrieve spot price due to internal data structure issue.")
 
-        return {"spot_price": round(spot_price, 2)}
+        spot_price = option_cache_data["records"].get("underlyingValue") # Safe access
 
+        # Check specifically for None. 0 might be a valid price for some assets or scenarios.
+        if spot_price is None:
+            logger.warning(f"Spot price not found in cached data for asset: {asset}")
+            # Use 404 Not Found if the price is simply missing from the source for this asset
+            raise HTTPException(status_code=404, detail="Spot price not available for the specified asset.")
+            # Or keep 500 if it indicates a bigger data fetching problem upstream. Choose based on semantics.
+
+        # logger.info(f"Successfully retrieved spot price for Asset={asset}: {spot_price}")
+        return {"spot_price": round(spot_price, 2)} # Rounding is fine
+
+    except HTTPException:
+         # Re-raise HTTPExceptions directly
+         raise
     except Exception as e:
-        logger.error(f"Error fetching spot price for {asset}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching spot price: {str(e)}")
+        # Log the detailed error for debugging
+        logger.error(f"❌ Error fetching spot price for {asset} via get_cached_option: {str(e)}", exc_info=True)
+        # Return a generic error to the client
+        raise HTTPException(status_code=500, detail="An error occurred while fetching the spot price.")
+
 
 
 # ✅ Strategy & Position Models
