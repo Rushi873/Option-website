@@ -22,3 +22,4 @@ mysql-connector-python
 bcrypt
 nsepython
 httpserver
+dotenv
