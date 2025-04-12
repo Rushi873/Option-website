@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # ✅ Enable CORS for frontend (Port 80)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:80"],  
+    allow_origins=["http://localhost:80", "http://onrender.com:80"],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
