@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # ✅ Enable CORS for frontend (Port 80)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:80", "https://option-strategy-vaqz.onrender.com", "https://option-strategy.onrender.com"],  
+    allow_origins=["http://localhost", "https://option-strategy-vaqz.onrender.com", "https://option-strategy.onrender.com"],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -190,40 +190,41 @@ def get_assets():
     cursor = conn.cursor(dictionary=True)
 
     try:
-        # ✅ Fetch all assets
-        cursor.execute("SELECT asset_name FROM option_data.assets")  
-        assets = [row["asset_name"] for row in cursor.fetchall()]
-
+        cursor.execute("SELECT asset_name, id FROM option_data.assets")  
+        assets = cursor.fetchall()
+    
         if not assets:
             raise HTTPException(status_code=404, detail="No assets found")
-
-        # ✅ For each asset, clean expired data
+    
         for asset in assets:
-            # Step 1: Delete from option_chain for expired expiries
+            asset_name = asset["asset_name"]
+            asset_id = asset["id"]
+    
+            # Step 1: Get expired expiry IDs first (avoids subquery locks)
             cursor.execute("""
-                DELETE FROM option_data.option_chain 
-                WHERE expiry_id IN (
-                    SELECT id FROM option_data.expiries 
-                    WHERE expiry_date < %s 
-                    AND asset_id = (SELECT id FROM option_data.assets WHERE asset_name = %s)
-                )
-            """, (today, asset))
-
-            # Step 2: Delete expired expiry rows
-            cursor.execute("""
-                DELETE FROM option_data.expiries 
-                WHERE expiry_date < %s 
-                AND asset_id = (SELECT id FROM option_data.assets WHERE asset_name = %s)
-            """, (today, asset))
-
-        conn.commit()
-
-        return {"assets": assets}
+                SELECT id FROM option_data.expiries
+                WHERE expiry_date < %s AND asset_id = %s
+            """, (today, asset_id))
+    
+            expired_expiry_ids = [row["id"] for row in cursor.fetchall()]
+    
+            if expired_expiry_ids:
+                # Step 2: Delete from option_chain using WHERE IN
+                format_ids = ','.join(['%s'] * len(expired_expiry_ids))
+                query_chain = f"DELETE FROM option_data.option_chain WHERE expiry_id IN ({format_ids})"
+                cursor.execute(query_chain, expired_expiry_ids)
+    
+                # Step 3: Delete from expiries
+                query_expiries = f"DELETE FROM option_data.expiries WHERE id IN ({format_ids})"
+                cursor.execute(query_expiries, expired_expiry_ids)
+    
+            conn.commit()
+            return {"assets": [a["asset_name"] for a in assets]}
     
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=f"Error cleaning data: {str(e)}")
-
+    
     finally:
         cursor.close()
         conn.close()
