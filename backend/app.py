@@ -1204,7 +1204,7 @@ async def get_payoff_chart(request: PayoffRequest):
             tr_type = sanitized["tr_type"]
             op_pr = sanitized["option_price"]
             expiry_date = sanitized["expiry_date"]
-            lots = sanitized["lots"]
+            lots = int(sanitized["lots"])
         
             days_to_expiry = (expiry_date - datetime.now().date()).days
         
