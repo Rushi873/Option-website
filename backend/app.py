@@ -1,6 +1,6 @@
 import sys
 from pathlib import Path
-sys.path.append(str(Path(__file__).parent.parent.parent))
+sys.path.append(str(Path(__file__).parent))
 
 from fastapi import FastAPI, HTTPException, Query, Body
 from pydantic import BaseModel
