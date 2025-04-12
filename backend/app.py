@@ -43,10 +43,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 #FOR LOCAL HOSTING
-# ✅ Enable CORS for frontend (Port 8080)
+# ✅ Enable CORS for frontend (Port 80)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8080"],  
+    allow_origins=["http://localhost:80"],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
