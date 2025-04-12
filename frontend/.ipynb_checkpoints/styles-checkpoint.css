@@ -1,0 +1,326 @@
+/* General Styles */
+body {
+    font-family: Arial, sans-serif;
+    background-color: #f4f4f9;
+    color: #333;
+    margin: 0;
+    padding: 0;
+}
+
+/* Header */
+header {
+    background: #121212;
+    color: white;
+    text-align: center;
+    padding: 15px;
+}
+
+/* Layout Containers */
+.container {
+    display: flex;
+    min-height: 90vh;
+    justify-content: space-between;
+    padding: 20px;
+    overflow: hidden;
+}
+
+/* Chat Container */
+#chat-container {
+    position: fixed;
+    min-height: 300px;
+    max-height: 400px;
+    overflow: hidden;
+    bottom: 10px;
+    right: 10px;
+    width: 300px;
+    background: white;
+    padding: 10px;
+    border-radius: 10px;
+    box-shadow: 0px 0px 10px rgba(0, 0, 0, 0.2);
+    font-family: Arial, sans-serif;
+}
+
+#chat-box {
+    height: 200px;
+    overflow-y: auto;
+    border-bottom: 1px solid #ccc;
+    padding: 5px;
+}
+
+.user-message {
+    background: #d4edda;
+    padding: 5px;
+    border-radius: 5px;
+    margin: 5px 0;
+}
+
+.bot-message {
+    background: #f8d7da;
+    padding: 5px;
+    border-radius: 5px;
+    margin: 5px 0;
+}
+
+.bot-message.error {
+    background: #f8d7da;
+    color: red;
+}
+
+#user-input {
+    width: calc(100% - 60px);
+    padding: 5px;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+}
+
+button {
+    width: 50px;
+    padding: 5px;
+    background: #007bff;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+button:hover {
+    background: #0056b3;
+}
+
+
+/* Option Chain Table */
+.option-chain-container {
+    flex: 1;
+    padding: 20px;
+    background: white;
+    box-shadow: 0px 0px 10px rgba(0, 0, 0, 0.1);
+    border-radius: 8px;
+}
+
+/* Option Chain Styling */
+.option-chain {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 10px;
+}
+
+.option-chain th, .option-chain td {
+    padding: 8px;
+    text-align: center;
+    border: 1px solid #ddd;
+}
+
+.option-chain th {
+    background-color: #222;
+    color: white;
+}
+
+.option-chain td.call {
+    background-color: rgba(0, 255, 0, 0.2); /* Light Green */
+    cursor: pointer;
+}
+
+.option-chain td.put {
+    background-color: rgba(255, 0, 0, 0.2); /* Light Red */
+    cursor: pointer;
+}
+
+.option-chain tr:hover {
+    background-color: #f1f1f1;
+}
+
+/* Highlight ATM Strike */
+.atm-strike {
+    background-color: yellow !important;
+    font-weight: bold;
+}
+
+/* Strategy Builder */
+.strategy-container {
+    flex: 1;
+    padding: 20px;
+    background: white;
+    box-shadow: 0px 0px 10px rgba(0, 0, 0, 0.1);
+    border-radius: 8px;
+    margin-left: 20px;
+}
+
+#strategyTable {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 10px;
+}
+
+#strategyTable th, #strategyTable td {
+    padding: 8px;
+    text-align: center;
+    border: 1px solid #ddd;
+}
+
+#strategyTable th {
+    background-color: #222;
+    color: white;
+}
+
+/* ✅ Action button style */
+#strategyTable td:last-child {
+    width: 100px; /* Wider column for Remove button */
+}
+
+#strategyTable button {
+    background: red;
+    color: white;
+    border: none;
+    padding: 5px 10px;
+    cursor: pointer;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+#strategyTable button:hover {
+    background: darkred;
+}
+
+/* ✅ L and S indicators */
+.long-label,
+.short-label {
+    display: inline-block;
+    padding: 2px 6px;
+    font-size: 12px;
+    font-weight: bold;
+    border-radius: 4px;
+    margin-left: 6px;
+    background-color: #e0e0e0;
+    color: green; /* Default for long */
+}
+
+.short-label {
+    color: red;
+}
+
+
+/* ✅ Payoff Chart Container */
+#payoffChartContainer {
+    width: 100%;
+    min-height: 400px;
+    background-color: #f5f5f5;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-top: 20px;
+    border-radius: 8px;
+    box-shadow: 0px 0px 10px rgba(0, 0, 0, 0.1);
+    padding: 15px;
+}
+
+/* ✅ Chart Canvas */
+#payoffChart {
+    width: 100%;
+    height: 100%;
+}
+
+/* ✅ Highlight Breakeven Points */
+.breakeven {
+    color: red;
+    font-weight: bold;
+}
+
+/* ✅ Button Styling */
+#updateChartBtn {
+    padding: 10px 20px;
+    font-size: 14px;
+    background-color: #007bff;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: background-color 0.2s ease, transform 0.1s ease;
+    margin-top: 15px;
+}
+
+#updateChartBtn:hover {
+    background-color: #0056b3;
+    transform: translateY(-1px);
+}
+/* ✅ Strategy Metrics Styling */
+#strategyMetrics {
+    background-color: #fdfdfd;
+    padding: 15px;
+    margin-top: 15px;
+    border-radius: 8px;
+    box-shadow: 0px 0px 8px rgba(0, 0, 0, 0.05);
+}
+
+#strategyMetrics p {
+    margin: 6px 0;
+    font-size: 14px;
+}
+
+.metrics-card {
+    background: #f8f9fa;
+    border: 1px solid #ddd;
+    padding: 15px;
+    border-radius: 6px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+}
+.metrics-card h3 {
+    margin-bottom: 12px;
+}
+.metrics-card li {
+    padding: 4px 0;
+    font-size: 16px;
+}
+
+
+/* ✅ Tax Info */
+#taxInfo {
+    background-color: #fff8dc;
+    padding: 12px;
+    border-radius: 6px;
+    box-shadow: 0px 0px 6px rgba(0, 0, 0, 0.05);
+    color: #5a4a00;
+}
+
+/* ✅ Option Greeks Table */
+#greeksTable {
+    border: 1px solid #ccc;
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 13px;
+    background-color: white;
+}
+
+#greeksTable th, #greeksTable td {
+    border: 1px solid #eee;
+    padding: 8px;
+    text-align: center;
+}
+
+#greeksTable th {
+    background-color: #007bff;
+    color: white;
+}
+
+#greeksTable tr:nth-child(even) {
+    background-color: #f9f9f9;
+}
+
+
+
+
+
+/* ✅ Responsive Design */
+@media screen and (max-width: 768px) {
+    #payoffChartContainer {
+        min-height: 300px;
+    }
+
+    .container {
+        flex-direction: column;
+    }
+
+    .strategy-container {
+        margin-left: 0;
+        margin-top: 20px;
+    }
+}
