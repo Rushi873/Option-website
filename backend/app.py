@@ -15,7 +15,7 @@ import uvicorn
 #from nsepython import *
 from jugaad_data.nse import NSELive
 from datetime import datetime, date
-from typing import List, Dict
+from typing import List, Dict, Any
 #import QuantLib as ql
 import mibian
 import os
@@ -69,7 +69,8 @@ app.add_middleware(
 # and finish
 
 
-
+class AssetUpdateRequest(BaseModel):
+    asset: str
 
 
 # ✅ Track Selected Asset, # Global cache
@@ -94,22 +95,27 @@ def get_cached_option(asset):
 
 
 @app.post("/update_selected_asset")
-def update_selected_asset(asset: str):
+def update_selected_asset(request_data: AssetUpdateRequest): # Use the Pydantic model
     global selected_asset
+    # Extract the asset value from the validated request data
+    asset = request_data.asset 
     selected_asset = asset
     logger.info(f"User selected asset: {asset}")
 
     try:
         # Fetch new option chain data for selected asset and store it in MySQL
-        update_asset_data(asset)
+        update_asset_data(asset) # Pass the extracted asset string
         return {"message": f"Selected asset updated to {asset} and data refreshed."}
+    except ValueError as ve: # Catch specific errors you raise
+         logger.error(f"❌ Failed to update data for asset {asset}: {str(ve)}")
+         # Return a more specific error if needed (e.g., 404 if asset not found)
+         # For now, using 500 as before, but could use HTTPException
+         return {"error": f"Failed to update data: {str(ve)}"}, 500
     except Exception as e:
         # Log the specific error during the update process
-        logger.error(f"❌ Failed to update data for asset {asset}: {str(e)}")
+        logger.error(f"❌ Failed to update data for asset {asset}: {str(e)}", exc_info=True) # Add traceback
         # Return an error response to the client
-        # Depending on your framework, you might raise an HTTPException (FastAPI)
-        # or return a specific error JSON with a status code (Flask)
-        return {"error": f"Failed to update data for asset {asset}. See server logs for details."}, 500
+        return {"error": f"Internal server error while updating data for asset {asset}. See server logs for details."}, 500
 
 
 def update_asset_data(asset_name: str):
@@ -191,14 +197,33 @@ def update_asset_data(asset_name: str):
                  # Depending on needs, you might want to fetch existing ones instead of failing.
                  # For now, we assume DELETE worked and these are genuinely new or being replaced.
 
-        # --- Optimization 4: Fetch expiry_ids ONCE after insert ---
+        # --- Optimization 4: Fetch expiry_ids ONCE after insert (Corrected) ---
         expiry_id_map = {}
-        if expiry_dates_formatted: # Only query if we attempted to insert expiries
-            cursor.execute("""
-                SELECT id, expiry_date FROM option_data.expiries
-                WHERE asset_id = %s AND expiry_date IN %s
-            """, (asset_id, tuple(expiry_dates_formatted))) # Query only the relevant dates
+        if expiry_dates_formatted: # Only query if we attempted to insert expiries and the set is not empty
+        
+            # Convert set to tuple for parameter passing
+            expiry_dates_tuple = tuple(expiry_dates_formatted) 
             
+            # Create the correct number of %s placeholders for the IN clause
+            # Example: If expiry_dates_tuple has 3 dates, this creates "%s, %s, %s"
+            in_placeholders = ', '.join(['%s'] * len(expiry_dates_tuple))
+        
+            # Construct the SQL query dynamically using the generated placeholders
+            fetch_expiries_sql = f"""
+                SELECT id, expiry_date 
+                FROM option_data.expiries
+                WHERE asset_id = %s 
+                  AND expiry_date IN ({in_placeholders}) 
+            """
+            
+            # Create the tuple of parameters: asset_id first, then all the expiry dates unpacked
+            params = (asset_id,) + expiry_dates_tuple 
+            
+            # Execute the dynamically generated query with the correct parameters
+            # logger.debug(f"Executing SQL: {fetch_expiries_sql} with params: {params}") # Optional: for debugging
+            cursor.execute(fetch_expiries_sql, params)
+        
+            # --- The rest of the logic remains the same ---
             # Note: cursor.fetchall() returns tuples where date might be datetime.date object
             # Ensure the key format matches how you'll look it up later.
             for row in cursor.fetchall():
@@ -708,7 +733,7 @@ class StrategyItem(BaseModel):
 
 class PayoffRequest(BaseModel):
     asset: str
-    strategy: List[Dict[str, str]]
+    strategy: List[Dict[str, Any]]
 
 
 # ✅ Fetch lot size from the database
