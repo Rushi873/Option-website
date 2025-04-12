@@ -1,4 +1,5 @@
-const API_BASE = "http://localhost:8000";
+const API_BASE = "https://option-strategy-website.onrender.com";
+// const API_BASE = "http://localhost:8000";
 let niftyPrice = 0;
 let strategyPositions = [];
 let lastExpiry = null;
