@@ -21,3 +21,4 @@ flask-cors
 mysql-connector-python
 bcrypt
 nsepython
+httpserver
