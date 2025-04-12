@@ -1,7 +1,7 @@
 DB_CONFIG = {
     host="metro.proxy.rlwy.net",
     user="root",
-    database="railway",
+    database="option_data",
     port=20336
 }
 
