@@ -1,3 +1,7 @@
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent.parent))
+
 from fastapi import FastAPI, HTTPException, Query, Body
 from pydantic import BaseModel
 import threading
@@ -34,12 +38,15 @@ load_dotenv()
 app = FastAPI()
 n = NSELive()
 
+# ✅ Logging Setup
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 #FOR LOCAL HOSTING
 # ✅ Enable CORS for frontend (Port 8080)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:8080"],  
+    allow_origins=["http://localhost:8080"],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -62,9 +69,7 @@ app.add_middleware(
 
 
 
-# ✅ Logging Setup
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+
 
 # ✅ Track Selected Asset, # Global cache
 selected_asset = None
@@ -328,12 +333,13 @@ class StrategyPosition(BaseModel):
     entry_price: float
 
 # ---------------------------------------------------------------
-# ✅ STRATEGY MANAGEMENT (Predefined + User-Created)
+# ✅ STRATEGY MANAGEMENT (Predefined + User-Created), write the code
 # ---------------------------------------------------------------
 
 # ✅ Save a Strategy (User-Defined)
 @app.post("/save_strategy")
 def save_strategy(strategy: Strategy):
+    print('save strategy')
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -349,6 +355,7 @@ def save_strategy(strategy: Strategy):
 # ✅ Fetch All Strategies (User-Created + Predefined)
 @app.get("/get_strategies")
 def get_strategies(user_id: int):
+    print('get strategy')
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
     cursor.execute("""
@@ -366,6 +373,7 @@ def get_strategies(user_id: int):
 # ✅ Fetch Positions for a Strategy
 @app.get("/get_strategy_positions")
 def get_strategy_positions(strategy_id: int, expiry_date: str = None):
+    print('get strategy position')
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
     cursor.execute("""
@@ -389,6 +397,7 @@ def get_strategy_positions(strategy_id: int, expiry_date: str = None):
 # ✅ Add Position to Strategy
 @app.post("/add_position")
 def add_position(position: StrategyPosition):
+    print('add')
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -406,6 +415,7 @@ def add_position(position: StrategyPosition):
 # ✅ Remove Position from Strategy
 @app.delete("/remove_position")
 def remove_position(position_id: int):
+    print('remove')
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM option_data.strategy_positions WHERE id = %s", (position_id,))
@@ -414,6 +424,52 @@ def remove_position(position_id: int):
     conn.close()
     print('bye')
     return {"message": "Position removed successfully"}
+
+# ---------------------------------------------------------------
+# ✅ Position 
+# ---------------------------------------------------------------
+
+# In-memory strategy storage
+strategy_positions: List[dict] = []
+
+# Define expected data structure
+class Position(BaseModel):
+    symbol: str       # e.g., "NIFTY"
+    strike: float     # e.g., 19200.0
+    type: str         # e.g., "CE" or "PE"
+    quantity: int     # e.g., number of lots
+    price: float      # e.g., 45.5
+
+@app.post("/add_strategy")
+def add_strategy(position: Position):
+    # Convert Pydantic model to dict and append to in-memory list
+    pos_dict = position.dict()
+    strategy_positions.append(pos_dict)
+    
+    print(f"Added position: {pos_dict}")
+    print(f"Total positions now: {len(strategy_positions)}")
+
+    return {
+        "status": "added",
+        "position": pos_dict,
+        "total_positions": len(strategy_positions)
+    }
+
+@app.get("/get_strategies")
+def get_strategies():
+    print(f"Returning {len(strategy_positions)} strategy positions")
+    return strategy_positions
+
+@app.post("/clear_strategy")
+def clear_strategy():
+    print(f"Clearing {len(strategy_positions)} strategy positions...")
+    strategy_positions.clear()
+    return {
+        "status": "cleared",
+        "total_positions": len(strategy_positions)
+    }
+
+
 
 # ---------------------------------------------------------------
 # ✅ PAYOFF CHART & GREEKS
@@ -1173,7 +1229,7 @@ threading.Thread(target=live_update, daemon=True).start()
 # FOR LOCAL HOSTING
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="localhost", port=8000)
     
 # LIVE 
 # # ✅ Entry point

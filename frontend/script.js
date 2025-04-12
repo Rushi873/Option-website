@@ -187,11 +187,11 @@ async function fetchOptionChain(scrollToATM = false) {
             tr.className = strike == atmStrike ? "atm-strike" : "";
             tr.innerHTML = `
                 <td class="call" onclick="addPosition(${strike}, 'CE')">${formatValue(optionData.call?.last_price)}</td>
-                <td class="call">${formatValue(optionData.call?.open_interest)}</td>
+                <td class="call">${parseInt(optionData.call?.open_interest || 0)}</td>
                 <td class="call">${formatValue(optionData.call?.implied_volatility)}</td>
                 <td class="strike">${strike}</td>
                 <td class="put">${formatValue(optionData.put?.implied_volatility)}</td>
-                <td class="put">${formatValue(optionData.put?.open_interest)}</td>
+                <td class="put">${parseInt(optionData.put?.open_interest || 0)}</td>
                 <td class="put" onclick="addPosition(${strike}, 'PE')">${formatValue(optionData.put?.last_price)}</td>
             `;
 
@@ -290,7 +290,9 @@ function updateLots(index, value) {
 function removePosition(index) {
     strategyPositions.splice(index, 1);
     updateStrategyTable();
+    fetchPayoffChart(); // 🔁 Update chart after removal
 }
+
 
 // ✅ Format Numbers
 function formatValue(value) {
@@ -315,21 +317,46 @@ function startAutoRefresh() {
 
 // Clear position
 function clearAllPositions() {
+    // ✅ Clear frontend array (this is critical)
+    strategyPositions.length = 0; // Ensures array is fully reset in memory
+
+    // ✅ Clear strategy table
     const strategyTableBody = document.querySelector("#strategyTable tbody");
     strategyTableBody.innerHTML = "";
 
+    // ✅ Clear chart canvas
     const chartCanvas = document.getElementById("payoffChart");
     const ctx = chartCanvas.getContext("2d");
     ctx.clearRect(0, 0, chartCanvas.width, chartCanvas.height);
 
-    // Reset metrics if any
+    // ✅ Reset metrics
     document.getElementById("maxProfit").innerText = "Max Profit: ";
     document.getElementById("maxLoss").innerText = "Max Loss: ";
     document.getElementById("breakeven").innerText = "Breakeven Points: ";
     document.getElementById("rewardToRisk").innerText = "Reward:Risk Ratio: ";
     document.getElementById("totalOptionPrice").innerText = "Total Option Cost: ";
     document.getElementById("costBreakdownList").innerHTML = "";
+
+    // ✅ Clear backend strategy positions via FastAPI
+    fetch(`${API_BASE}/clear_strategy`, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        }
+    })
+    .then(response => response.json())
+    .then(data => {
+        console.log("Backend strategy cleared:", data);
+        fetchPayoffChart(); // force update chart with now-empty positions
+    })
+    .catch(error => {
+        console.error("Error clearing backend strategy:", error);
+    });
 }
+
+
+
+
 
 
 
