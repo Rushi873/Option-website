@@ -704,6 +704,7 @@ class StrategyItem(BaseModel):
     tr_type: str  # "b" or "s"
     option_price: float
     expiry_date: str
+    lots: int
 
 class PayoffRequest(BaseModel):
     asset: str
