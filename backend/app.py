@@ -1253,26 +1253,85 @@ async def health_check(): # Endpoint stays async
 
 
 @app.get("/get_assets", tags=["Data"])
-async def get_assets(): # Indentation Level 0 (Function definition)
-    logger.info("Request received for asset list.") # Indentation Level 1
-    asset_names = [] # Indentation Level 1
-    try: # Indentation Level 1
-        # Use SYNC 'with' and sync calls
-        with get_db_connection() as conn: # Indentation Level 2
-            with conn.cursor(dictionary=True) as cursor: # Indentation Level 3
-                cursor.execute("SELECT asset_name FROM option_data.assets ORDER BY asset_name ASC") # Indentation Level 4
-                results = cursor.fetchall() # Indentation Level 4
-                asset_names = [row["asset_name"] for row in results] # Indentation Level 4
-    # Ensure except blocks are aligned with try
-    except (ConnectionError, mysql.connector.Error) as db_err: # Indentation Level 1
-        logger.error(f"DB Error fetching assets: {db_err}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Database error fetching assets")
-    except Exception as e: # Indentation Level 1
-        logger.error(f"Unexpected error fetching assets: {e}", exc_info=True)
-        if isinstance(e, TypeError) and "asynchronous context manager protocol" in str(e):
-             logger.error("CONFIRMED: Still using async with on sync context manager!")
-             raise HTTPException(status_code=500, detail="Server configuration error (DB Context).")
-        raise HTTPException(status_code=500, detail="Internal server error fetching assets")
+async def get_assets(): # Keep async as it's FastAPI endpoint
+    logger.info("--- GET /get_assets Endpoint START ---")
+    asset_names = []
+    conn = None # Initialize conn to None
+    try:
+        logger.info("Attempting to get DB connection...")
+        # Assuming get_db_connection is SYNCHRONOUS based on database.py
+        with get_db_connection() as conn:
+            if conn is None:
+                logger.error("/get_assets: get_db_connection returned None!")
+                raise ConnectionError("Failed to get DB connection (context returned None).")
+
+            # Log details about the connection obtained
+            current_db = "N/A"
+            try:
+                current_db = conn.database
+            except Exception:
+                logger.warning("/get_assets: Could not retrieve database name from connection object.")
+            logger.info(f"/get_assets: Successfully got DB connection. Current DB: '{current_db}'")
+
+            # Explicitly check/set database just in case pool default didn't stick (optional safeguard)
+            if current_db != 'option_data':
+                 logger.warning(f"/get_assets: Connection default DB is '{current_db}', attempting to switch to 'option_data'.")
+                 try:
+                     # Use a new cursor just for this operation if needed, or use conn directly
+                     # conn.database = 'option_data' # This might not work with pooled connections as expected
+                     with conn.cursor() as switch_cursor:
+                         switch_cursor.execute("USE option_data;")
+                     logger.info("/get_assets: Successfully executed USE option_data;")
+                 except mysql.connector.Error as db_err:
+                     logger.error(f"/get_assets: Failed to execute USE option_data;: {db_err}", exc_info=True)
+                     # Decide whether to proceed or raise error if USE fails
+                     raise ConnectionError(f"Failed to switch to database 'option_data': {db_err}") from db_err
+
+            # Proceed with the actual query
+            with conn.cursor(dictionary=True) as cursor:
+                sql = "SELECT asset_name FROM option_data.assets ORDER BY asset_name ASC"
+                logger.info(f"/get_assets: Executing SQL: {sql}")
+                cursor.execute(sql)
+                results = cursor.fetchall() # Fetch results
+                # cursor.rowcount might not be reliable after fetchall for SELECT, check len(results)
+                row_count = len(results)
+                logger.info(f"/get_assets: SQL executed. Actual rows fetched: {row_count}")
+                if results:
+                    logger.info(f"/get_assets: Fetched results (first 5): {results[:5]}") # Log first few results
+                    # Process results
+                    try:
+                        asset_names = [row["asset_name"] for row in results]
+                        logger.info(f"/get_assets: Processed asset names (count: {len(asset_names)}). First 5: {asset_names[:5]}")
+                    except KeyError as ke:
+                         logger.error(f"/get_assets: KeyError processing results - column 'asset_name' missing? Error: {ke}", exc_info=True)
+                         asset_names = [] # Set empty on processing error
+                    except Exception as proc_err:
+                         logger.error(f"/get_assets: Error processing results: {proc_err}", exc_info=True)
+                         asset_names = [] # Set empty on processing error
+                else:
+                    logger.warning("/get_assets: Query returned no results (results list is empty).")
+
+        # Log *before* returning
+        logger.info(f"/get_assets: Preparing to return asset names: {asset_names}")
+        return {"assets": asset_names} # Ensure this is the final return
+
+    except mysql.connector.Error as db_err:
+         logger.error(f"Database error in /get_assets: {db_err}", exc_info=True)
+         # Log connection details if available, carefully
+         db_info = "N/A"
+         if conn: db_info = f"DB='{getattr(conn, 'database', 'N/A')}', User='{getattr(conn, 'user', 'N/A')}'"
+         logger.error(f"/get_assets: Error occurred with connection: {db_info}")
+         # Return 500 for database errors to signal backend failure clearly
+         raise HTTPException(status_code=500, detail=f"Database error fetching assets.")
+    except ConnectionError as conn_err:
+         logger.error(f"Connection error in /get_assets: {conn_err}", exc_info=True)
+         raise HTTPException(status_code=500, detail=f"DB connection error.")
+    except Exception as e:
+        logger.error(f"Unexpected error in /get_assets: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Unexpected server error.")
+    finally:
+        # This ensures the end log appears even if an exception occurs above return/raise
+        logger.info("--- GET /get_assets Endpoint END ---")
 
 
 @app.get("/expiry_dates", tags=["Data"])
