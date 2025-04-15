@@ -1616,7 +1616,7 @@ if __name__ == "__main__":
 
     logger.info(f"Starting Uvicorn server on http://{host}:{port} (Reload: {reload})")
     uvicorn.run(
-        "__main__:app",
+        "app:app",
         host=host,
         port=port,
         reload=reload,
