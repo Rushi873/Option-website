@@ -64,24 +64,8 @@ from cachetools import TTLCache
 import google.generativeai as genai
 
 # --- Database ---
-# Assuming database.py provides initialize_database_pool and get_db_connection
-try:
-    from .database import initialize_database_pool, get_db_connection
-except ImportError:
-    # Provide dummy functions if database.py is missing, allowing startup but failing DB ops
-    print("WARNING: database.py not found or failed to import. Using dummy DB functions.")
-    logger = logging.getLogger(__name__) # Need logger early
-    logger.error("FATAL: database.py not found. Database operations will fail.")
-    # Dummy DB pool init function
-    def initialize_database_pool():
-        logger.warning("Using dummy initialize_database_pool.")
-        pass
-    # Dummy DB connection context manager
-    @asynccontextmanager # Corrected decorator for async context manager if database.py is async
-    async def get_db_connection(): # Assuming async connection based on FastAPI context
-        logger.error("Attempted to use dummy get_db_connection. DB operations will fail.")
-        raise ConnectionError("Database module not found or connection failed.")
-        yield None # Needs to yield something for 'with' statement structure
+
+from .database import initialize_database_pool, get_db_connection
 
 import mysql.connector # Keep for catching specific DB errors if needed
 

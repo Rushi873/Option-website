@@ -61,3 +61,5 @@ def get_db_connection():
         if conn and conn.is_connected():
             conn.close()
             logger.debug(f"Returned DB connection to pool '{cnxpool.pool_name}'.")
+
+print("--- backend/database.py executed ---")
