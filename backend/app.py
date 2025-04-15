@@ -1253,25 +1253,22 @@ async def health_check(): # Endpoint stays async
 
 
 @app.get("/get_assets", tags=["Data"])
-async def get_assets(): # Endpoint stays async
-    logger.info("Request received for asset list.")
-    asset_names = []
-    try:
-        # *** USE SYNC 'with' and sync calls ***
-         with get_db_connection() as conn:
-             with conn.cursor(dictionary=True) as cursor:
-                 cursor.execute("SELECT asset_name FROM option_data.assets ORDER BY asset_name ASC") # No await
-                 results = cursor.fetchall() # No await
-                 asset_names = [row["asset_name"] for row in results]
-
-        if not asset_names: logger.warning("No assets found in DB.")
-        return {"assets": asset_names}
-    except (ConnectionError, mysql.connector.Error) as db_err:
+async def get_assets(): # Indentation Level 0 (Function definition)
+    logger.info("Request received for asset list.") # Indentation Level 1
+    asset_names = [] # Indentation Level 1
+    try: # Indentation Level 1
+        # Use SYNC 'with' and sync calls
+        with get_db_connection() as conn: # Indentation Level 2
+            with conn.cursor(dictionary=True) as cursor: # Indentation Level 3
+                cursor.execute("SELECT asset_name FROM option_data.assets ORDER BY asset_name ASC") # Indentation Level 4
+                results = cursor.fetchall() # Indentation Level 4
+                asset_names = [row["asset_name"] for row in results] # Indentation Level 4
+    # Ensure except blocks are aligned with try
+    except (ConnectionError, mysql.connector.Error) as db_err: # Indentation Level 1
         logger.error(f"DB Error fetching assets: {db_err}", exc_info=True)
         raise HTTPException(status_code=500, detail="Database error fetching assets")
-    except Exception as e:
+    except Exception as e: # Indentation Level 1
         logger.error(f"Unexpected error fetching assets: {e}", exc_info=True)
-        # *** Use the specific TypeError message if it occurs again ***
         if isinstance(e, TypeError) and "asynchronous context manager protocol" in str(e):
              logger.error("CONFIRMED: Still using async with on sync context manager!")
              raise HTTPException(status_code=500, detail="Server configuration error (DB Context).")
