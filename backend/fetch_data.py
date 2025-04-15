@@ -1,5 +1,5 @@
 from nsepython import option_chain
-from database import get_db_connection
+from .database import get_db_connection
 from datetime import datetime
 import time
 

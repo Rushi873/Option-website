@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 import mysql.connector
 from mysql.connector import pooling
 from contextlib2 import contextmanager
-from config import DB_CONFIG # Assuming DB_CONFIG is defined in config.py
+from .config import DB_CONFIG # Assuming DB_CONFIG is defined in config.py
 
 # --- Logging Setup (can share logger instance if configured globally) ---
 logger = logging.getLogger(__name__) # Get logger instance

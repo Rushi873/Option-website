@@ -66,7 +66,7 @@ import google.generativeai as genai
 # --- Database ---
 # Assuming database.py provides initialize_database_pool and get_db_connection
 try:
-    from database import initialize_database_pool, get_db_connection
+    from .database import initialize_database_pool, get_db_connection
 except ImportError:
     # Provide dummy functions if database.py is missing, allowing startup but failing DB ops
     print("WARNING: database.py not found or failed to import. Using dummy DB functions.")
