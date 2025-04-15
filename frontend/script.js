@@ -353,21 +353,35 @@ async function loadAssets() {
         populateDropdown(SELECTORS.assetDropdown, assets, "-- Select Asset --");
         setElementState(SELECTORS.assetDropdown, 'content');
 
-        // *** CHANGE HERE: Trigger load for the first asset automatically ***
-        if (assets.length > 0) {
-            // Select the first asset in the dropdown
-            document.querySelector(SELECTORS.assetDropdown).value = assets[0];
-            // Explicitly call the handler to load data for this asset
-            await handleAssetChange(); // Add await here
-        } else {
-            // If no assets, still call handler to show empty states correctly
-            await handleAssetChange(); // Add await here
+        // --- Default to NIFTY ---
+        const assetDropdown = document.querySelector(SELECTORS.assetDropdown);
+        let defaultAsset = null;
+        // Check if NIFTY is present in the fetched list
+        if (assets.includes("NIFTY")) {
+            defaultAsset = "NIFTY";
+        } else if (assets.length > 0) {
+            // Fallback to the first available asset if NIFTY is not present
+            defaultAsset = assets[0];
+             logger.warn(`"NIFTY" not found in assets, defaulting to first asset: ${defaultAsset}`);
         }
-        // *** END CHANGE ***
+
+        if (defaultAsset && assetDropdown) {
+            assetDropdown.value = defaultAsset; // Set the value in the dropdown
+            logger.info(`Defaulting asset selection to: ${defaultAsset}`);
+            // IMPORTANT: Explicitly call the handler AFTER setting the value
+            // to load data for the default asset. Use await.
+            await handleAssetChange();
+        } else {
+            // Handle case where no assets are loaded at all
+             logger.warn("No assets found in dropdown after fetch. Cannot set default.");
+             // Call handler anyway to potentially clear dependent fields
+             await handleAssetChange();
+        }
+        // --- End Default to NIFTY ---
 
     } catch (error) {
         setElementState(SELECTORS.assetDropdown, 'error', `Assets Error: ${error.message}`);
-        // Also set dependent elements to error state if assets fail
+        // Set dependent elements to error state if assets fail
         setElementState(SELECTORS.expiryDropdown, 'error', 'Asset load failed');
         setElementState(SELECTORS.optionChainTableBody, 'error', 'Asset load failed');
     }
@@ -1065,110 +1079,81 @@ function renderTaxTable(containerElement, taxData) {
     tableWrapper.appendChild(table);
 }
 
-function renderGreeksTable(tableElement, greeksData) {
-     // greeksData = list of { leg_index, input_data: {tr_type, op_type, strike, lot, lot_size, ...}, calculated_greeks: {delta, gamma, theta, vega, rho} }
-     // calculated_greeks contains PER-SHARE greeks SCALED BY 100. Theta is SCALED DAILY theta.
+function renderGreeksTable(tableElement, greeksResult) {
+    // Expects greeksResult = { greeks_data: [...], skipped_count: N, error: null | str }
 
-     if (!greeksData || !Array.isArray(greeksData)) {
-         // Handle case where greeksData might be null/undefined if calculation failed entirely backend-side
-         logger.warn("Greeks data is missing or not an array.");
-         tableElement.innerHTML = '<thead><tr><th>Greeks</th></tr></thead><tbody><tr><td>Greeks data unavailable.</td></tr></tbody>';
-         return;
-     }
-     if (greeksData.length === 0) {
-        // Handle case where backend function ran but filtered out all legs (e.g., validation errors)
-        logger.info("No valid legs found for Greeks calculation.");
-        tableElement.innerHTML = '<thead><tr><th>Greeks</th></tr></thead><tbody><tr><td>No valid legs for Greeks calculation.</td></tr></tbody>';
+    // --- Check for complete failure or empty data ---
+    if (!greeksResult || !greeksResult.greeks_data || typeof greeksResult.skipped_count === 'undefined') {
+        logger.warn("Greeks data structure is invalid or missing.");
+        tableElement.innerHTML = `
+            <caption class="table-caption">Portfolio Option Greeks</caption>
+            <thead><tr><th>Info</th></tr></thead>
+            <tbody><tr><td class="error-message">Greeks data unavailable or invalid format received.</td></tr></tbody>`;
         return;
-     }
+    }
 
-     // --- Calculate TOTAL Portfolio Greeks ---
-     const totals = { delta: 0, gamma: 0, theta: 0, vega: 0, rho: 0 };
-     const scaling_factor = 100.0; // The factor used in the backend
+    const greeksData = greeksResult.greeks_data; // The list of leg results
+    const skippedCount = greeksResult.skipped_count;
+    const totalLegs = greeksData.length; // Total legs attempted
 
-     greeksData.forEach(g => {
-         const gv = g?.calculated_greeks; // Scaled per-share greeks
-         const leg = g?.input_data;       // Original leg input data
+    // --- Case 1: All legs were skipped ---
+    if (totalLegs > 0 && skippedCount === totalLegs) {
+        logger.info(`All ${totalLegs} legs skipped for Greeks calculation (likely missing IV).`);
+        tableElement.innerHTML = `
+            <caption class="table-caption">Portfolio Option Greeks</caption>
+            <thead><tr><th>Info</th></tr></thead>
+            <tbody><tr><td class="skipped-reason">Greeks calculation skipped for all legs (likely due to missing IV).</td></tr></tbody>`;
+        return; // Don't render the rest of the table
+    }
 
-         // Ensure we have the necessary data to calculate position greeks
-         if (!gv || !leg || typeof leg.lot !== 'number' || typeof leg.lot_size !== 'number' || leg.lot <= 0 || leg.lot_size <= 0) {
-             logger.warn(`Skipping leg ${g?.leg_index} in total Greeks calculation due to missing data:`, {gv, leg});
-             return; // Skip this leg if data is incomplete
-         }
+    // --- Case 2: No legs were processed at all (empty list initially) ---
+    if (totalLegs === 0) {
+         logger.info("No legs were available for Greeks calculation.");
+         tableElement.innerHTML = `
+            <caption class="table-caption">Portfolio Option Greeks</caption>
+            <thead><tr><th>Info</th></tr></thead>
+            <tbody><tr><td>No strategy legs to calculate Greeks for.</td></tr></tbody>`;
+         return;
+    }
 
-         const quantity = leg.lot * leg.lot_size; // Total quantity for the position
+    // --- Proceed with rendering if at least one leg was processed (some might be skipped) ---
+    let hasCalculatedGreeks = false; // Flag remains useful
 
-         // Un-scale the per-share greek, then multiply by quantity
-         // Note: The sign adjustment (for buy/sell) was already done in the backend logic provided by the user
-         // when calculating the per-share greek before scaling. So we just need to unscale and multiply.
+    // --- Calculate Totals (Logic remains the same) ---
+    const totals = { delta: 0, gamma: 0, theta: 0, vega: 0, rho: 0 };
+    const scaling_factor = 100.0;
+    greeksData.forEach(g => {
+        if (g && g.calculated_greeks) {
+            // ... (total calculation logic remains the same) ...
+            const gv = g.calculated_greeks;
+            const leg = g.input_data;
+            if (!gv || !leg || typeof leg.lot !== 'number' || typeof leg.lot_size !== 'number' || leg.lot <= 0 || leg.lot_size <= 0) return;
+            const quantity = leg.lot * leg.lot_size;
+            if (typeof gv.delta === 'number') totals.delta += (gv.delta / scaling_factor) * quantity;
+            if (typeof gv.gamma === 'number') totals.gamma += (gv.gamma / scaling_factor) * quantity;
+            if (typeof gv.theta === 'number') totals.theta += (gv.theta / scaling_factor) * quantity;
+            if (typeof gv.vega === 'number') totals.vega += (gv.vega / scaling_factor) * quantity;
+            if (typeof gv.rho === 'number') totals.rho += (gv.rho / scaling_factor) * quantity;
+            hasCalculatedGreeks = true;
+        }
+    });
 
-         // Delta: (scaled_delta / 100) * quantity
-         if (typeof gv.delta === 'number') {
-             totals.delta += (gv.delta / scaling_factor) * quantity;
-         }
-         // Gamma: (scaled_gamma / 100) * quantity
-         if (typeof gv.gamma === 'number') {
-             totals.gamma += (gv.gamma / scaling_factor) * quantity;
-         }
-         // Theta: (scaled_daily_theta / 100) * quantity
-         if (typeof gv.theta === 'number') {
-             totals.theta += (gv.theta / scaling_factor) * quantity; // This is total DAILY theta
-         }
-         // Vega: (scaled_vega / 100) * quantity
-         if (typeof gv.vega === 'number') {
-             totals.vega += (gv.vega / scaling_factor) * quantity; // Total Vega per 1% IV change
-         }
-         // Rho: (scaled_rho / 100) * quantity
-         if (typeof gv.rho === 'number') {
-             totals.rho += (gv.rho / scaling_factor) * quantity; // Total Rho per 1% Rate change
-         }
-     });
-
-     // --- Render Table ---
-     tableElement.className = "results-table greeks-table"; // Ensure class is set
-
-     // Generate tbody content (Displaying the SCALED PER-SHARE values as returned by backend)
-     const tableBodyContent = greeksData.map(g => {
-             const leg = g?.input_data || {};
-             const gv = g?.calculated_greeks || {}; // Scaled per-share greeks
-             return `
-                 <tr>
-                     <td>${(leg.tr_type || '?').toUpperCase()}</td>
-                     <td>${leg.lot || '?'} x ${leg.lot_size || '?'}</td>
-                     <td>${(leg.op_type || '?').toUpperCase()}</td>
-                     <td>${leg.strike || '?'}</td>
-                     <td>${formatNumber(gv.delta, 2, '-')}</td>
-                     <td>${formatNumber(gv.gamma, 4, '-')}</td>
-                     <td>${formatNumber(gv.theta, 2, '-')}</td>
-                     <td>${formatNumber(gv.vega, 2, '-')}</td>
-                     <td>${formatNumber(gv.rho, 2, '-')}</td>
-                 </tr>`
-         }).join('');
-
-     // Generate table HTML structure including thead and tfoot with CORRECTED totals
-     tableElement.innerHTML = `
-         <caption class="table-caption">Option Greeks (Per Share, Scaled x100) & Total Portfolio</caption>
-         <thead>
-             <tr>
-                 <th>Action</th><th>Quantity</th><th>Type</th><th>Strike</th>
-                 <th title="Scaled Delta per share">Δ Delta</th>
-                 <th title="Scaled Gamma per share">Γ Gamma</th>
-                 <th title="Scaled Theta per share (Daily)">Θ Theta/Day</th>
-                 <th title="Scaled Vega per share (per 1% IV)">Vega</th>
-                 <th title="Scaled Rho per share (per 1% Rate)">Ρ Rho</th>
-             </tr>
-         </thead>
-         <tbody>${tableBodyContent}</tbody>
-         <tfoot>
-             <tr class="totals-row">
-                 <td colspan="4">Total Portfolio Greeks</td>
-                 <td title="Total Position Delta">${formatNumber(totals.delta, 4)}</td>
-                 <td title="Total Position Gamma">${formatNumber(totals.gamma, 4)}</td>
-                 <td title="Total Position Theta per Day">${formatNumber(totals.theta, 4)}</td>
-                 <td title="Total Position Vega per 1% IV Change">${formatNumber(totals.vega, 4)}</td>
-                 <td title="Total Position Rho per 1% Rate Change">${formatNumber(totals.rho, 4)}</td>
-             </tr>
-         </tfoot>`;
+    // --- Render Table (Logic remains the same, includes skipped rows) ---
+    tableElement.className = "results-table greeks-table";
+    const tableBodyContent = greeksData.map(g => {
+        const leg = g?.input_data || {}; const gv = g?.calculated_greeks; const action = (leg.tr_type || '?').toUpperCase(); const lotsDisplay = `${leg.lot || '?'}x${leg.lot_size || '?'}`;
+        if (gv) { /* Render calculated row */
+            return `<tr class="greeks-calculated"><td>${action}</td><td>${lotsDisplay}</td><td>${(leg.op_type || '?').toUpperCase()}</td><td>${leg.strike}</td><td>${formatNumber(gv.delta, 2, '-')}</td><td>${formatNumber(gv.gamma, 4, '-')}</td><td>${formatNumber(gv.theta, 2, '-')}</td><td>${formatNumber(gv.vega, 2, '-')}</td><td>${formatNumber(gv.rho, 2, '-')}</td></tr>`;
+        } else { /* Render skipped row */
+            const reason = g?.error || "Skipped"; return `<tr class="greeks-skipped"><td>${action}</td><td>${lotsDisplay}</td><td>${(leg.op_type || '?').toUpperCase()}</td><td>${leg.strike}</td><td colspan="5" class="skipped-reason" title="${reason}">Greeks N/A (${reason.split(':')[0]})</td></tr>`;
+        }
+    }).join('');
+    const captionText = skippedCount > 0 ? `Portfolio Option Greeks (Skipped for ${skippedCount}/${totalLegs} leg${skippedCount > 1 ? 's' : ''})` : `Portfolio Option Greeks`;
+    tableElement.innerHTML = `
+        <caption class="table-caption">${captionText}</caption>
+        <thead><tr><th>Action</th><th>Quantity</th><th>Type</th><th>Strike</th><th title="Scaled Delta per share">Δ Delta</th><th title="Scaled Gamma per share">Γ Gamma</th><th title="Scaled Theta per share (Daily)">Θ Theta/Day</th><th title="Scaled Vega per share (per 1% IV)">Vega</th><th title="Scaled Rho per share (per 1% Rate)">Ρ Rho</th></tr></thead>
+        <tbody>${tableBodyContent}</tbody>
+        <tfoot>${hasCalculatedGreeks ? `<tr class="totals-row"><td colspan="4">Total Portfolio Greeks (Calc. Legs)</td><td>${formatNumber(totals.delta, 4)}</td><td>${formatNumber(totals.gamma, 4)}</td><td>${formatNumber(totals.theta, 4)}</td><td>${formatNumber(totals.vega, 4)}</td><td>${formatNumber(totals.rho, 4)}</td></tr>` : `<tr class="totals-row"><td colspan="9">No Greeks calculated for totals.</td></tr>`}</tfoot>`;
 }
 
 // ===============================================================
