@@ -15,7 +15,7 @@ import functools # Import functools
 from pathlib import Path
 from datetime import datetime, date, timedelta
 from typing import List, Dict, Any, Union, Optional
-from contextlib import asynccontextmanager
+from contextlib2 import asynccontextmanager
 from collections import defaultdict
 
 # --- Environment & Config ---
