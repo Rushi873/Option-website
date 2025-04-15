@@ -30,4 +30,4 @@ google-generativeai
 mysql-connector-python
 
 # Optional: For improved breakeven finding (if used)
-#scipy
+scipy
