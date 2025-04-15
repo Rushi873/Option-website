@@ -1,25 +1,32 @@
-fastapi==0.110.0
-uvicorn
-pydantic==2.6.4
-requests==2.31.0
-matplotlib==3.8.3
-numpy==1.26.4
-scipy==1.12.0
-python-dotenv==1.0.1
-yfinance==0.1.70
-bs4==0.0.2
-beautifulsoup4==4.9.3
+# Web Framework & Server
+fastapi
+uvicorn[standard] # Includes performance extras like httptools, uvloop
+
+# Pydantic (Data Validation - FastAPI dependency)
+pydantic
+
+# Environment Variables
+python-dotenv
+
+# Data Sources
 jugaad-data
-opstrat==0.1.7
-google-generativeai==0.8.4
-mibian==0.1.3
-bcrypt==4.1.2
-mysql-connector-python==8.3.0
-Flask
-flask
-flask-cors
+yfinance
+requests
+beautifulsoup4 # For HTML parsing (requests dependency)
+
+# Calculation & Plotting
+numpy
+mibian # For Option Greeks
+matplotlib # For plotting
+
+# Caching
+cachetools
+
+# AI / LLM
+google-generativeai
+
+# Database Driver
 mysql-connector-python
-bcrypt
-nsepython
-httpserver
-dotenv
+
+# Optional: For improved breakeven finding (if used)
+scipy
