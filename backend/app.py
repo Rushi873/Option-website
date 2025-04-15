@@ -1251,139 +1251,121 @@ Analyze the stock **{stock_symbol}** based *only* on the provided data snapshots
 # API Endpoints (Modify Analysis Endpoint)
 # ===============================================================
 
+# ===============================================================
+# API Endpoints (Fix async DB access)
+# ===============================================================
+
 @app.get("/health", tags=["Status"])
-async def health_check(): # Make async if get_db_connection is async
+async def health_check(): # Already async
      db_status = "unknown"
      try:
-          # Use async with if get_db_connection is async
-          # If sync:
-          with get_db_connection() as conn:
-               with conn.cursor() as cursor: cursor.execute("SELECT 1"); db_status = "connected" if cursor.fetchone() else "query_failed"
-          # If async:
-          # async with get_db_connection() as conn:
-          #      async with conn.cursor() as cursor: await cursor.execute("SELECT 1"); db_status = "connected" if await cursor.fetchone() else "query_failed"
-     except Exception as e: logger.error(f"Health check DB error: {e}"); db_status = f"error: {type(e).__name__}"
+          # *** USE async with and await ***
+          async with get_db_connection() as conn:
+               # Assuming the cursor from an async connection is also async
+               async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT 1")
+                    db_status = "connected" if await cursor.fetchone() else "query_failed"
+     except Exception as e:
+         logger.error(f"Health check DB error: {e}")
+         db_status = f"error: {type(e).__name__}"
      return {"status": "ok", "database": db_status}
 
 @app.get("/get_assets", tags=["Data"])
-async def get_assets(): # Make async if get_db_connection is async
+async def get_assets(): # Already async
     logger.info("Request received for asset list.")
     asset_names = []
     try:
-        # Use async with if get_db_connection is async
-        # If sync:
-        with get_db_connection() as conn:
-            with conn.cursor(dictionary=True) as cursor:
-                cursor.execute("SELECT asset_name FROM option_data.assets ORDER BY asset_name ASC")
-                results = cursor.fetchall()
+        # *** USE async with and await ***
+        async with get_db_connection() as conn:
+            # Assuming async cursor
+            async with conn.cursor(dictionary=True) as cursor:
+                await cursor.execute("SELECT asset_name FROM option_data.assets ORDER BY asset_name ASC")
+                results = await cursor.fetchall() # await fetchall
                 asset_names = [row["asset_name"] for row in results]
-        # If async:
-        # async with get_db_connection() as conn:
-        #     async with conn.cursor(dictionary=True) as cursor:
-        #         await cursor.execute("SELECT asset_name FROM option_data.assets ORDER BY asset_name ASC")
-        #         results = await cursor.fetchall()
-        #         asset_names = [row["asset_name"] for row in results]
 
         if not asset_names: logger.warning("No assets found in DB.")
         return {"assets": asset_names}
+    except (ConnectionError, mysql.connector.Error) as db_err:
+        logger.error(f"DB Error fetching assets: {db_err}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Database error fetching assets")
     except Exception as e:
-        logger.error(f"Error fetching assets: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Error fetching assets")
-
+        logger.error(f"Unexpected error fetching assets: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error fetching assets")
 
 @app.get("/expiry_dates", tags=["Data"])
-async def get_expiry_dates(asset: str = Query(..., description="Asset name (e.g., NIFTY)")): # Make async
+async def get_expiry_dates(asset: str = Query(..., description="Asset name (e.g., NIFTY)")): # Already async
     """ Fetches unique, sorted expiry dates (YYYY-MM-DD) for a given asset. """
     logger.info(f"Request received for expiry dates: Asset={asset}")
     sql = """
         SELECT DISTINCT DATE_FORMAT(e.expiry_date, '%Y-%m-%d') AS expiry_date_str
         FROM option_data.expiries e
         JOIN option_data.assets a ON e.asset_id = a.id
-        WHERE a.asset_name = %s AND e.expiry_date >= CURDATE() -- Only show future expiries
+        WHERE a.asset_name = %s AND e.expiry_date >= CURDATE()
         ORDER BY expiry_date_str ASC;
     """
     expiries = []
     try:
-        # If sync:
-        with get_db_connection() as conn:
-            with conn.cursor(dictionary=True) as cursor:
-                cursor.execute(sql, (asset,))
-                expiries = [row["expiry_date_str"] for row in cursor.fetchall()]
-        # If async:
-        # async with get_db_connection() as conn:
-        #     async with conn.cursor(dictionary=True) as cursor:
-        #         await cursor.execute(sql, (asset,))
-        #         expiries = [row["expiry_date_str"] for row in await cursor.fetchall()]
+        # *** USE async with and await ***
+        async with get_db_connection() as conn:
+            async with conn.cursor(dictionary=True) as cursor:
+                await cursor.execute(sql, (asset,))
+                results = await cursor.fetchall() # await fetchall
+                expiries = [row["expiry_date_str"] for row in results]
 
-    except mysql.connector.Error as db_err:
+    except (ConnectionError, mysql.connector.Error) as db_err:
         logger.error(f"DB Query Error fetching expiry dates for {asset}: {db_err}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error retrieving expiry data")
+        raise HTTPException(status_code=500, detail="Database error retrieving expiry data")
     except Exception as e:
          logger.error(f"Unexpected error fetching expiry dates for {asset}: {e}", exc_info=True)
          raise HTTPException(status_code=500, detail="Internal server error")
 
     if not expiries:
         logger.warning(f"No future expiry dates found for asset: {asset}")
-        # Return empty list instead of 404, client can handle it
-        # raise HTTPException(status_code=404, detail=f"No expiry dates found for asset: {asset}")
 
     logger.info(f"Returning {len(expiries)} expiry dates for {asset}.")
     return {"expiry_dates": expiries}
 
 @app.get("/get_option_chain", tags=["Data"])
-async def get_option_chain(asset: str = Query(...), expiry: str = Query(...)): # Make async
+async def get_option_chain(asset: str = Query(...), expiry: str = Query(...)): # Already async
     logger.info(f"Request received for option chain: Asset={asset}, Expiry={expiry}")
     try: datetime.strptime(expiry, '%Y-%m-%d')
     except ValueError: raise HTTPException(status_code=400, detail="Invalid expiry date format. Use YYYY-MM-DD.")
 
-    # Include more fields useful for display/calculation
-    sql = """
-        SELECT
-            oc.strike_price, oc.option_type, oc.open_interest, oc.change_in_oi,
-            oc.implied_volatility, oc.last_price, oc.total_traded_volume,
-            oc.bid_price, oc.bid_qty, oc.ask_price, oc.ask_qty
-        FROM option_data.option_chain AS oc
-        JOIN option_data.assets AS a ON oc.asset_id = a.id
-        JOIN option_data.expiries AS e ON oc.expiry_id = e.id
-        WHERE a.asset_name = %s AND e.expiry_date = %s
-        ORDER BY oc.strike_price ASC;
-        """
+    sql = """ SELECT oc.strike_price, oc.option_type, oc.open_interest, oc.change_in_oi,
+                     oc.implied_volatility, oc.last_price, oc.total_traded_volume,
+                     oc.bid_price, oc.bid_qty, oc.ask_price, oc.ask_qty
+              FROM option_data.option_chain AS oc JOIN option_data.assets AS a ON oc.asset_id = a.id
+              JOIN option_data.expiries AS e ON oc.expiry_id = e.id
+              WHERE a.asset_name = %s AND e.expiry_date = %s ORDER BY oc.strike_price ASC; """
     rows = []
     try:
-        # If sync:
-        with get_db_connection() as conn:
-            with conn.cursor(dictionary=True) as cursor: cursor.execute(sql, (asset, expiry)); rows = cursor.fetchall()
-        # If async:
-        # async with get_db_connection() as conn:
-        #     async with conn.cursor(dictionary=True) as cursor:
-        #          await cursor.execute(sql, (asset, expiry));
-        #          rows = await cursor.fetchall()
-    except Exception as e: logger.error(f"Error fetching option chain for {asset} {expiry}: {e}", exc_info=True); raise HTTPException(status_code=500, detail="Database error fetching option chain.")
+        # *** USE async with and await ***
+        async with get_db_connection() as conn:
+            async with conn.cursor(dictionary=True) as cursor:
+                 await cursor.execute(sql, (asset, expiry))
+                 rows = await cursor.fetchall() # await fetchall
+    except (ConnectionError, mysql.connector.Error) as db_err:
+        logger.error(f"Error fetching option chain for {asset} {expiry}: {db_err}", exc_info=True);
+        raise HTTPException(status_code=500, detail="Database error fetching option chain.")
+    except Exception as e:
+        logger.error(f"Unexpected error fetching option chain for {asset} {expiry}: {e}", exc_info=True);
+        raise HTTPException(status_code=500, detail="Internal server error fetching option chain.")
+
 
     if not rows:
-         # Return empty structure instead of 404
          logger.warning(f"No option chain data found for asset '{asset}' and expiry '{expiry}'.")
          return {"option_chain": {}}
-         # raise HTTPException(status_code=404, detail=f"No option chain data found for asset '{asset}' and expiry '{expiry}'.")
 
+    # Processing rows remains synchronous
     option_chain = defaultdict(lambda: {"call": None, "put": None})
     for row in rows:
         strike = row["strike_price"]; opt_type = row.get("option_type")
-        # Prepare data for each type
-        data_for_type = {
-            "last_price": row.get("last_price"),
-            "open_interest": row.get("open_interest"),
-            "change_in_oi": row.get("change_in_oi"),
-            "implied_volatility": row.get("implied_volatility"),
-            "volume": row.get("total_traded_volume"),
-            "bid_price": row.get("bid_price"), "bid_qty": row.get("bid_qty"),
-            "ask_price": row.get("ask_price"), "ask_qty": row.get("ask_qty"),
-        }
+        data_for_type = { k: row.get(k) for k in ["last_price", "open_interest", "change_in_oi", "implied_volatility", "volume", "bid_price", "bid_qty", "ask_price", "ask_qty"] }
         if opt_type == "PE": option_chain[strike]["put"] = data_for_type
         elif opt_type == "CE": option_chain[strike]["call"] = data_for_type
 
-    # Convert defaultdict back to regular dict for JSON response
     return {"option_chain": dict(option_chain)}
+
 
 @app.get("/get_spot_price", response_model=SpotPriceResponse, tags=["Data"])
 async def get_spot_price(asset: str = Query(...)): # Make async
