@@ -21,6 +21,8 @@ matplotlib # For plotting
 
 # Caching
 cachetools
+contextlib2
+contextlib
 
 # AI / LLM
 google-generativeai
@@ -29,4 +31,4 @@ google-generativeai
 mysql-connector-python
 
 # Optional: For improved breakeven finding (if used)
-scipy
+#scipy
