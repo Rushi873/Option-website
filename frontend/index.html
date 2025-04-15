@@ -4,9 +4,16 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Option Strategy Builder</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Load Markdown parser -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- Defer script loading -->
     <script src="script.js" defer></script>
     <link rel="stylesheet" href="styles.css">
+    <!-- Optional: Link Google Fonts for warmer typography -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600&display=swap" rel="stylesheet">
+
 </head>
 <body>
 
@@ -14,111 +21,121 @@
         <h1>Option Strategy Builder</h1>
     </header>
 
+    <div id="globalError" class="error-message" style="display: none;"></div>
+
     <div class="container">
 
         <!-- Option Chain Section -->
-        <div class="option-chain-container">
+        <section class="option-chain-container card">
             <h2 id="niftyPrice">Spot Price: -</h2>
+            <div class="controls-row">
+                <label for="asset">Asset:</label>
+                <select id="asset" aria-label="Select Asset"></select>
+                <label for="expiry">Expiry:</label>
+                <select id="expiry" aria-label="Select Expiry Date"></select>
+            </div>
+            <div class="table-wrapper thin-scrollbar"> <!-- Added thin-scrollbar class -->
+                <table id="optionChainTable" class="option-chain data-table">
+                    <thead>
+                        <tr>
+                            <th title="Call Last Traded Price">Call LTP</th>
+                            <th title="Call Open Interest">Call OI</th>
+                            <th title="Call Implied Volatility">Call IV %</th>
+                            <th>STRIKE</th>
+                            <th title="Put Implied Volatility">Put IV %</th>
+                            <th title="Put Open Interest">Put OI</th>
+                            <th title="Put Last Traded Price">Put LTP</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </section>
 
-            <label for="asset">Asset:</label>
-            <select id="asset"></select>
+        <!-- Strategy Builder & Results Section -->
+        <section class="strategy-container card">
 
-            <label for="expiry">Expiry:</label>
-            <select id="expiry"></select>
-
-            <label for="refreshInterval">Refresh Interval (sec):</label>
-            <input type="number" id="refreshInterval" value="3" min="1">
-            <input type="checkbox" id="autoRefresh" checked> Auto-Refresh
-
-            <table id="optionChainTable" class="option-chain">
-                <thead>
-                    <tr>
-                        <th>Call LTP</th>
-                        <th>Call OI</th>
-                        <th>Call IV</th>
-                        <th>STRIKE</th>
-                        <th>Put IV</th>
-                        <th>Put OI</th>
-                        <th>Put LTP</th>
-                    </tr>
-                </thead>
-                <tbody></tbody>
-            </table>
-        </div>
-
-        <!-- Strategy Builder Section -->
-        <div class="strategy-container">
-
-            <!-- Header and Clear Button -->
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 20px;">
-                <h2 style="margin: 0;">Strategy Builder</h2>
-                <button id="clearStrategyBtn" onclick="clearAllPositions()" style="background-color: #e74c3c; color: white; padding: 6px 12px; border: none; border-radius: 4px;">
-                    Clear
-                </button>
+            <div class="section-header">
+                <h2>Strategy Builder</h2>
+                <button id="clearStrategyBtn" class="button button-danger button-small">Clear</button>
             </div>
 
-            <!-- Strategy Table -->
-            <table id="strategyTable">
-                <thead>
-                    <tr>
-                        <th>Strike</th>
-                        <th>Type</th>
-                        <th>Expiry</th>
-                        <th>Lots</th>
-                        <th>Premium</th>
-                        <th>Action</th>
-                    </tr>
-                </thead>
-                <tbody></tbody>
-            </table>
-
-            <!-- Payoff Chart Section -->
-            <h2>Payoff Chart</h2>
-            <div id="payoffChartContainer">
-                <canvas id="payoffChart"></canvas>
+            <div class="table-wrapper thin-scrollbar">
+                <table id="strategyTable" class="data-table strategy-legs-table">
+                    <thead>
+                        <tr>
+                            <th>Type</th>
+                            <th>Strike</th>
+                            <th>Expiry</th>
+                            <th>Lots</th>
+                            <th>Action</th>
+                            <th>Premium</th>
+                            <th>Remove</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
             </div>
 
-            <!-- Centered Wide Update Button -->
-            <div style="display: flex; justify-content: center; margin-top: 20px;">
-                <button id="updateChartBtn" onclick="fetchPayoffChart()" style="width: 200px; padding: 10px 0; font-size: 16px;">
-                    Update
-                </button>
+            <h2 class="section-subheader">Payoff Chart</h2>
+            <div id="payoffChartContainer" class="chart-container">
+                 <div class="placeholder-text">Add positions and click "Update" to see the payoff chart.</div>
+            </div>
+
+            <div class="button-container">
+                <button id="updateChartBtn" class="button button-primary button-wide">Update & Calculate</button>
             </div>
 
             <!-- Strategy Metrics -->
-            <div id="strategyMetrics" class="metrics-card" style="margin-top: 20px;">
-                <h3>Strategy Metrics</h3>
-                <ul style="list-style: none; padding-left: 0;">
-                    <li id="maxProfit">Max Profit: </li>
-                    <li id="maxLoss">Max Loss: </li>
-                    <li id="breakeven">Breakeven Points: </li>
-                    <li id="rewardToRisk">Reward:Risk Ratio: </li>
-                    <li id="totalOptionPrice">Total Option Cost: </li>
-                    <li style="margin-top: 15px;">
-                        <details id="costBreakdownContainer">
-                            <summary><strong>Option Cost Breakdown</strong></summary>
-                            <ul id="costBreakdownList" style="list-style: disc; margin-left: 20px; margin-top: 10px;"></ul>
-                        </details>
-                    </li>
-                </ul>
-            </div>
+            <section id="strategyMetricsSection" class="results-section card">
+                <h3 class="section-subheader">Strategy Metrics</h3>
+                <div id="strategyMetrics">
+                     <ul class="metrics-list">
+                        <li id="maxProfit"><span class="metric-label">Max Profit:</span> <span class="metric-value"></span></li>
+                        <li id="maxLoss"><span class="metric-label">Max Loss:</span> <span class="metric-value"></span></li>
+                        <!-- <li id="breakeven"><span class="metric-label">Breakeven Points:</span> <span class="metric-value"></span></li> --> <!-- REMOVED Breakeven -->
+                        <li id="rewardToRisk"><span class="metric-label">Reward:Risk Ratio:</span> <span class="metric-value"></span></li>
+                        <li id="netPremium"><span class="metric-label">Net Premium:</span> <span class="metric-value"></span></li>
+                        <li> <!-- Use a simple div for the breakdown instead of details -->
+                            <div id="costBreakdownContainer" style="display: none;">
+                                <h4 class="breakdown-header">Option Premium Breakdown:</h4>
+                                <ul id="costBreakdownList" class="breakdown-list"></ul>
+                            </div>
+                        </li>
+                    </ul>
+                </div>
+            </section>
 
-            <!-- Tax Info -->
-            <div id="taxInfo" style="margin-top: 20px; font-size: 14px;">
-                <!-- Filled by JS -->
-            </div>
+            <!-- Tax Info SECTION -->
+            <section id="taxInfoSection" class="results-section card card-accent-warning"> <!-- Added accent class -->
+                 <h3 class="section-subheader">Estimated Charges</h3>
+                 <div id="taxInfo" >
+                    <!-- Tax table/details added by JS -->
+                 </div>
+            </section>
 
-            <!-- Option Greeks -->
-            <h3 style="margin-top: 30px;">Options Greeks</h3>
-            <table id="greeksTable" style="width: 100%; border-collapse: collapse; margin-top: 10px;">
-                <!-- Filled by JS -->
-            </table>
+            <!-- Option Greeks SECTION -->
+             <section id="greeksSection" class="results-section card">
+                <h3 class="section-subheader">Options Greeks</h3>
+                 <div class="table-wrapper thin-scrollbar">
+                    <table id="greeksTable" class="data-table greeks-table">
+                        <caption class="table-caption">Portfolio Option Greeks</caption>
+                         <thead></thead>
+                         <tbody></tbody>
+                         <tfoot></tfoot>
+                    </table>
+                </div>
+            </section>
 
-            <!-- Stock Analysis -->
-            <h2>Stock Analysis</h2>
-            <div id="analysisResult">Select an asset to load analysis...</div>
-        </div>
-    </div>
+            <!-- Stock Analysis SECTION -->
+             <section id="analysisSection" class="results-section card">
+                <h2 class="section-subheader">Stock Analysis</h2>
+                <div id="analysisResult" class="analysis-container">
+                    Select an asset to load analysis...
+                </div>
+            </section>
+        </section> <!-- Close strategy-container -->
+    </div> <!-- Close container -->
 
 </body>
 </html>
