@@ -1028,36 +1028,84 @@ def calculate_option_greeks(
 
 
 async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
-    # ... (no changes needed)
     cache_key = f"stock_{stock_symbol}"
     cached = stock_data_cache.get(cache_key)
     if cached: return cached
+
     logger.info(f"Fetching stock data for: {stock_symbol}")
+    info = None # Initialize info
+    h1d, h50d, h200d = None, None, None # Initialize history dataframes
+
     try:
-        loop = asyncio.get_running_loop(); stock = await loop.run_in_executor(None, yf.Ticker, stock_symbol)
-        # Fetch history in parallel
-        t1=loop.run_in_executor(None, stock.history, "1d");
-        t2=loop.run_in_executor(None, stock.history, "50d")
-        t3=loop.run_in_executor(None, stock.history, "200d");
-        t4=loop.run_in_executor(None, getattr, stock, 'info') # Fetch info concurrently
-        h1d,h50d,h200d,info = await asyncio.gather(t1,t2,t3,t4)
+        loop = asyncio.get_running_loop()
+        stock = await loop.run_in_executor(None, yf.Ticker, stock_symbol)
 
-        if h1d.empty:
-             logger.warning(f"No 1-day history found for {stock_symbol}"); return None
-        cp = h1d["Close"].iloc[-1] if not h1d["Close"].empty else info.get("currentPrice") # Fallback to info
-        if cp is None: cp = info.get("previousClose") # Further fallback
-        vol=h1d["Volume"].iloc[-1] if not h1d["Volume"].empty else info.get("volume", 0)
+        # --- Fetch info with specific error handling ---
+        try:
+            logger.debug(f"Attempting to fetch info for {stock_symbol}")
+            # Run the synchronous get_info in an executor
+            info = await loop.run_in_executor(None, getattr, stock, 'info')
+            if not info: # Check if info is empty
+                 logger.warning(f"Received empty info dictionary for {stock_symbol} from yfinance.")
+                 # Treat empty info as a failure for reliable analysis
+                 return None # Or decide if you can proceed with partial data
+        except json.JSONDecodeError as json_err:
+            # Handle cases where yfinance gets non-JSON response for info
+            logger.error(f"JSONDecodeError fetching info for {stock_symbol}: {json_err}. Yahoo might be blocking or symbol invalid.", exc_info=False)
+            return None # Cannot proceed without info
+        except Exception as info_err:
+            # Catch other potential errors during info fetch
+            logger.error(f"Error fetching info for {stock_symbol}: {info_err}", exc_info=True)
+            return None # Cannot proceed without info
 
-        ma50=h50d["Close"].mean() if not h50d.empty else None;
-        ma200=h200d["Close"].mean() if not h200d.empty else None
-        mc=info.get("marketCap"); pe=info.get("trailingPE"); eps=info.get("trailingEps"); sec=info.get("sector","N/A"); ind=info.get("industry","N/A")
+        # --- Fetch history (best effort) ---
+        try:
+            logger.debug(f"Attempting to fetch history for {stock_symbol}")
+            t1=loop.run_in_executor(None, stock.history, "1d");
+            t2=loop.run_in_executor(None, stock.history, "50d")
+            t3=loop.run_in_executor(None, stock.history, "200d");
+            # Gather history results
+            h1d, h50d, h200d = await asyncio.gather(t1, t2, t3)
+        except Exception as hist_err:
+             logger.warning(f"Error fetching history for {stock_symbol}: {hist_err}. Proceeding with info data only if possible.", exc_info=False)
+             # Allow proceeding even if history fails, analysis prompt can handle missing MAs
 
-        if cp is None: logger.warning(f"Could not determine current price for {stock_symbol}"); return None
+        # --- Process Data (carefully check for missing values) ---
+        cp = info.get("currentPrice") or info.get("previousClose") # Get current price first
+        if cp is None and h1d is not None and not h1d.empty: # Fallback to 1-day history close
+             cp = h1d["Close"].iloc[-1]
 
-        data = {"current_price":cp,"volume":vol,"moving_avg_50":ma50,"moving_avg_200":ma200,"market_cap":mc,"pe_ratio":pe,"eps":eps,"sector":sec,"industry":ind}
-        stock_data_cache[cache_key] = data;
+        # If still no price, we cannot proceed reliably
+        if cp is None:
+             logger.error(f"Could not determine current/previous price for {stock_symbol}. Cannot generate analysis data.")
+             return None
+
+        vol = info.get("volume", 0)
+        if vol == 0 and h1d is not None and not h1d.empty: # Fallback to 1d volume
+             vol = h1d["Volume"].iloc[-1]
+
+        ma50 = h50d["Close"].mean() if h50d is not None and not h50d.empty else None
+        ma200 = h200d["Close"].mean() if h200d is not None and not h200d.empty else None
+
+        mc = info.get("marketCap")
+        pe = info.get("trailingPE")
+        eps = info.get("trailingEps")
+        sec = info.get("sector", "N/A")
+        ind = info.get("industry", "N/A")
+
+        data = {
+            "current_price": cp, "volume": vol, "moving_avg_50": ma50,
+            "moving_avg_200": ma200, "market_cap": mc, "pe_ratio": pe,
+            "eps": eps, "sector": sec, "industry": ind
+        }
+        stock_data_cache[cache_key] = data
+        logger.info(f"Successfully processed stock data for {stock_symbol}")
         return data
-    except Exception as e: logger.error(f"Error fetching stock data for {stock_symbol}: {e}", exc_info=True); return None
+
+    except Exception as e:
+        # Catch any other unexpected errors during the overall process
+        logger.error(f"Unexpected error in fetch_stock_data_async for {stock_symbol}: {e}", exc_info=True)
+        return None
 
 
 async def fetch_latest_news_async(asset: str) -> List[Dict[str, str]]:
@@ -1361,31 +1409,79 @@ async def get_expiry_dates(asset: str = Query(...)): # Endpoint stays async
 
 
 @app.get("/get_option_chain", tags=["Data"])
-async def get_option_chain(asset: str = Query(...), expiry: str = Query(...)): # Endpoint stays async
+async def get_option_chain(asset: str = Query(...), expiry: str = Query(...)):
     logger.info(f"Request received for option chain: Asset={asset}, Expiry={expiry}")
-    try: datetime.strptime(expiry, '%Y-%m-%d')
-    except ValueError: raise HTTPException(status_code=400, detail="Invalid expiry date format. Use YYYY-MM-DD.")
-
-    sql = """ SELECT oc.strike_price, oc.option_type, oc.open_interest, oc.change_in_oi, ... """ # Your full SQL
-    rows = []
     try:
-        # *** USE SYNC 'with' and sync calls ***
-         with get_db_connection() as conn:
-             with conn.cursor(dictionary=True) as cursor:
-                  cursor.execute(sql, (asset, expiry)) # No await
-                  rows = cursor.fetchall() # No await
-    except (ConnectionError, mysql.connector.Error) as db_err: # ... error handling ...
-        logger.error(f"Error fetching option chain for {asset} {expiry}: {db_err}", exc_info=True);
-        raise HTTPException(status_code=500, detail="Database error fetching option chain.")
-    except Exception as e: # ... error handling ...
-        logger.error(f"Unexpected error fetching option chain for {asset} {expiry}: {e}", exc_info=True);
-        raise HTTPException(status_code=500, detail="Internal server error fetching option chain.")
+        # Validate expiry format
+        datetime.strptime(expiry, '%Y-%m-%d')
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid expiry date format. Use YYYY-MM-DD.")
 
-    if not rows: return {"option_chain": {}}
-    # ... (Processing rows into option_chain dict - this is sync) ...
+    # SQL using NAMED placeholders (e.g., %(key)s)
+    sql = """
+        SELECT
+            oc.strike_price, oc.option_type, oc.open_interest, oc.change_in_oi,
+            oc.implied_volatility, oc.last_price, oc.total_traded_volume,
+            oc.bid_price, oc.bid_qty, oc.ask_price, oc.ask_qty
+        FROM option_data.option_chain AS oc
+        JOIN option_data.assets AS a ON oc.asset_id = a.id
+        JOIN option_data.expiries AS e ON oc.expiry_id = e.id
+        WHERE a.asset_name = %(asset_name)s AND e.expiry_date = %(expiry_date)s
+        ORDER BY oc.strike_price ASC;
+        """
+    # Parameters as a dictionary
+    params = {
+        "asset_name": asset,
+        "expiry_date": expiry
+    }
+
+    rows = []
+    conn = None # Initialize conn
+    try:
+        logger.info(f"/get_option_chain: Attempting DB connection.")
+        with get_db_connection() as conn:
+            if conn is None: raise ConnectionError("DB connection failed.")
+            logger.info(f"/get_option_chain: Got DB connection. Current DB: '{getattr(conn, 'database', 'N/A')}'")
+            with conn.cursor(dictionary=True) as cursor:
+                logger.info(f"/get_option_chain: Executing SQL with params: {params}")
+                # Execute with the dictionary params
+                cursor.execute(sql, params)
+                rows = cursor.fetchall()
+                logger.info(f"/get_option_chain: Fetched {len(rows)} rows.")
+
+    except mysql.connector.Error as db_err:
+        # Log specific DB errors
+        logger.error(f"Database error in /get_option_chain: {db_err}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Database error fetching option chain.")
+    except ConnectionError as conn_err:
+         logger.error(f"Connection error in /get_option_chain: {conn_err}", exc_info=True)
+         raise HTTPException(status_code=500, detail="DB connection error.")
+    except Exception as e:
+        # Catch other unexpected errors
+        logger.error(f"Unexpected error in /get_option_chain for {asset} {expiry}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error fetching option chain.")
+    finally:
+        logger.info("--- GET /get_option_chain Endpoint END ---")
+
+
+    if not rows:
+         logger.warning(f"No option chain data found for asset '{asset}' and expiry '{expiry}'. Returning empty.")
+         return {"option_chain": {}} # Return empty structure, not 404
+
+    # Process rows (no changes needed here)
     option_chain = defaultdict(lambda: {"call": None, "put": None})
-    # ... (loop through rows) ...
-    return {"option_chain": dict(option_chain)} 
+    for row in rows:
+        strike = row["strike_price"]; opt_type = row.get("option_type")
+        data_for_type = {
+            "last_price": row.get("last_price"), "open_interest": row.get("open_interest"),
+            "change_in_oi": row.get("change_in_oi"), "implied_volatility": row.get("implied_volatility"),
+            "volume": row.get("total_traded_volume"), "bid_price": row.get("bid_price"),
+            "bid_qty": row.get("bid_qty"), "ask_price": row.get("ask_price"), "ask_qty": row.get("ask_qty"),
+        }
+        if opt_type == "PE": option_chain[strike]["put"] = data_for_type
+        elif opt_type == "CE": option_chain[strike]["call"] = data_for_type
+
+    return {"option_chain": dict(option_chain)}
     
 
 @app.get("/get_spot_price", response_model=SpotPriceResponse, tags=["Data"])
@@ -1571,60 +1667,71 @@ async def get_payoff_chart_endpoint(request: PayoffRequest):
 # --- LLM Stock Analysis Endpoint ---
 @app.post("/get_stock_analysis", tags=["Analysis & Payoff"])
 async def get_stock_analysis_endpoint(request: StockRequest):
-    asset = request.asset.upper(); analysis_cache_key = f"analysis_{asset}"
+    asset = request.asset.upper()
+    analysis_cache_key = f"analysis_{asset}"
     cached_analysis = analysis_cache.get(analysis_cache_key)
-    if cached_analysis: logger.info(f"Cache hit analysis: {asset}"); return {"analysis": cached_analysis}
+    if cached_analysis:
+        logger.info(f"Cache hit analysis: {asset}")
+        return {"analysis": cached_analysis}
 
     stock_symbol = "^NSEI" if asset == "NIFTY" else f"{asset}.NS"
-    try: stock_data, latest_news = await asyncio.gather(fetch_stock_data_async(stock_symbol), fetch_latest_news_async(asset))
-    except Exception as e: raise HTTPException(status_code=503, detail=f"Data fetch error for analysis: {e}") from e
-    if not stock_data: raise HTTPException(status_code=404, detail=f"Stock data not found for: {stock_symbol}")
+    stock_data = None # Initialize
+    latest_news = [] # Initialize
 
-    prompt = build_stock_analysis_prompt(asset, stock_data, latest_news) # Calls the REFINED prompt func
     try:
-        # *** Using gemini-1.5-flash-latest - confirmed as advanced free tier ***
-        model = genai.GenerativeModel("gemini-1.5-flash-latest")
-        logger.info(f"Generating Gemini analysis for {asset} using {model.model_name}...")
-
-        # Generation safety settings (Optional - Adjust thresholds if needed)
-        safety_settings = [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-        ]
-        # Setting generation config (Optional - e.g., control randomness)
-        # generation_config = genai.types.GenerationConfig(temperature=0.7) # Example
-
-        response = await model.generate_content_async(
-            prompt,
-            safety_settings=safety_settings
-            # generation_config=generation_config
+        # Fetch data concurrently
+        results = await asyncio.gather(
+            fetch_stock_data_async(stock_symbol),
+            fetch_latest_news_async(asset),
+            return_exceptions=True # Return exceptions instead of raising immediately
         )
 
-        # More robust check for valid response content
-        analysis_text = ""
-        if response.parts:
-             # Sometimes text is within parts, concatenate if needed
-             analysis_text = "".join(part.text for part in response.parts if hasattr(part, 'text'))
+        # Check results from gather
+        if isinstance(results[0], Exception):
+            logger.error(f"fetch_stock_data_async failed for {stock_symbol}: {results[0]}", exc_info=results[0])
+            # Raise 404 specifically if stock data fetch failed
+            raise HTTPException(status_code=404, detail=f"Could not retrieve stock data for {stock_symbol}. It might be delisted or unavailable.")
+        else:
+            stock_data = results[0] # Assign if successful
 
-        if not analysis_text:
-             # Check for blocking reason if text is empty
-             block_reason = response.prompt_feedback.block_reason if response.prompt_feedback else "Unknown"
-             logger.error(f"Gemini response blocked or empty for {asset}. Reason: {block_reason}. Feedback: {response.prompt_feedback}")
-             raise ValueError(f"Content blocked or generation failed. Reason: {block_reason}")
+        # Check stock_data again (belt and suspenders)
+        if not stock_data:
+             logger.error(f"Stock data is None/empty for {stock_symbol} after fetch attempt.")
+             raise HTTPException(status_code=404, detail=f"Stock data not found or incomplete for: {stock_symbol}")
 
+
+        if isinstance(results[1], Exception):
+             logger.warning(f"fetch_latest_news_async failed for {asset}: {results[1]}. Proceeding without news.")
+             latest_news = [{"headline": "Error fetching news.", "summary": "", "link": "#"}] # Placeholder news
+        else:
+             latest_news = results[1]
+
+    except HTTPException as http_err:
+         raise http_err # Re-raise our specific HTTP exceptions
+    except Exception as e:
+        # Catch other errors during data fetching orchestration
+        logger.error(f"Error during concurrent data fetch for analysis ({asset}): {e}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Server error during data fetching for analysis.")
+
+    # --- Proceed only if stock_data is valid ---
+    prompt = build_stock_analysis_prompt(asset, stock_data, latest_news)
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash-latest")
+        logger.info(f"Generating Gemini analysis for {asset}...")
+        response = await model.generate_content_async(prompt)
+
+        if not response.text:
+             logger.error(f"Gemini response missing text for {asset}. Parts: {response.parts}, Feedback: {response.prompt_feedback}")
+             raise ValueError(f"Analysis generation failed (empty/blocked response). Feedback: {response.prompt_feedback}")
+
+        analysis_text = response.text;
         analysis_cache[analysis_cache_key] = analysis_text
         logger.info(f"Successfully generated analysis for {asset}")
         return {"analysis": analysis_text}
 
-    except ValueError as ve: # Catch specific value errors (like blocking)
-        logger.error(f"ValueError during Gemini Generation for {asset}: {ve}")
-        raise HTTPException(status_code=503, detail=f"Analysis generation failed: {ve}")
     except Exception as e:
         logger.error(f"Gemini API or processing error for {asset}: {e}", exc_info=True)
-        # Provide a slightly more informative generic error
-        raise HTTPException(status_code=503, detail=f"Analysis generation failed (API/Processing Error).")
+        raise HTTPException(status_code=503, detail=f"Analysis generation failed: {e}")
 
 
 # ===============================================================
