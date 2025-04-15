@@ -1,6 +1,6 @@
 import bcrypt
 import mysql.connector
-from database import get_db_connection
+from .database import get_db_connection
 from flask import jsonify
 
 # Register user
