@@ -1109,72 +1109,77 @@ async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
 
 
 async def fetch_latest_news_async(asset: str) -> List[Dict[str, str]]:
-    """Fetches latest news headlines and summaries from Yahoo Finance."""
     cache_key = f"news_{asset.upper()}"
     cached = news_cache.get(cache_key)
     if cached: return cached
 
     logger.info(f"Fetching news for: {asset}")
-    # Use ^NSEI for NIFTY index, otherwise append .NS for NSE stocks
     symbol = "^NSEI" if asset.upper() == "NIFTY" else f"{asset.upper()}.NS"
-    url = f"https://finance.yahoo.com/quote/{symbol}/news"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    # Try using the main quote page which sometimes embeds news streams
+    url = f"https://finance.yahoo.com/quote/{symbol}"
+    # Alternate URL if the main page doesn't work:
+    # url = f"https://finance.yahoo.com/quote/{symbol}/news"
+    headers = { # Use a more common user agent
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"
     }
     news_list = []
     try:
         loop = asyncio.get_running_loop()
-        # Correctly run requests.get with timeout in executor
+        logger.debug(f"Requesting news URL: {url}")
         response = await loop.run_in_executor(
-            None,
-            functools.partial(requests.get, url, headers=headers, timeout=10) # Use functools.partial
+            None, functools.partial(requests.get, url, headers=headers, timeout=15) # Increased timeout
         )
-        response.raise_for_status() # Check for HTTP errors
+        response.raise_for_status()
+        logger.debug(f"News URL status code: {response.status_code}")
 
         soup = BeautifulSoup(response.text, "html.parser")
-        # Target the list items containing news links (selector might need adjustment if Yahoo changes layout)
-        news_items = soup.select('li.js-stream-content div') # Adjusted selector based on potential structure
 
-        count = 0
-        processed_links = set() # Avoid duplicate links if structure nests oddly
+        # --- Revised Selector Strategy ---
+        # Strategy 1: Look for common list structures often used for news streams
+        # This targets list items that look like news containers
+        # Update: Yahoo often uses divs with specific data attributes now
+        # Let's try finding divs containing links with specific paths or classes
+        # Common pattern: links contain '/news/' in their href
+        news_items = []
+        potential_items = soup.select('div a[href*="/news/"]') # Find links pointing to news articles
 
-        for item in news_items:
-            if count >= 3: break # Limit to 3 news items
+        processed_urls = set()
+        for link_tag in potential_items:
+            parent_div = link_tag.find_parent('div') # Find a reasonable parent container
+            if not parent_div: continue
 
-            link_tag = item.find('a', href=True)
-            title_tag = item.find('h3')
-            summary_tag = item.find('p')
+            # Try to extract title and summary from the parent container context
+            title_tag = parent_div.find(['h3', 'h2']) # Look for h3 or h2 nearby
+            headline = title_tag.get_text(strip=True) if title_tag else link_tag.get_text(strip=True) # Fallback to link text
+            summary_tag = parent_div.find('p')
+            summary = summary_tag.get_text(strip=True) if summary_tag else "No summary available."
+            link = link_tag.get('href')
 
-            if link_tag and title_tag:
-                link = link_tag['href']
-                # Ensure link is absolute
-                if link.startswith('/'):
-                    link = f"https://finance.yahoo.com{link}"
+            if not link or not headline: continue # Skip if essential parts missing
 
-                # Check if we've already processed this link
-                if link in processed_links:
-                    continue
+            # Make URL absolute
+            if link.startswith('/'):
+                link = f"https://finance.yahoo.com{link}"
 
-                headline = title_tag.get_text(strip=True)
-                summary = summary_tag.get_text(strip=True) if summary_tag else "No summary available."
+            # Avoid duplicates and very short headlines
+            if link not in processed_urls and len(headline) > 10:
+                news_list.append({"headline": headline, "summary": summary, "link": link})
+                processed_urls.add(link)
+                if len(news_list) >= 3: break # Stop after finding 3 items
 
-                if headline: # Ensure headline is not empty
-                    news_list.append({"headline": headline, "summary": summary, "link": link})
-                    processed_links.add(link)
-                    count += 1
-
+        # --- Log if no news found ---
         if not news_list:
-            logger.warning(f"No news items found for {asset} using selector 'li.js-stream-content div'.")
+            logger.warning(f"Could not find news items for {asset} using revised selectors on {url}. Yahoo layout may have changed.")
             news_list.append({"headline": "No recent news found.", "summary": "", "link": "#"})
 
         news_cache[cache_key] = news_list
         return news_list
 
     except requests.exceptions.RequestException as req_err:
-        logger.error(f"Error fetching news URL for {asset}: {req_err}")
+        logger.error(f"Network Error fetching news URL for {asset}: {req_err}")
         return [{"headline": "Error fetching news (Network).", "summary": "", "link": "#"}]
     except Exception as e:
-        logger.error(f"Error fetching/parsing news for {asset}: {e}", exc_info=True)
+        logger.error(f"Error parsing news for {asset}: {e}", exc_info=True)
         return [{"headline": "Error fetching news (Parsing).", "summary": "", "link": "#"}]
 
 
