@@ -144,20 +144,18 @@ BREAKEVEN_CLUSTER_GAP_PCT = 0.005
 
 # --- LLM Configuration ---
 try:
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") # <-- LOAD FROM ENVIRONMENT
-    # Fallback for testing if not in env (REMOVE THIS IN PRODUCTION)
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     if not GEMINI_API_KEY:
-         GEMINI_API_KEY = "AIzaSyDd_UVZ_1OeLahVrJ0A-hbazQcr1FOpgPE" # Your hardcoded key
-         logger.warning("!!! Loaded Gemini API Key from hardcoded value - NOT FOR PRODUCTION !!!")
-
-    if not GEMINI_API_KEY:
-        raise ValueError("Gemini API Key is missing in environment variables and fallback.")
+        raise ValueError(
+            "CRITICAL: Gemini API Key (GEMINI_API_KEY) not found in environment variables. "
+            "Analysis features will not work."
+        )
     genai.configure(api_key=GEMINI_API_KEY)
-    logger.info("Gemini API configured.")
+    logger.info("Gemini API configured successfully.")
+except ValueError as ve:
+    logger.error(str(ve))
 except Exception as e:
-    logger.error(f"Failed to configure Gemini API: {e}. Analysis endpoint will likely fail.")
-    # Depending on criticality, you might want to raise SystemExit here
-    # raise SystemExit(f"Gemini API Key configuration failed: {e}") from e
+    logger.error(f"Failed to configure Gemini API: {e}. Analysis endpoint will fail.", exc_info=True)
 
 
 # ===============================================================
@@ -1271,16 +1269,18 @@ async def health_check(): # Already async
      return {"status": "ok", "database": db_status}
 
 @app.get("/get_assets", tags=["Data"])
-async def get_assets(): # Already async
+async def get_assets(): # Endpoint remains async
     logger.info("Request received for asset list.")
     asset_names = []
     try:
-        # *** USE async with and await ***
-        async with get_db_connection() as conn:
-            # Assuming async cursor
-            async with conn.cursor(dictionary=True) as cursor:
-                await cursor.execute("SELECT asset_name FROM option_data.assets ORDER BY asset_name ASC")
-                results = await cursor.fetchall() # await fetchall
+        # Use the standard synchronous context manager from database.py
+        with get_db_connection() as conn: # NO async here
+             # Assuming the yielded connection/cursor are synchronous
+            with conn.cursor(dictionary=True) as cursor: # NO async here
+                # Execute synchronously
+                cursor.execute("SELECT asset_name FROM option_data.assets ORDER BY asset_name ASC") # NO await
+                # Fetch synchronously
+                results = cursor.fetchall() # NO await
                 asset_names = [row["asset_name"] for row in results]
 
         if not asset_names: logger.warning("No assets found in DB.")
