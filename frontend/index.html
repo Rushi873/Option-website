@@ -27,7 +27,7 @@
 
         <!-- Option Chain Section -->
         <section class="option-chain-container card">
-            <h2 id="niftyPrice">Spot Price: -</h2>
+            <h2 id="spotPriceDisplay">Spot Price: -</h2> 
             <div class="controls-row">
                 <label for="asset">Asset:</label>
                 <select id="asset" aria-label="Select Asset"></select>
@@ -96,14 +96,12 @@
                         <!-- <li id="breakeven"><span class="metric-label">Breakeven Points:</span> <span class="metric-value"></span></li> --> <!-- REMOVED Breakeven -->
                         <li id="rewardToRisk"><span class="metric-label">Reward:Risk Ratio:</span> <span class="metric-value"></span></li>
                         <li id="netPremium"><span class="metric-label">Net Premium:</span> <span class="metric-value"></span></li>
-                        <li> <!-- Use a simple div for the breakdown instead of details -->
-                            <div id="costBreakdownContainer" style="display: none;">
-                                <h4 class="breakdown-header">Option Premium Breakdown:</h4>
-                                <ul id="costBreakdownList" class="breakdown-list"></ul>
-                            </div>
-                        </li>
-                    </ul>
-                </div>
+                     </ul>
+                    <!-- Moved Cost Breakdown outside the main metrics UL for better structure -->
+                     <details id="costBreakdownContainer" class="results-details" style="display: none; margin-top: 15px;">
+                         <summary class="breakdown-header">Option Premium Breakdown</summary>
+                          <ul id="costBreakdownList" class="breakdown-list" style="padding: 10px;"></ul>
+                 </div>
             </section>
 
             <!-- Tax Info SECTION -->

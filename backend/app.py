@@ -128,18 +128,30 @@ BREAKEVEN_CLUSTER_GAP_PCT = 0.005
 
 # --- LLM Configuration ---
 try:
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") # <-- LOAD FROM ENVIRONMENT
-    # Fallback for testing if not in env (REMOVE THIS IN PRODUCTION)
-    if not GEMINI_API_KEY:
-         GEMINI_API_KEY = "AIzaSyDd_UVZ_1OeLahVrJ0A-hbazQcr1FOpgPE" # Your hardcoded key
-         logger.warning("!!! Loaded Gemini API Key from hardcoded value - NOT FOR PRODUCTION !!!")
+    # 1. Attempt to load the API key strictly from the environment.
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+    # 2. Validate that the API key was actually loaded.
     if not GEMINI_API_KEY:
-        raise ValueError("Gemini API Key is missing in environment variables and fallback.")
+        # If the key is missing, raise a specific error. Do not use a hardcoded fallback.
+        raise ValueError(
+            "CRITICAL: Gemini API Key (GEMINI_API_KEY) not found in environment variables. "
+            "Ensure it is set in your .env file (for local) or environment settings (for deployment). "
+            "Stock analysis features will not work without it."
+        )
+
+    # 3. Configure the Gemini client ONLY if the key was successfully loaded.
     genai.configure(api_key=GEMINI_API_KEY)
-    logger.info("Gemini API configured.")
+    logger.info("Gemini API configured successfully using key from environment.")
+
+except ValueError as ve:
+    # Catch the specific error for the missing key and log it clearly.
+    logger.error(str(ve))
+    # Depending on how critical the LLM features are, you might want to exit:
+    # raise SystemExit(str(ve)) from ve
 except Exception as e:
-    logger.error(f"Failed to configure Gemini API: {e}. Analysis endpoint will likely fail.")
+    # Catch any other unexpected errors during genai.configure()
+    logger.error(f"Failed to configure Gemini API even after loading key: {e}. Analysis endpoint will likely fail.", exc_info=True)
     # Depending on criticality, you might want to raise SystemExit here
     # raise SystemExit(f"Gemini API Key configuration failed: {e}") from e
 
