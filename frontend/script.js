@@ -23,6 +23,7 @@ const SELECTORS = {
     netPremiumDisplay: "#netPremium .metric-value",   // Target the value span
     costBreakdownContainer: "#costBreakdownContainer",
     costBreakdownList: "#costBreakdownList",
+    newsResultContainer: "#newsResult",
     taxInfoContainer: "#taxInfo",
     greeksTable: "#greeksTable", // Selector for the entire table
     greeksTableBody: "#greeksTable tbody", // Added for direct access if needed
@@ -604,7 +605,99 @@ async function fetchAnalysis(asset) {
         setElementState(SELECTORS.analysisResultContainer, 'error', `Analysis Error: ${error.message}`);
         // Log the full error for debugging
         logger.error(`Error fetching analysis for ${asset}:`, error);
+        if (error.message.includes("Essential stock data not found")) {
+             setElementState(SELECTORS.analysisResultContainer, 'content'); // Set state to content
+             analysisContainer.innerHTML = `<p class="error-message" style="text-align: center; padding: 20px;">${error.message}</p>`; // Display message inside
+        } else {
+             // Display other errors locally too
+             setElementState(SELECTORS.analysisResultContainer, 'error', `Analysis Error: ${error.message}`);
+        }
+        // Do not show global error here
+        // setElementState(SELECTORS.globalErrorDisplay, 'error', `Analysis Error: ${error.message}`); // REMOVE/COMMENT OUT
+        // ***** END CHANGE *****
+         // Re-throw error so handleAssetChange knows about the failure (optional)
+         // throw error;
     }
+}
+
+/** Fetches and renders news for the selected asset */
+async function fetchNews(asset) {
+    if (!asset) return;
+    const newsContainer = document.querySelector(SELECTORS.newsResultContainer);
+    if (!newsContainer) {
+        logger.warn("News container element not found.");
+        return;
+    }
+    setElementState(SELECTORS.newsResultContainer, 'loading', 'Fetching news...');
+
+    try {
+        // Call the new backend endpoint
+        const data = await fetchAPI(`/get_news?asset=${encodeURIComponent(asset)}`);
+        const newsItems = data?.news; // Expects { news: [...] }
+
+        if (Array.isArray(newsItems)) {
+            renderNews(newsContainer, newsItems); // Render the fetched items
+            setElementState(SELECTORS.newsResultContainer, 'content');
+        } else {
+            logger.error("Invalid news data format received:", data);
+            throw new Error("Invalid news data format from server.");
+        }
+    } catch (error) {
+        logger.error(`Error fetching or rendering news for ${asset}:`, error);
+        // Display error within the news container
+        setElementState(SELECTORS.newsResultContainer, 'error', `News Error: ${error.message}`);
+        // Re-throw error so handleAssetChange knows about the failure (optional)
+        // throw error;
+    }
+}
+
+
+/** Renders the news items into the specified container */
+function renderNews(containerElement, newsData) {
+    containerElement.innerHTML = ""; // Clear previous content (loading/error)
+
+    if (!newsData || newsData.length === 0) {
+        containerElement.innerHTML = '<p>No recent news found for this asset.</p>';
+        return;
+    }
+
+    // Handle potential error messages returned within the newsData array
+    if (newsData.length === 1 && newsData[0].headline.startsWith("Error fetching news")) {
+         containerElement.innerHTML = `<p class="error-message">${newsData[0].headline}</p>`;
+         return;
+    }
+     if (newsData.length === 1 && newsData[0].headline.startsWith("No recent news found")) {
+         containerElement.innerHTML = `<p>${newsData[0].headline}</p>`;
+         return;
+    }
+
+
+    const ul = document.createElement("ul");
+    ul.className = "news-list"; // Add class for styling
+
+    newsData.forEach(item => {
+        const li = document.createElement("li");
+        li.className = "news-item"; // Add class for styling
+
+        const headline = document.createElement("div");
+        headline.className = "news-headline";
+        const link = document.createElement("a");
+        link.href = item.link || "#";
+        link.textContent = item.headline || "No Title";
+        link.target = "_blank"; // Open in new tab
+        link.rel = "noopener noreferrer";
+        headline.appendChild(link);
+
+        const summary = document.createElement("p");
+        summary.className = "news-summary";
+        summary.textContent = item.summary || "No summary available.";
+
+        li.appendChild(headline);
+        li.appendChild(summary);
+        ul.appendChild(li);
+    });
+
+    containerElement.appendChild(ul);
 }
 
 
@@ -644,57 +737,52 @@ async function fetchNiftyPrice(asset, isRefresh = false) {
     if (!asset) return;
     const priceElement = document.querySelector(SELECTORS.spotPriceDisplay);
 
-    // Don't show loading state on silent refresh
     if (!isRefresh) {
         setElementState(SELECTORS.spotPriceDisplay, 'loading', 'Spot Price: ...');
     }
 
     try {
-        // Use the dedicated endpoint /get_spot_price
         const data = await fetchAPI(`/get_spot_price?asset=${encodeURIComponent(asset)}`);
-        const newSpotPrice = data?.spot_price; // Backend returns float or null
-        const timestamp = data?.timestamp; // Get timestamp if available
+        const newSpotPrice = data?.spot_price;
+        // const timestamp = data?.timestamp; // We don't need timestamp anymore
 
         if (newSpotPrice === null || typeof newSpotPrice === 'undefined') {
              throw new Error("Spot price not available from API.");
         }
 
-        // Store previous price *before* updating global state if it's the first fetch or manual call
         if (!isRefresh || previousSpotPrice === 0) {
             previousSpotPrice = currentSpotPrice;
         }
-
-        currentSpotPrice = newSpotPrice; // Update global state
+        currentSpotPrice = newSpotPrice;
 
         if (priceElement) {
-            const timeText = timestamp ? ` (as of ${new Date(timestamp).toLocaleTimeString()})` : '';
-            priceElement.textContent = `Spot Price: ${formatCurrency(currentSpotPrice, 2, 'N/A')}${timeText}`;
+            // ***** CHANGE THIS LINE *****
+            // const timeText = timestamp ? ` (as of ${new Date(timestamp).toLocaleTimeString()})` : ''; // REMOVE
+            // priceElement.textContent = `Spot Price: ${formatCurrency(currentSpotPrice, 2, 'N/A')}${timeText}`; // REMOVE
+            priceElement.textContent = `Spot Price: ${formatCurrency(currentSpotPrice, 2, 'N/A')}`; // USE THIS
+            // ***** END OF CHANGE *****
 
-             if (!isRefresh) { // Set content state only on manual/initial load
+             if (!isRefresh) {
                  setElementState(SELECTORS.spotPriceDisplay, 'content');
              }
-
-            // Highlight if the price changed during a refresh cycle AND previous price was valid
             if (isRefresh && currentSpotPrice !== previousSpotPrice && previousSpotPrice !== 0) {
                  logger.debug(`Spot price changed: ${previousSpotPrice} -> ${currentSpotPrice}`);
                  highlightElement(priceElement);
-                 previousSpotPrice = currentSpotPrice; // Update previous price *after* highlighting
+                 previousSpotPrice = currentSpotPrice;
             } else if (isRefresh) {
-                 // If it's a refresh but the price didn't change, ensure previous is updated anyway
                  previousSpotPrice = currentSpotPrice;
             }
         }
     } catch (error) {
-         if (!isRefresh) { // Show error state only on manual/initial load
-             currentSpotPrice = 0; // Reset on error
+         // ... (keep error handling as is) ...
+         if (!isRefresh) {
+             currentSpotPrice = 0;
              previousSpotPrice = 0;
              setElementState(SELECTORS.spotPriceDisplay, 'error', `Spot Price Error`);
          } else {
-             // Log error during refresh but don't change UI state drastically
              logger.warn(`Spot Price refresh Error (${asset}):`, error.message);
          }
-         // Re-throw error if it's critical for initial load?
-         if (!isRefresh) throw error;
+         if (!isRefresh) throw error; // Re-throw only on initial load failure
     }
 }
 
@@ -732,6 +820,8 @@ async function fetchOptionChain(scrollToATM = false, isRefresh = false) {
         const data = await fetchAPI(`/get_option_chain?asset=${encodeURIComponent(asset)}&expiry=${encodeURIComponent(expiry)}`);
         // Backend returns {"option_chain": {strike: {call: {...}, put: {...}}}}
         const currentChainData = data?.option_chain;
+
+        logger.debug(`Received option chain data for ${asset} ${expiry}:`, currentChainData);
 
         if (!currentChainData || Object.keys(currentChainData).length === 0) {
             if(tableBody) tableBody.innerHTML = `<tr><td colspan="7">No option chain data available for ${asset} on ${expiry}</td></tr>`;
@@ -1185,7 +1275,12 @@ function resetResultsUI() {
      displayMetric("N/A", SELECTORS.netPremiumDisplay);
 
      // Reset the labels as well if needed (optional, displayMetric only changes value part)
-     // document.querySelector('#maxProfit .metric-label').textContent = 'Max Profit:'; // Example
+     const newsContainer = document.querySelector(SELECTORS.newsResultContainer);
+     if (newsContainer) {
+         setElementState(SELECTORS.newsResultContainer, 'content'); // Set state
+         newsContainer.innerHTML = '<p class="loading-text">Select an asset to load news...</p>'; // Reset placeholder
+    }
+    // ***** END ADDITION *****
 }
 
 

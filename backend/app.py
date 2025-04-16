@@ -1730,6 +1730,39 @@ async def get_expiry_dates(asset: str = Query(...)):
     return {"expiry_dates": expiries}
 
 
+@app.get("/get_news", tags=["Data"])
+async def get_news_endpoint(asset: str = Query(...)):
+    """Fetches the latest news headlines and summaries for a given asset."""
+    endpoint_name = "get_news_endpoint"
+    logger.info(f"[{endpoint_name}] Request received for news: Asset={asset}")
+    asset_upper = asset.strip().upper()
+    if not asset_upper:
+        raise HTTPException(status_code=400, detail="Asset name required.")
+
+    try:
+        # Use the existing robust async news fetching function
+        news_items = await fetch_latest_news_async(asset_upper)
+        # Check if the fetch itself indicated an error internally
+        if news_items and "Error fetching news" in news_items[0].get("headline", ""):
+            logger.warning(f"[{endpoint_name}] News fetch for {asset} returned an error state.")
+            # Return a slightly different structure or status? For now, return the error item.
+            # return JSONResponse(status_code=503, content={"news": news_items})
+            # Or just return the error message as success
+            return {"news": news_items}
+        elif not news_items:
+             logger.warning(f"[{endpoint_name}] No news items found for {asset}.")
+             # Return an empty list or a specific message
+             return {"news": [{"headline": f"No recent news found for {asset}.", "summary": "", "link": "#"}]}
+        else:
+            logger.info(f"[{endpoint_name}] Successfully fetched {len(news_items)} news items for {asset}")
+            return {"news": news_items}
+    except Exception as e:
+        logger.error(f"[{endpoint_name}] Unexpected error fetching news for {asset}: {e}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Server error fetching news for {asset}.")
+
+        
+
+
 @app.get("/get_option_chain", tags=["Data"])
 async def get_option_chain(asset: str = Query(...), expiry: str = Query(...)):
     logger.info(f"Request received for option chain: Asset={asset}, Expiry={expiry}")
@@ -2056,6 +2089,8 @@ async def get_payoff_chart_endpoint(request: PayoffRequest):
         "charges": results.get("tax"),     # Might be None if tax failed
         "greeks": results.get("greeks", []) # Greeks list, empty if failed
     }
+
+
 
 
 # --- LLM Stock Analysis Endpoint (FIXED 404/Data Handling) ---

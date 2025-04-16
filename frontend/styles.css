@@ -340,3 +340,60 @@ select.error, input.error { border-color: var(--danger-color); }
     .analysis-container { font-size: 0.9rem; }
     .table-wrapper { border-radius: 4px; }
 }
+
+/* ===============================================================
+   News Section
+   =============================================================== */
+#newsSection {
+    background-color: #f8f9fa; /* Optional: different background */
+}
+
+.news-container {
+    /* Styles for the div holding the news list */
+    max-height: 400px; /* Example max height */
+    overflow-y: auto; /* Add scroll if content exceeds max height */
+    padding-right: 10px; /* Space for scrollbar */
+}
+
+.news-list {
+    list-style: none;
+    padding-left: 0;
+    margin: 0;
+}
+
+.news-item {
+    padding: 12px 0;
+    border-bottom: 1px dashed var(--border-color);
+}
+.news-item:last-child {
+    border-bottom: none;
+}
+
+.news-headline {
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+
+.news-headline a {
+    color: var(--primary-hover);
+    text-decoration: none;
+    font-size: 1.05rem;
+}
+
+.news-headline a:hover {
+    text-decoration: underline;
+    color: var(--primary-color);
+}
+
+.news-summary {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    margin: 0;
+}
+
+.news-container .loading-text,
+.news-container .error-message {
+    text-align: center;
+    padding: 20px;
+}
