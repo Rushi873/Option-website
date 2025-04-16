@@ -1264,114 +1264,107 @@ async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
 
     logger.info(f"Fetching stock data for: {stock_symbol}")
     info = None
-    h1d, h5d, h50d, h200d = None, None, None, None # Added 5d for recent close fallback
-    success = False # Flag to track if essential data was fetched
+    h1d, h5d, h50d, h200d = None, None, None, None
+    ticker_obj = None # ***** ADDED: Variable for ticker *****
 
     try:
         loop = asyncio.get_running_loop()
-        # Fetch Ticker object (synchronous part)
+        # --- Step 1: Get Ticker object ---
         try:
-             stock = await loop.run_in_executor(None, yf.Ticker, stock_symbol)
-             if not stock: raise ValueError("yf.Ticker returned None")
+             # Run synchronous yf.Ticker in executor
+             ticker_obj = await loop.run_in_executor(None, yf.Ticker, stock_symbol)
+             # ***** CHANGE: Check if Ticker object itself is valid *****
+             # A common failure mode is getting a basic object with no real data if symbol is bad
+             # We'll check later if we can get *any* price info. If not, ticker is likely invalid.
+             if not ticker_obj: # Basic check
+                 raise ValueError("yf.Ticker returned None or invalid object")
+             logger.debug(f"yf.Ticker object created for {stock_symbol}")
         except Exception as ticker_err:
-             logger.error(f"Failed to create yf.Ticker object for {stock_symbol}: {ticker_err}", exc_info=True)
-             return None # Cannot proceed without ticker
+             logger.error(f"Failed to create or validate yf.Ticker object for {stock_symbol}: {ticker_err}", exc_info=False)
+             return None # CRITICAL FAILURE: Cannot proceed without a valid ticker
 
-        # --- Fetch info with specific error handling ---
+        # --- Step 2: Fetch info (best effort) ---
         try:
             logger.debug(f"Attempting to fetch info for {stock_symbol}")
-            # Run the synchronous get_info in an executor
-            info = await loop.run_in_executor(None, getattr, stock, 'info')
-            # Check if info is useful - might be empty dict {}
+            # Run synchronous .info access in executor
+            info = await loop.run_in_executor(None, getattr, ticker_obj, 'info')
             if not info:
-                 logger.warning(f"Received empty 'info' dictionary for {stock_symbol} from yfinance. Will rely on history.")
-                 # Don't fail yet, history might work
+                 logger.warning(f"Received empty 'info' dictionary for {stock_symbol}. Will rely on history.")
             else:
-                 logger.debug(f"Successfully fetched 'info' for {stock_symbol}. Keys: {list(info.keys())[:5]}...") # Log partial keys
-                 success = True # Got some info data
+                 logger.debug(f"Successfully fetched 'info' dictionary for {stock_symbol}.")
         except json.JSONDecodeError as json_err:
-            logger.error(f"JSONDecodeError fetching info for {stock_symbol}: {json_err}. Symbol likely invalid or delisted.", exc_info=False)
-            # If info fails this way, it's unlikely history will work well either
-            return None
+             # This often indicates an invalid symbol or delisted stock. Consider this critical.
+             logger.error(f"JSONDecodeError fetching info for {stock_symbol}: {json_err}. Symbol likely invalid or delisted.", exc_info=False)
+             return None # CRITICAL FAILURE: Invalid symbol indicated by info fetch failure
         except Exception as info_err:
-            logger.error(f"Error fetching 'info' for {stock_symbol}: {info_err}", exc_info=True)
-            # Allow proceeding if history fetch might still work
+             logger.warning(f"Non-critical error fetching 'info' for {stock_symbol}: {info_err}", exc_info=False)
+             info = {} # Ensure info is an empty dict if fetch fails, not None
 
-        # --- Fetch history concurrently (best effort) ---
+        # --- Step 3: Fetch history concurrently (best effort) ---
         try:
-            logger.debug(f"Attempting to fetch history (1d, 5d, 50d, 200d) for {stock_symbol}")
-            # Add 5d history fetch
+            logger.debug(f"Attempting history fetch for {stock_symbol}")
             tasks = [
-                loop.run_in_executor(None, stock.history, {"period":"1d", "interval":"1d"}),
-                loop.run_in_executor(None, stock.history, {"period":"5d", "interval":"1d"}),
-                loop.run_in_executor(None, stock.history, {"period":"50d", "interval":"1d"}),
-                loop.run_in_executor(None, stock.history, {"period":"200d", "interval":"1d"})
+                loop.run_in_executor(None, ticker_obj.history, {"period":"1d", "interval":"1d"}),
+                loop.run_in_executor(None, ticker_obj.history, {"period":"5d", "interval":"1d"}),
+                loop.run_in_executor(None, ticker_obj.history, {"period":"50d", "interval":"1d"}),
+                loop.run_in_executor(None, ticker_obj.history, {"period":"200d", "interval":"1d"})
             ]
-            # Gather results, allowing exceptions
             results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            # Assign results if successful, log errors otherwise
-            h1d = results[0] if not isinstance(results[0], Exception) else None
-            h5d = results[1] if not isinstance(results[1], Exception) else None
-            h50d = results[2] if not isinstance(results[2], Exception) else None
-            h200d = results[3] if not isinstance(results[3], Exception) else None
-
+            h1d = results[0] if not isinstance(results[0], Exception) and not results[0].empty else None
+            h5d = results[1] if not isinstance(results[1], Exception) and not results[1].empty else None
+            h50d = results[2] if not isinstance(results[2], Exception) and not results[2].empty else None
+            h200d = results[3] if not isinstance(results[3], Exception) and not results[3].empty else None
             if any(isinstance(r, Exception) for r in results):
-                logger.warning(f"One or more history fetches failed for {stock_symbol}. Errors: {[type(e).__name__ for e in results if isinstance(e, Exception)]}")
-            if h1d is not None and not h1d.empty:
-                logger.debug(f"Successfully fetched history (at least 1d) for {stock_symbol}")
-                success = True # Mark success if we got any history
-            else:
-                 logger.warning(f"Failed to fetch even 1d history for {stock_symbol}.")
-
+                logger.warning(f"One or more history fetches failed for {stock_symbol}.")
+            if h1d is None:
+                logger.warning(f"Failed to fetch even 1d history for {stock_symbol}.")
         except Exception as hist_err:
-             logger.warning(f"Unexpected error during history fetch task setup/gathering for {stock_symbol}: {hist_err}", exc_info=True)
-             # Proceed with info data only if available
+             logger.warning(f"Unexpected error during history fetch for {stock_symbol}: {hist_err}", exc_info=False)
 
-        # --- Process Data (Check availability carefully) ---
-        if not success:
-             logger.error(f"Failed to retrieve essential data (info or history) for {stock_symbol}.")
-             return None # Cannot proceed if both info and history failed
-
+        # --- Step 4: Determine Price (CRITICAL) ---
         cp = None
-        # Prioritize live/recent prices from 'info' if available
-        if info:
-            cp = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("ask") or info.get("bid")
+        # Prioritize various fields from 'info'
+        if isinstance(info, dict): # Ensure info is a dict before accessing
+            cp = info.get("currentPrice") or info.get("regularMarketPrice") or \
+                 info.get("bid") or info.get("ask") or \
+                 info.get("previousClose") # Add previous close as fallback
 
-        # Fallback to history if 'info' price missing or invalid
+        # Fallback to history if 'info' price missing
         if cp is None:
-             if h1d is not None and not h1d.empty and 'Close' in h1d.columns:
+             if h1d is not None and 'Close' in h1d.columns:
                  cp = h1d["Close"].iloc[-1]
                  logger.debug(f"Using 1d history close price for {stock_symbol}: {cp}")
-             elif h5d is not None and not h5d.empty and 'Close' in h5d.columns: # Use 5d if 1d fails
+             elif h5d is not None and 'Close' in h5d.columns:
                  cp = h5d["Close"].iloc[-1]
                  logger.debug(f"Using 5d history close price for {stock_symbol}: {cp}")
 
-        # If still no price, we cannot proceed reliably
+        # ***** CHANGE: If NO price found after all attempts, consider it critical failure *****
         if cp is None:
-             logger.error(f"Could not determine current/previous price for {stock_symbol} from info or history. Cannot generate analysis data.")
-             return None
+             logger.error(f"CRITICAL: Could not determine any current/previous price for {stock_symbol} from info or history. Symbol might be invalid or data unavailable.")
+             return None # CRITICAL FAILURE: Can't proceed without price
 
-        # --- Get other fields (handle missing values gracefully) ---
-        vol = info.get("volume") if info else None
-        if vol is None and h1d is not None and not h1d.empty and 'Volume' in h1d.columns:
+        # --- Step 5: Get other fields (handle missing gracefully) ---
+        # Ensure info is a dict before using .get()
+        safe_info = info if isinstance(info, dict) else {}
+        vol = safe_info.get("volume")
+        if vol is None and h1d is not None and 'Volume' in h1d.columns:
              vol = h1d["Volume"].iloc[-1]
 
         # Calculate MAs only if history is valid
-        ma50 = h50d["Close"].mean() if (h50d is not None and not h50d.empty and 'Close' in h50d.columns) else None
-        ma200 = h200d["Close"].mean() if (h200d is not None and not h200d.empty and 'Close' in h200d.columns) else None
+        ma50 = h50d["Close"].mean() if h50d is not None and 'Close' in h50d.columns else None
+        ma200 = h200d["Close"].mean() if h200d is not None and 'Close' in h200d.columns else None
 
-        # Fundamental data - often missing for indices, default to None or "N/A"
-        mc = info.get("marketCap") if info else None
-        pe = info.get("trailingPE") if info else None
-        eps = info.get("trailingEps") if info else None
-        sec = info.get("sector", "N/A") if info else "N/A"
-        ind = info.get("industry", "N/A") if info else "N/A"
-        # For indices like Nifty, these will likely be None/N/A
+        # Fundamental data - use None if missing
+        mc = safe_info.get("marketCap")
+        pe = safe_info.get("trailingPE")
+        eps = safe_info.get("trailingEps")
+        sec = safe_info.get("sector")
+        ind = safe_info.get("industry")
 
-        # Construct the final data dictionary
+        # --- Step 6: Construct final data dictionary ---
+        # Include fields even if None, let the prompt builder handle N/A formatting
         data = {
-            "current_price": cp,
+            "current_price": cp, # Should always have a value if we reach here
             "volume": vol,
             "moving_avg_50": ma50,
             "moving_avg_200": ma200,
@@ -1381,12 +1374,10 @@ async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
             "sector": sec,
             "industry": ind
         }
-        # Filter out None values before caching? Optional.
-        # data_filtered = {k: v for k, v in data.items() if v is not None}
 
-        stock_data_cache[cache_key] = data # Cache the result
-        logger.info(f"Successfully processed stock data for {stock_symbol}. Price: {cp}, 50MA: {ma50}, 200MA: {ma200}")
-        return data
+        stock_data_cache[cache_key] = data
+        logger.info(f"Successfully processed stock data for {stock_symbol}. Price: {cp}")
+        return data # RETURN THE DICTIONARY, even with missing non-critical fields
 
     except Exception as e:
         # Catch any other unexpected errors during the overall process
@@ -1397,111 +1388,71 @@ async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
 # 6. Fetch News (Robust Scraping - FIX for Reliability)
 # ===============================================================
 async def fetch_latest_news_async(asset: str) -> List[Dict[str, str]]:
-    """Fetches latest news from Yahoo Finance using more robust selectors."""
+    """Fetches latest news using feedparser from Google News RSS."""
     cache_key = f"news_{asset.upper()}"
     cached = news_cache.get(cache_key)
     if cached:
         logger.debug(f"Cache hit for news: {asset}")
         return cached
 
-    logger.info(f"Fetching news for: {asset}")
-    # Map common assets to Yahoo tickers
-    asset_upper = asset.upper()
-    if asset_upper == "NIFTY": symbol = "^NSEI"
-    elif asset_upper == "BANKNIFTY": symbol = "^NSEBANK"
-    elif asset_upper == "FINNIFTY": symbol = "NIFTY_FIN_SERVICE.NS" # Check exact ticker
-    else: symbol = f"{asset_upper}.NS" # Default for equities
+    logger.info(f"Fetching news for: {asset} using feedparser/Google News")
+    # Construct Google News RSS URL (India, English)
+    # Adding "stock" or "market" might help filter results
+    search_term = f"{asset} stock market"
+    # URL encoding is generally handled by libraries, but be mindful of special chars in asset if needed
+    gnews_url = f"https://news.google.com/rss/search?q={search_term}&hl=en-IN&gl=IN&ceid=IN:en"
 
-    # Try the main quote page first, as it often embeds news
-    url = f"https://finance.yahoo.com/quote/{symbol}"
-    headers = { # Use a more common user agent
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
-    }
     news_list = []
+    max_news = 5 # Fetch a few headlines
+
     try:
         loop = asyncio.get_running_loop()
-        logger.debug(f"Requesting news URL: {url}")
-        # Use functools.partial to pass arguments to requests.get in executor
-        response = await loop.run_in_executor(
-            None, functools.partial(requests.get, url, headers=headers, timeout=20) # Increased timeout
-        )
-        response.raise_for_status() # Check for HTTP errors like 404, 500
-        logger.debug(f"News URL status code: {response.status_code} for {symbol}")
+        # feedparser is synchronous, run in executor
+        logger.debug(f"Parsing Google News RSS feed: {gnews_url}")
+        feed_data = await loop.run_in_executor(None, feedparser.parse, gnews_url)
 
-        soup = BeautifulSoup(response.text, "html.parser")
+        if feed_data.bozo: # Check if feedparser encountered errors
+             # Log the specific error if available
+             bozo_exception = feed_data.get('bozo_exception', 'Unknown parsing error')
+             logger.warning(f"Feedparser encountered an error for {asset}: {bozo_exception}")
+             # Return error state, but don't raise exception to break asset loading
+             return [{"headline": f"Error parsing news feed for {asset}.", "summary": str(bozo_exception), "link": "#"}]
 
-        # --- Revised Selector Strategy (Targeting common Yahoo Finance structures) ---
-        # Strategy: Find list items (`li`) within unordered lists (`ul`) that look like news streams.
-        # Common class names might involve 'stream', 'content', 'news', 'media', 'js-stream-content'
-        # This is heuristic and might need adjustment if Yahoo changes layout.
-        # Look for list items with a link and some text content suggestive of news.
-        potential_news_items = soup.select('li.js-stream-content div.Ov\\(h\\)') # Common pattern observed Dec 2023 / Jan 2024
+        if not feed_data.entries:
+            logger.warning(f"No news entries found in Google News RSS feed for query: {search_term}")
+            return [{"headline": f"No recent news found for {asset}.", "summary": "", "link": "#"}]
 
-        processed_urls = set()
-        max_news = 5 # Fetch slightly more
+        # Process feed entries
+        for entry in feed_data.entries[:max_news]:
+            headline = entry.get('title', 'No Title')
+            link = entry.get('link', '#')
+            # Summary might be in 'summary' or 'description' field
+            summary = entry.get('summary', entry.get('description', 'No summary available.'))
+            # Basic cleaning of summary (remove potential HTML) - more robust parsing needed if required
+            summary_soup = BeautifulSoup(summary, "html.parser")
+            cleaned_summary = summary_soup.get_text(strip=True)
 
-        logger.debug(f"Found {len(potential_news_items)} potential news items using selector 'li.js-stream-content div.Ov(h)'")
+            # Filter out potential non-news items if possible (e.g., based on title)
+            # Example: skip if title contains "is trading" or similar patterns? (can be brittle)
+            # if " is trading " in headline.lower(): continue
 
-        if not potential_news_items:
-             # Fallback selector attempt (might work on different page versions)
-             potential_news_items = soup.select('div[data-test="news-stream"] li div') # Another possible container structure
-             logger.debug(f"Trying fallback selector 'div[data-test=\"news-stream\"] li div', found {len(potential_news_items)} items.")
+            news_list.append({
+                "headline": headline,
+                "summary": cleaned_summary,
+                "link": link
+            })
 
+        if not news_list: # Should be covered by 'if not feed_data.entries', but for safety
+             return [{"headline": f"No relevant news found for {asset}.", "summary": "", "link": "#"}]
 
-        for item in potential_news_items:
-            link_tag = item.find('a', href=True)
-            title_tag = item.find(['h3']) # Often headline is in h3 inside link
-            para_tag = item.find('p') # Summary paragraph
+        news_cache[cache_key] = news_list # Cache the result
+        logger.info(f"Successfully parsed {len(news_list)} news items for {asset} via feedparser.")
+        return news_list
 
-            if link_tag and title_tag:
-                link = link_tag['href']
-                headline = title_tag.get_text(strip=True)
-                summary = para_tag.get_text(strip=True) if para_tag else "No summary available."
-
-                # Basic validation
-                if not headline or not link.startswith('/news/'): # Ensure it's a news link
-                    continue
-
-                # Make URL absolute
-                if link.startswith('/'):
-                    link = f"https://finance.yahoo.com{link}"
-
-                # Avoid duplicates and very short headlines
-                if link not in processed_urls and len(headline) > 15:
-                    news_list.append({
-                        "headline": headline,
-                        "summary": summary,
-                        "link": link
-                    })
-                    processed_urls.add(link)
-                    if len(news_list) >= max_news:
-                        break # Stop after finding enough items
-
-        # --- Log if no news found ---
-        if not news_list:
-            logger.warning(f"Could not find structured news items for {asset} ({symbol}) using current selectors on {url}. Yahoo layout may have changed. Check HTML structure manually.")
-            # Provide a placeholder indicating no news found
-            news_list.append({"headline": f"No recent news found for {asset}.", "summary": "Yahoo Finance structure might have changed or no news available.", "link": url}) # Link back to quote page
-
-        # Trim to desired number (e.g., 3) after collecting more initially
-        final_news_list = news_list[:3]
-
-        news_cache[cache_key] = final_news_list # Cache the final list
-        logger.info(f"Successfully fetched and parsed {len(final_news_list)} news items for {asset} ({symbol}).")
-        return final_news_list
-
-    except requests.exceptions.Timeout:
-        logger.error(f"Timeout Error fetching news URL for {asset} ({symbol}): {url}")
-        return [{"headline": "Error fetching news (Timeout).", "summary": "", "link": "#"}]
-    except requests.exceptions.RequestException as req_err:
-        # Handles HTTP errors (4xx, 5xx) and connection errors
-        logger.error(f"Network/HTTP Error fetching news URL for {asset} ({symbol}): {req_err}")
-        # Include status code if available
-        status_code = req_err.response.status_code if req_err.response else 'N/A'
-        return [{"headline": f"Error fetching news (Network/HTTP {status_code}).", "summary": str(req_err), "link": "#"}]
     except Exception as e:
-        logger.error(f"Error parsing news for {asset} ({symbol}): {e}", exc_info=True)
-        return [{"headline": "Error fetching news (Parsing).", "summary": "An unexpected error occurred.", "link": "#"}]
+        logger.error(f"Error fetching/parsing news feed for {asset} using feedparser: {e}", exc_info=True)
+        # Return error state
+        return [{"headline": f"Error fetching news for {asset}.", "summary": str(e), "link": "#"}]
 
 
 # ===============================================================
@@ -1821,15 +1772,15 @@ async def get_option_chain(asset: str = Query(...), expiry: str = Query(...)):
         except (ValueError, TypeError): continue
 
         data_for_type = {
-            "last_price": row.get("last_price"),
-            "open_interest": row.get("open_interest"),
-            "change_in_oi": row.get("change_in_oi"),
-            "implied_volatility": row.get("implied_volatility"),
-            "volume": row.get("total_traded_volume"),
-            "bid_price": row.get("bid_price"),
-            "bid_qty": row.get("bid_qty"),
-            "ask_price": row.get("ask_price"),
-            "ask_qty": row.get("ask_qty"),
+            "last_price": _safe_get_float(row, "last_price"),
+            "open_interest": _safe_get_int(row, "open_interest"),
+            "change_in_oi": _safe_get_int(row, "change_in_oi"),
+            "implied_volatility": _safe_get_float(row, "implied_volatility"),
+            "volume": _safe_get_int(row, "total_traded_volume"),
+            "bid_price": _safe_get_float(row, "bid_price"),
+            "bid_qty": _safe_get_int(row, "bid_qty"),
+            "ask_price": _safe_get_float(row, "ask_price"),
+            "ask_qty": _safe_get_int(row, "ask_qty"),
         }
         # Filter out None values within the type data if desired
         # data_for_type = {k: v for k, v in data_for_type.items() if v is not None}
@@ -2122,39 +2073,27 @@ async def get_stock_analysis_endpoint(request: StockRequest):
     logger.info(f"Analysis request for {asset}, using symbol {stock_symbol}")
 
     try:
-        # Fetch data concurrently
-        logger.debug(f"Fetching stock data and news concurrently for {asset} ({stock_symbol})")
-        tasks = {
-            "stock_data": fetch_stock_data_async(stock_symbol),
-            "news": fetch_latest_news_async(asset) # Use original asset name for news
-        }
-        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+        # Fetch stock data FIRST - it's the most critical part
+        logger.debug(f"Fetching stock data for {asset} ({stock_symbol})")
+        stock_data = await fetch_stock_data_async(stock_symbol) # Use updated function
 
-        # --- Process Stock Data Result ---
-        stock_data_result = results[0]
-        if isinstance(stock_data_result, Exception):
-            logger.error(f"Stock data fetch failed for {asset} ({stock_symbol}): {stock_data_result}", exc_info=stock_data_result)
-            # If stock data fetch itself errors out, raise 503 (Service Unavailable)
-            raise HTTPException(status_code=503, detail=f"Error retrieving stock data for {stock_symbol}: {type(stock_data_result).__name__}")
-        elif stock_data_result is None:
-            # fetch_stock_data_async returns None only if it couldn't even get a price.
+        # ***** CHANGE: Check if stock_data is None (critical failure) *****
+        if stock_data is None:
+            # fetch_stock_data_async now returns None only on critical failure (no price/invalid ticker)
             logger.error(f"Essential stock data (e.g., price) not found for {asset} ({stock_symbol}) after fetch attempt.")
             # This is the appropriate case for 404 Not Found.
             raise HTTPException(status_code=404, detail=f"Essential stock data not found for: {stock_symbol}. Symbol might be invalid or delisted.")
         else:
-            stock_data = stock_data_result # Assign successful data fetch
-            logger.info(f"Successfully fetched stock data for {asset} ({stock_symbol}).")
+            logger.info(f"Successfully fetched stock data (may have missing fields) for {asset} ({stock_symbol}).")
 
-        # --- Process News Result ---
-        news_result = results[1]
-        if isinstance(news_result, Exception):
-             logger.warning(f"News fetch failed for {asset}: {news_result}. Proceeding without news.")
-             latest_news = [{"headline": "Error fetching news.", "summary": str(news_result), "link": "#"}]
-        elif not news_result: # Empty list returned (should have placeholder if failed)
-             logger.warning(f"News fetch returned empty list for {asset}. Using placeholder.")
-             latest_news = [{"headline": f"No recent news found for {asset}.", "summary": "", "link": "#"}]
+        # Now fetch news concurrently (or sequentially if preferred)
+        logger.debug(f"Fetching news for {asset}")
+        latest_news = await fetch_latest_news_async(asset) # Use original asset name
+        if not latest_news or "Error fetching news" in latest_news[0].get("headline",""):
+            logger.warning(f"News fetch failed or returned error for {asset}. Proceeding without news.")
+            # Use a placeholder if fetch failed
+            latest_news = [{"headline": f"News data unavailable for {asset}.", "summary": "", "link": "#"}]
         else:
-             latest_news = news_result
              logger.info(f"Successfully fetched news for {asset}.")
 
     except HTTPException as http_err:
@@ -2185,8 +2124,10 @@ async def get_stock_analysis_endpoint(request: StockRequest):
         # Enhanced error checking for Gemini response
         analysis_text = None
         try:
-            analysis_text = response.text # Access text safely
-        except ValueError as resp_err:
+            analysis_cache[analysis_cache_key] = analysis_text
+            logger.info(f"Successfully generated and cached analysis for {asset}")
+            return {"analysis": analysis_text}
+        except (RuntimeError, ValueError) as gen_err:
             # This can happen if the response is blocked due to safety settings etc.
              logger.error(f"Gemini response error for {asset}: {resp_err}. Potentially blocked content.")
              logger.error(f"Gemini Prompt Feedback: {response.prompt_feedback}")
