@@ -225,13 +225,14 @@ def fetch_and_update_single_asset_data(asset_name: str):
     """
     (Used by background thread)
     Fetches LIVE data directly from NSELive and updates the DATABASE for ONE asset.
-    Does NOT interact with the API's in-memory cache directly.
+    DEPENDS ON: assets table having last_spot_price, last_spot_update_time columns.
+    REMAINS SYNCHRONOUS for background thread compatibility.
     """
     global n # Need access to the global NSELive client instance
     func_name = "fetch_and_update_single_asset_data"
     logger.info(f"[{func_name}] Starting live fetch & DB update for: {asset_name}")
     start_time = datetime.now()
-    conn_obj = None
+    conn_obj = None # Initialize conn_obj for finally block
     option_source_data = None
 
     # --- Step 1: Directly Fetch Live Data ---
@@ -267,73 +268,167 @@ def fetch_and_update_single_asset_data(asset_name: str):
             logger.error(f"[{func_name}] Invalid live data structure for {asset_name} after fetch.")
             return
         option_data_list = option_source_data["records"]["data"]
+        # Get spot price here for DB update
+        db_live_spot = _safe_get_float(option_source_data.get("records", {}), "underlyingValue")
+
+        # If list is empty, still try to update spot price
         if not option_data_list:
-            logger.warning(f"[{func_name}] No option data found in live source for {asset_name}.")
-            # Optionally update just the spot price in DB even if chain is empty
-            # ... DB update logic ...
-            return
+            logger.warning(f"[{func_name}] No option data found in live source for {asset_name}. Attempting spot price update only.")
+            # Fall through to DB connection block to update spot
 
         # Database interaction (remains synchronous)
-        with get_db_connection() as conn:
+        with get_db_connection() as conn: # Use the synchronous context manager
             if conn is None: raise ConnectionError("Failed to get DB connection.")
-            conn_obj = conn
+            conn_obj = conn # Assign conn to conn_obj for potential rollback
             with conn.cursor(dictionary=True) as cursor:
                 # Get asset_id (sync)
                 cursor.execute("SELECT id FROM option_data.assets WHERE asset_name = %s", (asset_name,))
                 result = cursor.fetchone()
-                if not result: logger.error(f"[Updater] Asset '{asset_name}' not found in DB."); return
+                if not result:
+                    logger.error(f"[{func_name}] Asset '{asset_name}' not found in DB.")
+                    return # Exit if asset not found
                 asset_id = result["id"]
 
-                # *** Add Spot Price Update to Assets Table ***
-                db_live_spot = _safe_get_float(option_source_data.get("records", {}), "underlyingValue")
+                # *** Update Spot Price in Assets Table (Check Column Exists) ***
                 if db_live_spot is not None:
                     try:
+                        # Ensure the columns last_spot_price and last_spot_update_time exist!
                         cursor.execute(
                             "UPDATE option_data.assets SET last_spot_price = %s, last_spot_update_time = NOW() WHERE id = %s",
                             (db_live_spot, asset_id)
                         )
-                        logger.info(f"[{func_name}] Updated spot price ({db_live_spot}) in DB for asset ID {asset_id}")
+                        if cursor.rowcount > 0:
+                             logger.info(f"[{func_name}] Updated spot price ({db_live_spot}) in DB for asset ID {asset_id}")
+                        else:
+                             logger.warning(f"[{func_name}] Spot price update query affected 0 rows for asset ID {asset_id}.")
                     except mysql.connector.Error as spot_upd_err:
-                         logger.error(f"[{func_name}] Failed to update spot price in DB for {asset_name}: {spot_upd_err}")
+                         logger.error(f"[{func_name}] FAILED to update spot price in DB for {asset_name} (Check if columns exist): {spot_upd_err}")
+                         # Don't necessarily exit, maybe chain update can proceed
                 else:
                     logger.warning(f"[{func_name}] Could not extract spot price from live data for DB update ({asset_name}).")
 
-                # Process Expiries (sync)
+                # If no option data, commit spot price update and exit
+                if not option_data_list:
+                    conn.commit()
+                    logger.info(f"[{func_name}] Committed spot price update only for {asset_name}.")
+                    return
+
+                # --- Process Expiries (Sync) ---
                 expiry_dates_formatted = set()
                 for item in option_data_list:
-                    try: expiry_dates_formatted.add(datetime.strptime(item.get("expiryDate"), "%d-%b-%Y").strftime("%Y-%m-%d"))
-                    except Exception: pass
+                    raw_expiry = item.get("expiryDate")
+                    if raw_expiry:
+                        try:
+                            expiry_dates_formatted.add(datetime.strptime(raw_expiry, "%d-%b-%Y").strftime("%Y-%m-%d"))
+                        except (ValueError, TypeError):
+                             logger.debug(f"[{func_name}] Skipping invalid expiry format: {raw_expiry}")
+                             pass # Skip invalid formats
 
                 # Delete Old Expiries (sync)
-                today_str = date.today().strftime("%Y-%m-%d"); cursor.execute("DELETE FROM option_data.expiries WHERE asset_id = %s AND expiry_date < %s", (asset_id, today_str))
+                today_str = date.today().strftime("%Y-%m-%d")
+                cursor.execute("DELETE FROM option_data.expiries WHERE asset_id = %s AND expiry_date < %s", (asset_id, today_str))
+                logger.debug(f"[{func_name}] Deleted expiries before {today_str} for asset ID {asset_id} (Affected: {cursor.rowcount}).")
+
 
                 # Upsert Current Expiries & Fetch IDs (sync)
                 expiry_id_map = {}
                 if expiry_dates_formatted:
-                    ins_data=[(asset_id,e) for e in expiry_dates_formatted]; cursor.executemany("INSERT INTO option_data.expiries (asset_id, expiry_date) VALUES (%s, %s) ON DUPLICATE KEY UPDATE expiry_date = VALUES(expiry_date)", ins_data)
-                    placeholders=', '.join(['%s']*len(expiry_dates_formatted)); cursor.execute(f"SELECT id, expiry_date FROM option_data.expiries WHERE asset_id = %s AND expiry_date IN ({placeholders})", (asset_id, *expiry_dates_formatted))
-                    for row in cursor.fetchall(): expiry_id_map[row["expiry_date"].strftime("%Y-%m-%d")] = row["id"]
+                    ins_data = [(asset_id, e) for e in expiry_dates_formatted]
+                    # Use INSERT IGNORE or ON DUPLICATE KEY UPDATE depending on desired behavior for existing dates
+                    upsert_expiry_sql = "INSERT INTO option_data.expiries (asset_id, expiry_date) VALUES (%s, %s) ON DUPLICATE KEY UPDATE expiry_date = VALUES(expiry_date)"
+                    cursor.executemany(upsert_expiry_sql, ins_data)
+                    logger.debug(f"[{func_name}] Upserted {len(ins_data)} expiries for asset ID {asset_id} (Affected: {cursor.rowcount}).")
+
+                    # Fetch IDs for the relevant expiries
+                    placeholders = ', '.join(['%s'] * len(expiry_dates_formatted))
+                    select_expiry_sql = f"SELECT id, expiry_date FROM option_data.expiries WHERE asset_id = %s AND expiry_date IN ({placeholders})"
+                    cursor.execute(select_expiry_sql, (asset_id, *expiry_dates_formatted))
+                    for row in cursor.fetchall():
+                         # Ensure expiry_date is stringified correctly
+                         expiry_key = row["expiry_date"].strftime("%Y-%m-%d") if isinstance(row["expiry_date"], date) else str(row["expiry_date"])
+                         expiry_id_map[expiry_key] = row["id"]
+                    logger.debug(f"[{func_name}] Fetched {len(expiry_id_map)} expiry IDs for mapping.")
+
 
                 # Prepare Option Chain Data (sync)
-                option_chain_data_to_upsert = []; skipped = 0; processed = 0
+                option_chain_data_to_upsert = []
+                skipped = 0
+                processed_options = 0 # Count individual CE/PE options processed
                 for item in option_data_list:
-                    try: # Process row safely
-                        strike=float(item['strikePrice']); raw_expiry=item['expiryDate']; expiry_date_str=datetime.strptime(raw_expiry,"%d-%b-%Y").strftime("%Y-%m-%d"); expiry_id=expiry_id_map.get(expiry_date_str)
-                        if expiry_id is None: skipped+=1; continue
+                    try:
+                        # Safely extract strike and expiry
+                        raw_strike = item.get('strikePrice')
+                        raw_expiry = item.get('expiryDate')
+                        if raw_strike is None or raw_expiry is None:
+                            skipped += 1; continue
+
+                        strike = float(raw_strike) # Convert strike safely
+                        expiry_date_str = datetime.strptime(raw_expiry, "%d-%b-%Y").strftime("%Y-%m-%d")
+                        expiry_id = expiry_id_map.get(expiry_date_str)
+
+                        if expiry_id is None:
+                            logger.debug(f"[{func_name}] Skipping row for expiry {expiry_date_str} as ID not found in map.")
+                            skipped += 1; continue
+
+                        # Process CE and PE safely
                         for opt_type in ["CE", "PE"]:
-                            details = item.get(opt_type);
+                            details = item.get(opt_type)
                             if isinstance(details, dict):
-                                processed+=1; idf=details.get("identifier", f"{asset_name}_{expiry_date_str}_{strike}_{opt_type}")
-                                row_data=(asset_id,expiry_id,strike,opt_type,idf,_safe_get_int(details,"openInterest",0),_safe_get_int(details,"changeinOpenInterest",0),_safe_get_int(details,"totalTradedVolume",0),_safe_get_float(details,"impliedVolatility",0.0),_safe_get_float(details,"lastPrice",0.0),_safe_get_int(details,"bidQty",0),_safe_get_float(details,"bidprice",0.0),_safe_get_int(details,"askQty",0),_safe_get_float(details,"askPrice",0.0),_safe_get_int(details,"totalBuyQuantity",0),_safe_get_int(details,"totalSellQuantity",0))
+                                processed_options += 1 # Increment option count
+                                idf = details.get("identifier", f"{asset_name}_{expiry_date_str}_{strike}_{opt_type}") # Default identifier
+                                # Use safe getters for all numeric fields
+                                row_data = (
+                                    asset_id, expiry_id, strike, opt_type, idf,
+                                    _safe_get_int(details, "openInterest", 0),
+                                    _safe_get_int(details, "changeinOpenInterest", 0),
+                                    _safe_get_int(details, "totalTradedVolume", 0),
+                                    _safe_get_float(details, "impliedVolatility", 0.0),
+                                    _safe_get_float(details, "lastPrice", 0.0),
+                                    _safe_get_int(details, "bidQty", 0),
+                                    _safe_get_float(details, "bidprice", 0.0),
+                                    _safe_get_int(details, "askQty", 0),
+                                    _safe_get_float(details, "askPrice", 0.0),
+                                    _safe_get_int(details, "totalBuyQuantity", 0),
+                                    _safe_get_int(details, "totalSellQuantity", 0)
+                                )
                                 option_chain_data_to_upsert.append(row_data)
-                    except Exception as row_err: skipped+=1; logger.debug(f"Error processing row: {row_err}"); continue
-                logger.debug(f"Prepared {len(option_chain_data_to_upsert)} option rows for {asset_name} ({processed} options, {skipped} rows skipped).")
+                            else:
+                                # Log if CE/PE details are missing or not a dict
+                                logger.debug(f"[{func_name}] Missing or invalid details for {opt_type} at strike {strike}, expiry {expiry_date_str}.")
+                                # Don't increment skipped here unless you count missing CE/PE as skipped rows
+
+                    except (ValueError, TypeError, KeyError) as row_err:
+                        # Catch specific errors during row processing
+                        logger.warning(f"[{func_name}] Error processing live data row: {row_err}. Row snapshot: {item.get('strikePrice')}, {item.get('expiryDate')}")
+                        skipped += 1
+                    except Exception as general_row_err:
+                         # Catch unexpected errors
+                        logger.error(f"[{func_name}] Unexpected error processing live data row: {general_row_err}", exc_info=False)
+                        skipped += 1
+
+                logger.debug(f"[{func_name}] Prepared {len(option_chain_data_to_upsert)} option rows ({processed_options} options total) for {asset_name} DB upsert. Skipped {skipped} input rows.")
 
                 # Upsert Option Chain Data (sync)
                 if option_chain_data_to_upsert:
-                    sql = "INSERT INTO option_data.option_chain (asset_id, expiry_id, strike_price, option_type, identifier, open_interest, change_in_oi, total_traded_volume, implied_volatility, last_price, bid_qty, bid_price, ask_qty, ask_price, total_buy_qty, total_sell_qty) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE identifier=VALUES(identifier), open_interest=VALUES(open_interest), change_in_oi=VALUES(change_in_oi), total_traded_volume=VALUES(total_traded_volume), implied_volatility=VALUES(implied_volatility), last_price=VALUES(last_price), bid_qty=VALUES(bid_qty), bid_price=VALUES(bid_price), ask_qty=VALUES(ask_qty), ask_price=VALUES(ask_price), total_buy_qty=VALUES(total_buy_qty), total_sell_qty=VALUES(total_sell_qty)"
-                    cursor.executemany(sql, option_chain_data_to_upsert)
-                    logger.debug(f"Upserted option chain for {asset_name} (Affected: {cursor.rowcount}).")
+                    upsert_chain_sql = """
+                        INSERT INTO option_data.option_chain (
+                            asset_id, expiry_id, strike_price, option_type, identifier,
+                            open_interest, change_in_oi, total_traded_volume, implied_volatility,
+                            last_price, bid_qty, bid_price, ask_qty, ask_price,
+                            total_buy_qty, total_sell_qty
+                        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON DUPLICATE KEY UPDATE
+                            identifier=VALUES(identifier), open_interest=VALUES(open_interest),
+                            change_in_oi=VALUES(change_in_oi), total_traded_volume=VALUES(total_traded_volume),
+                            implied_volatility=VALUES(implied_volatility), last_price=VALUES(last_price),
+                            bid_qty=VALUES(bid_qty), bid_price=VALUES(bid_price),
+                            ask_qty=VALUES(ask_qty), ask_price=VALUES(ask_price),
+                            total_buy_qty=VALUES(total_buy_qty), total_sell_qty=VALUES(total_sell_qty)
+                    """
+                    cursor.executemany(upsert_chain_sql, option_chain_data_to_upsert)
+                    logger.debug(f"[{func_name}] Upserted option chain for {asset_name} (Affected: {cursor.rowcount}).")
+                else:
+                     logger.info(f"[{func_name}] No valid option chain data prepared for upsert for {asset_name}.")
 
                 # Commit (sync)
                 conn.commit()
@@ -343,16 +438,25 @@ def fetch_and_update_single_asset_data(asset_name: str):
     except (mysql.connector.Error, ConnectionError) as db_err:
         logger.error(f"[{func_name}] DB/Connection error during update for {asset_name}: {db_err}")
         try:
-            if conn_obj and conn_obj.is_connected(): conn_obj.rollback(); logger.info("Rollback attempted.")
-        except Exception as rb_err: logger.error(f"Rollback failed: {rb_err}")
+            # Check if conn_obj was assigned and is connected before rollback
+            if conn_obj and conn_obj.is_connected():
+                 conn_obj.rollback()
+                 logger.info(f"[{func_name}] Rollback attempted due to DB error.")
+        except Exception as rb_err:
+            logger.error(f"[{func_name}] Rollback failed: {rb_err}")
     except Exception as e:
         logger.error(f"[{func_name}] Unexpected error during DB update phase for {asset_name}: {e}", exc_info=True)
         try:
-            if conn_obj and conn_obj.is_connected(): conn_obj.rollback(); logger.info("Rollback attempted.")
-        except Exception as rb_err: logger.error(f"Rollback failed: {rb_err}")
-    finally:
-        duration = datetime.now() - start_time
-        logger.info(f"[{func_name}] Finished task for asset: {asset_name}. Duration: {duration}")
+             # Check if conn_obj was assigned and is connected before rollback
+            if conn_obj and conn_obj.is_connected():
+                 conn_obj.rollback()
+                 logger.info(f"[{func_name}] Rollback attempted due to unexpected error.")
+        except Exception as rb_err:
+            logger.error(f"[{func_name}] Rollback failed: {rb_err}")
+    # No finally block needed as `with get_db_connection()` handles closing
+
+    duration = datetime.now() - start_time
+    logger.info(f"[{func_name}] Finished task for asset: {asset_name}. Duration: {duration}")
 
 
 def live_update_runner():
@@ -1716,13 +1820,17 @@ async def get_news_endpoint(asset: str = Query(...)):
 
 @app.get("/get_option_chain", tags=["Data"])
 async def get_option_chain(asset: str = Query(...), expiry: str = Query(...)):
+    """
+    API endpoint to fetch option chain data for a given asset and expiry
+    from the database. Uses synchronous DB access with safe type conversion.
+    """
     logger.info(f"Request received for option chain: Asset={asset}, Expiry={expiry}")
     try:
         datetime.strptime(expiry, '%Y-%m-%d') # Validate format
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid expiry date format. Use YYYY-MM-DD.")
 
-    # SQL using named placeholders for clarity
+    # SQL query remains the same
     sql = """
         SELECT
             oc.strike_price, oc.option_type, oc.open_interest, oc.change_in_oi,
@@ -1737,56 +1845,77 @@ async def get_option_chain(asset: str = Query(...), expiry: str = Query(...)):
     params = { "asset_name": asset, "expiry_date": expiry }
     rows = []
     try:
-        logger.debug(f"/get_option_chain: Attempting DB connection.")
-        with get_db_connection() as conn: # Sync context manager
+        # --- Use SYNCHRONOUS DB Connection ---
+        logger.debug(f"/get_option_chain: Attempting DB connection for {asset}/{expiry}.")
+        with get_db_connection() as conn: # Use the synchronous context manager
+            if conn is None: raise ConnectionError("Failed to get DB connection for option chain.") # Check connection
             logger.debug(f"/get_option_chain: Got DB connection. Current DB: '{getattr(conn, 'database', 'N/A')}'")
             with conn.cursor(dictionary=True) as cursor:
                 logger.debug(f"/get_option_chain: Executing SQL with params: {params}")
-                cursor.execute(sql, params) # Sync execute
-                rows = cursor.fetchall() # Sync fetchall
-                logger.info(f"/get_option_chain: Fetched {len(rows)} rows from DB.")
+                cursor.execute(sql, params) # SYNC execute
+                rows = cursor.fetchall() # SYNC fetchall
+                logger.info(f"/get_option_chain: Fetched {len(rows)} rows from DB for {asset}/{expiry}.")
+                if len(rows) > 0:
+                    logger.debug(f"/get_option_chain: First row example: {rows[0]}") # Log first row
+                # No await needed here
 
-    except (ConnectionError, mysql.connector.Error) as db_err:
-        logger.error(f"Database error in /get_option_chain: {db_err}", exc_info=True)
+    except (mysql.connector.Error, ConnectionError) as db_err:
+        logger.error(f"Database error in /get_option_chain for {asset}/{expiry}: {db_err}", exc_info=True)
         raise HTTPException(status_code=500, detail="Database error fetching option chain.")
     except Exception as e:
-        logger.error(f"Unexpected error in /get_option_chain for {asset} {expiry}: {e}", exc_info=True)
+        logger.error(f"Unexpected error in /get_option_chain for {asset}/{expiry}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error fetching option chain.")
 
+    # --- Process rows using Safe Getters ---
     if not rows:
          logger.warning(f"No option chain data found in DB for asset '{asset}' and expiry '{expiry}'. Returning empty.")
-         # Consider fetching live as fallback? Could be slow. For now, return empty.
-         # option_data_live = get_cached_option(asset) # This could fetch live data
-         # if option_data_live ... process it ...
          return {"option_chain": {}} # Return empty structure
 
-    # Process rows from DB
     option_chain = defaultdict(lambda: {"call": None, "put": None})
+    processed_row_count = 0
     for row in rows:
-        strike = row.get("strike_price")
+        if not isinstance(row, dict):
+             logger.warning(f"Skipping non-dictionary row: {row}")
+             continue
+
+        strike_raw = row.get("strike_price")
         opt_type = row.get("option_type")
-        if strike is None or opt_type is None: continue # Skip malformed rows
 
-        # Ensure strike is float for consistency
-        try: strike = float(strike)
-        except (ValueError, TypeError): continue
+        safe_strike = None
+        if strike_raw is not None:
+            try: safe_strike = float(strike_raw)
+            except (ValueError, TypeError): pass # Handled below
 
+        if safe_strike is None or opt_type not in ("CE", "PE"):
+            logger.warning(f"Skipping row with missing/invalid strike or option type. Strike: {strike_raw}, Type: {opt_type}")
+            continue
+
+        # Use the safe helper functions for type conversion and NULL handling
         data_for_type = {
             "last_price": _safe_get_float(row, "last_price"),
             "open_interest": _safe_get_int(row, "open_interest"),
             "change_in_oi": _safe_get_int(row, "change_in_oi"),
             "implied_volatility": _safe_get_float(row, "implied_volatility"),
-            "volume": _safe_get_int(row, "total_traded_volume"),
+            "volume": _safe_get_int(row, "total_traded_volume"), # Mapped from total_traded_volume
             "bid_price": _safe_get_float(row, "bid_price"),
             "bid_qty": _safe_get_int(row, "bid_qty"),
             "ask_price": _safe_get_float(row, "ask_price"),
             "ask_qty": _safe_get_int(row, "ask_qty"),
         }
-        # Filter out None values within the type data if desired
-        # data_for_type = {k: v for k, v in data_for_type.items() if v is not None}
 
-        if opt_type == "PE": option_chain[strike]["put"] = data_for_type
-        elif opt_type == "CE": option_chain[strike]["call"] = data_for_type
+        # Assign the processed data
+        if opt_type == "PE": option_chain[safe_strike]["put"] = data_for_type
+        elif opt_type == "CE": option_chain[safe_strike]["call"] = data_for_type
+        processed_row_count += 1
+
+    logger.info(f"/get_option_chain: Successfully processed {processed_row_count}/{len(rows)} fetched rows into chain structure.")
+
+    # Add logging just before returning
+    if processed_row_count > 0:
+        log_sample_strikes = list(option_chain.keys())[:3]
+        logger.debug(f"/get_option_chain: Returning processed option_chain with {len(option_chain)} strikes. Sample strikes: {log_sample_strikes}. Example data for first sample strike ({log_sample_strikes[0]}): {option_chain.get(log_sample_strikes[0])}")
+    else:
+        logger.debug("/get_option_chain: Returning empty option_chain dictionary.")
 
     return {"option_chain": dict(option_chain)}
 
