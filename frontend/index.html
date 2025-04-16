@@ -9,10 +9,11 @@
     <!-- Defer script loading -->
     <script src="script.js" defer></script>
     <link rel="stylesheet" href="styles.css">
-    <!-- Optional: Link Google Fonts for warmer typography -->
+    <!-- Optional: Link Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon"> <!-- Optional: Add a favicon link -->
 
 </head>
 <body>
@@ -21,20 +22,21 @@
         <h1>Option Strategy Builder</h1>
     </header>
 
-    <div id="globalError" class="error-message" style="display: none;"></div>
+    <div id="globalError" class="error-message hidden"></div> <!-- Start hidden -->
 
     <div class="container">
 
         <!-- Option Chain Section -->
         <section class="option-chain-container card">
-            <h2 id="spotPriceDisplay">Spot Price: -</h2> 
+            <!-- ***** ID CORRECTED to match JS selector ***** -->
+            <h2 id="spotPriceDisplay">Spot Price: -</h2>
             <div class="controls-row">
                 <label for="asset">Asset:</label>
                 <select id="asset" aria-label="Select Asset"></select>
                 <label for="expiry">Expiry:</label>
                 <select id="expiry" aria-label="Select Expiry Date"></select>
             </div>
-            <div class="table-wrapper thin-scrollbar"> <!-- Added thin-scrollbar class -->
+            <div class="table-wrapper thin-scrollbar">
                 <table id="optionChainTable" class="option-chain data-table">
                     <thead>
                         <tr>
@@ -47,7 +49,10 @@
                             <th title="Put Last Traded Price">Put LTP</th>
                         </tr>
                     </thead>
-                    <tbody></tbody>
+                    <tbody>
+                         <!-- Rows added by JS -->
+                         <tr><td colspan="7" class="loading-text">Loading assets...</td></tr>
+                    </tbody>
                 </table>
             </div>
         </section>
@@ -73,7 +78,10 @@
                             <th>Remove</th>
                         </tr>
                     </thead>
-                    <tbody></tbody>
+                    <tbody>
+                        <!-- Rows added by JS -->
+                        <tr><td colspan="7">No positions added. Click option prices in the chain to add.</td></tr>
+                    </tbody>
                 </table>
             </div>
 
@@ -91,24 +99,27 @@
                 <h3 class="section-subheader">Strategy Metrics</h3>
                 <div id="strategyMetrics">
                      <ul class="metrics-list">
-                        <li id="maxProfit"><span class="metric-label">Max Profit:</span> <span class="metric-value"></span></li>
-                        <li id="maxLoss"><span class="metric-label">Max Loss:</span> <span class="metric-value"></span></li>
-                        <!-- <li id="breakeven"><span class="metric-label">Breakeven Points:</span> <span class="metric-value"></span></li> --> <!-- REMOVED Breakeven -->
-                        <li id="rewardToRisk"><span class="metric-label">Reward:Risk Ratio:</span> <span class="metric-value"></span></li>
-                        <li id="netPremium"><span class="metric-label">Net Premium:</span> <span class="metric-value"></span></li>
-                     </ul>
-                    <!-- Moved Cost Breakdown outside the main metrics UL for better structure -->
-                     <details id="costBreakdownContainer" class="results-details" style="display: none; margin-top: 15px;">
-                         <summary class="breakdown-header">Option Premium Breakdown</summary>
-                          <ul id="costBreakdownList" class="breakdown-list" style="padding: 10px;"></ul>
-                 </div>
+                        <li id="maxProfit"><span class="metric-label">Max Profit:</span> <span class="metric-value">N/A</span></li>
+                        <li id="maxLoss"><span class="metric-label">Max Loss:</span> <span class="metric-value">N/A</span></li>
+                        <!-- ***** Breakeven Reinstated ***** -->
+                        <li id="breakeven"><span class="metric-label">Breakeven Points:</span> <span class="metric-value">N/A</span></li>
+                        <li id="rewardToRisk"><span class="metric-label">Reward:Risk Ratio:</span> <span class="metric-value">N/A</span></li>
+                        <li id="netPremium"><span class="metric-label">Net Premium:</span> <span class="metric-value">N/A</span></li>
+                    </ul>
+                     <!-- Cost Breakdown moved outside UL -->
+                    <details id="costBreakdownContainer" class="results-details hidden" style="margin-top: 15px;">
+                        <summary class="breakdown-header">Option Premium Breakdown</summary>
+                         <ul id="costBreakdownList" class="breakdown-list" style="padding: 10px;"></ul>
+                    </details>
+                </div>
             </section>
 
             <!-- Tax Info SECTION -->
-            <section id="taxInfoSection" class="results-section card card-accent-warning"> <!-- Added accent class -->
+            <section id="taxInfoSection" class="results-section card card-accent-warning">
                  <h3 class="section-subheader">Estimated Charges</h3>
                  <div id="taxInfo" >
                     <!-- Tax table/details added by JS -->
+                    <p class="loading-text">Update strategy to calculate charges.</p>
                  </div>
             </section>
 
@@ -118,9 +129,16 @@
                  <div class="table-wrapper thin-scrollbar">
                     <table id="greeksTable" class="data-table greeks-table">
                         <caption class="table-caption">Portfolio Option Greeks</caption>
-                         <thead></thead>
-                         <tbody></tbody>
-                         <tfoot></tfoot>
+                         <thead>
+                             <!-- Header added by JS -->
+                         </thead>
+                         <tbody>
+                            <!-- Rows added by JS -->
+                            <tr><td colspan="9" class="loading-text">Update strategy to calculate Greeks.</td></tr>
+                         </tbody>
+                         <tfoot>
+                             <!-- Footer added by JS -->
+                         </tfoot>
                     </table>
                 </div>
             </section>

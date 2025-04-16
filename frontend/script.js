@@ -2,34 +2,35 @@
 // Configuration & Constants
 // ===============================================================
 // const API_BASE = "http://localhost:8000"; // For Local Hosting
-const API_BASE = "https://option-strategy-website.onrender.com"; // For Production
-const REFRESH_INTERVAL_MS = 3000; // Auto-refresh interval (3 seconds)
+const API_BASE = "https://option-strategy-website.onrender.com"; // For Production (Ensure this matches your deployed backend)
+const REFRESH_INTERVAL_MS = 3000; // Auto-refresh interval (3 seconds )
 const HIGHLIGHT_DURATION_MS = 1500; // How long highlights last
 
 const SELECTORS = {
     assetDropdown: "#asset",
     expiryDropdown: "#expiry",
-    spotPriceDisplay: "#niftyPrice", // Corrected ID (was niftyPrice, likely should be spotPrice)
+    spotPriceDisplay: "#spotPriceDisplay", // CORRECTED ID to match HTML
     optionChainTableBody: "#optionChainTable tbody",
     strategyTableBody: "#strategyTable tbody",
     updateChartButton: "#updateChartBtn",
-    clearPositionsButton: "#clearStrategyBtn",
+    clearPositionsButton: "#clearStrategyBtn", // Corrected ID (was clearPositionsButton)
     payoffChartContainer: "#payoffChartContainer",
     analysisResultContainer: "#analysisResult",
-    maxProfitDisplay: "#maxProfit",
-    maxLossDisplay: "#maxLoss",
-    breakevenDisplay: "#breakeven",
-    rewardToRiskDisplay: "#rewardToRisk",
-    netPremiumDisplay: "#netPremium",
+    maxProfitDisplay: "#maxProfit .metric-value", // Target the value span
+    maxLossDisplay: "#maxLoss .metric-value",     // Target the value span
+    breakevenDisplay: "#breakeven .metric-value", // Target the value span
+    rewardToRiskDisplay: "#rewardToRisk .metric-value", // Target the value span
+    netPremiumDisplay: "#netPremium .metric-value",   // Target the value span
     costBreakdownContainer: "#costBreakdownContainer",
     costBreakdownList: "#costBreakdownList",
     taxInfoContainer: "#taxInfo",
+    greeksTable: "#greeksTable", // Selector for the entire table
     greeksTableBody: "#greeksTable tbody", // Added for direct access if needed
-    greeksTable: "#greeksTable",
     globalErrorDisplay: "#globalError",
 };
 
-const logger = { /* ... logger remains the same ... */
+// Basic Logger
+const logger = {
     debug: (...args) => console.debug('[DEBUG]', ...args),
     info: (...args) => console.log('[INFO]', ...args),
     warn: (...args) => console.warn('[WARN]', ...args),
@@ -40,7 +41,7 @@ const logger = { /* ... logger remains the same ... */
 // Global State
 // ===============================================================
 let currentSpotPrice = 0;
-let strategyPositions = [];
+let strategyPositions = []; // Holds { strike_price, expiry_date, option_type, lots, last_price, iv, days_to_expiry }
 let activeAsset = null;
 let autoRefreshIntervalId = null; // Timer ID for auto-refresh
 let previousOptionChainData = {}; // Store previous chain data for highlighting
@@ -48,43 +49,60 @@ let previousSpotPrice = 0; // Store previous spot price for highlighting
 
 
 // ===============================================================
-// Utility Functions (Minor improvements)
+// Utility Functions (Enhanced)
 // ===============================================================
 
-/** Safely formats a number or returns a fallback string */
+/** Safely formats a number or returns a fallback string, handling backend specials */
 function formatNumber(value, decimals = 2, fallback = "N/A") {
     if (value === null || typeof value === 'undefined') { return fallback; }
+    // Handle specific string representations from backend (like infinity, loss)
     if (typeof value === 'string') {
-        // Handle specific string representations from backend (like infinity)
-        if (["∞", "Infinity"].includes(value)) return "∞";
-        if (["-∞", "-Infinity"].includes(value)) return "-∞";
-        if (["N/A", "Undefined", "Loss"].includes(value)) return value; // Pass through specific statuses
-        // Attempt to convert other strings
+        const upperVal = value.toUpperCase();
+        if (["∞", "INFINITY"].includes(upperVal)) return "∞";
+        if (["-∞", "-INFINITY"].includes(upperVal)) return "-∞";
+        if (["N/A", "UNDEFINED", "LOSS"].includes(upperVal)) return value; // Pass through specific statuses
+        // Attempt to convert other strings (e.g., numbers sent as strings)
     }
     const num = Number(value);
     if (!isNaN(num)) {
         if (num === Infinity) return "∞";
         if (num === -Infinity) return "-∞";
-        return num.toLocaleString(undefined, { // Use locale string for commas
+        // Use locale string for commas and specified decimals
+        return num.toLocaleString(undefined, {
             minimumFractionDigits: decimals,
             maximumFractionDigits: decimals
         });
     }
-    return fallback;
+    // If it's a string we didn't specifically handle and couldn't convert to number
+    if (typeof value === 'string') return value; // Return the original string (might be a label)
+    return fallback; // Fallback for other non-numeric types
 }
 
-/** Safely formats currency */
+/** Safely formats currency, handling backend specials */
 function formatCurrency(value, decimals = 2, fallback = "N/A", prefix = "₹") {
      // Handle specific non-numeric strings first
-    if (typeof value === 'string' && ["∞", "-∞", "N/A", "Undefined", "Loss"].includes(value)) {
-        return value;
+    if (typeof value === 'string') {
+        const upperVal = value.toUpperCase();
+         if (["∞", "INFINITY", "-∞", "-INFINITY", "N/A", "UNDEFINED", "LOSS"].includes(upperVal)) {
+             return value; // Return these special strings directly
+         }
     }
-    const formattedNumber = formatNumber(value, decimals, null); // Use null fallback
+    // Try formatting as number, use null fallback to distinguish between valid 0 and error
+    const formattedNumber = formatNumber(value, decimals, null);
+
     if (formattedNumber !== null && !["∞", "-∞"].includes(formattedNumber)) { // Don't prefix infinity
-        return `${prefix}${formattedNumber}`;
+        // Check if the value was negative before formatting potentially removed the sign (though toLocaleString usually handles it)
+        const originalNum = Number(value);
+        const displayPrefix = (originalNum < 0) ? `-${prefix}` : prefix;
+        // Use the absolute value for formatting if prefixing negative sign manually (usually not needed)
+        return `${displayPrefix}${formatNumber(Math.abs(originalNum), decimals, 'Error')}`;
+        // Simpler version if toLocaleString handles negative signs correctly:
+        // return `${prefix}${formattedNumber}`;
     }
-    return formattedNumber === null ? fallback : formattedNumber; // Return ∞/-∞ as is, or fallback
+    // Return ∞/-∞ as is, or the fallback if formatting failed
+    return formattedNumber === null ? fallback : formattedNumber;
 }
+
 
 /** Helper to display formatted metric/value in a UI element */
 function displayMetric(value, targetElementSelector, prefix = '', suffix = '', decimals = 2, isCurrency = false) {
@@ -93,55 +111,76 @@ function displayMetric(value, targetElementSelector, prefix = '', suffix = '', d
         logger.warn(`displayMetric: Element not found for selector "${targetElementSelector}"`);
         return;
      }
-     const formattedValue = isCurrency
-        ? formatCurrency(value, decimals, "N/A", "") // Let prefix handle ₹ if needed
-        : formatNumber(value, decimals, "N/A");
+     const formatFunc = isCurrency ? formatCurrency : formatNumber;
+     const formattedValue = formatFunc(value, decimals, "N/A", ""); // Get base formatted value
 
-     // Handle cases where value itself is N/A, ∞ etc.
-     if (["N/A", "∞", "-∞", "Undefined", "Loss"].includes(formattedValue)) {
-         element.textContent = `${prefix}${formattedValue}${suffix}`;
-     } else {
-         element.textContent = `${prefix}${isCurrency ? '₹' : ''}${formattedValue}${suffix}`;
-     }
+     // Construct final string
+     element.textContent = `${prefix}${formattedValue}${suffix}`;
 }
 
 /** Sets the loading/error/content state for an element. */
 function setElementState(selector, state, message = 'Loading...') {
     const element = document.querySelector(selector);
     if (!element) { logger.warn(`setElementState: Element not found for "${selector}"`); return; }
+
     const isSelect = element.tagName === 'SELECT';
     const isButton = element.tagName === 'BUTTON';
     const isTbody = element.tagName === 'TBODY';
-    const isContainer = element.tagName === 'DIV' || element.tagName === 'SECTION' || element.id === SELECTORS.payoffChartContainer.substring(1);
+    const isTable = element.tagName === 'TABLE';
+    const isContainer = element.tagName === 'DIV' || element.tagName === 'SECTION' || element.classList.contains('chart-container');
     const isSpan = element.tagName === 'SPAN'; // e.g., spot price part
+    const isErrorMessage = element.id === SELECTORS.globalErrorDisplay.substring(1);
 
-    element.classList.remove('loading', 'error', 'loaded', 'hidden'); // Ensure hidden is removed unless setting hidden
+    // Reset states and styles
+    element.classList.remove('loading', 'error', 'loaded', 'hidden');
     if (isSelect || isButton) element.disabled = false;
     element.style.display = ''; // Default display
-    if (element.classList.contains('error-message')) element.style.color = ''; // Reset error color
+    if (isErrorMessage) {
+        element.style.color = ''; // Reset error color
+        element.style.display = 'none'; // Default hidden for global error
+    }
+    if (isContainer && state !== 'error') { // Clear previous content unless setting new error
+       // element.innerHTML = ''; // Clear only if not setting error
+    }
+
 
     switch (state) {
         case 'loading':
             element.classList.add('loading');
             if (isSelect) element.innerHTML = `<option>${message}</option>`;
             else if (isTbody) element.innerHTML = `<tr><td colspan="7" class="loading-text">${message}</td></tr>`; // Adjust colspan if needed
-            else if (!isButton && !isSpan) element.textContent = message;
-            else if(isSpan) element.textContent = message; // Set loading text for spans too
+            else if (isTable) { // Handle table loading state
+                const caption = element.querySelector('caption');
+                if (caption) caption.textContent += ' (Loading...)';
+                const tbody = element.querySelector('tbody'); if (tbody) tbody.innerHTML = `<tr><td colspan="9" class="loading-text">${message}</td></tr>`; // Colspan for greeks
+                const tfoot = element.querySelector('tfoot'); if (tfoot) tfoot.innerHTML = '';
+            }
+            else if (isContainer) element.innerHTML = `<div class="loading-text" style="padding: 20px; text-align: center;">${message}</div>`;
+            else if (isSpan) element.textContent = message; // Set loading text for spans too
+            else if (!isButton && !isErrorMessage) element.textContent = message; // Other text elements
             if (isSelect || isButton) element.disabled = true;
+            if (isErrorMessage) element.style.display = 'block'; // Show loading if used for global error
             break;
         case 'error':
             element.classList.add('error');
-            const displayMessage = `Error: ${message}`;
+            const displayMessage = `${message}`; // No "Error:" prefix, let context show it's an error
             if (isSelect) { element.innerHTML = `<option>${displayMessage}</option>`; element.disabled = true; }
             else if (isTbody) { element.innerHTML = `<tr><td colspan="7" class="error-message">${displayMessage}</td></tr>`; }
+            else if (isTable) { // Handle table error state
+                 const caption = element.querySelector('caption');
+                 if (caption) caption.textContent += ' (Error)';
+                 const tbody = element.querySelector('tbody'); if (tbody) tbody.innerHTML = `<tr><td colspan="9" class="error-message">${displayMessage}</td></tr>`; // Colspan for greeks
+                 const tfoot = element.querySelector('tfoot'); if (tfoot) tfoot.innerHTML = '';
+            }
             else if (isContainer) { element.innerHTML = `<p class="error-message" style="text-align: center; padding: 20px;">${displayMessage}</p>`; } // Display error within container
             else if (isSpan) { element.textContent = 'Error'; element.classList.add('error-message'); } // Concise error for spans
             else { element.textContent = displayMessage; element.classList.add('error-message');}
+            if (isErrorMessage) element.style.display = 'block'; // Ensure global error is visible
             break;
         case 'content':
             element.classList.add('loaded');
-            if(element.classList.contains('error-message')) element.style.color = '';
             // Calling function will set the actual content after this call
+            if (isErrorMessage) element.style.display = 'none'; // Hide global error when setting other content
             break;
          case 'hidden':
              element.classList.add('hidden'); // Use class for hidden state
@@ -155,29 +194,47 @@ function setElementState(selector, state, message = 'Loading...') {
 function populateDropdown(selector, items, placeholder = "-- Select --", defaultSelectFirst = false) {
     const selectElement = document.querySelector(selector);
     if (!selectElement) return;
-    const currentValue = selectElement.value;
-    selectElement.innerHTML = "";
+    const currentValue = selectElement.value; // Store current value before clearing
+    selectElement.innerHTML = ""; // Clear existing options
+
     if (!items || items.length === 0) {
         selectElement.innerHTML = `<option value="">-- No options available --</option>`;
         selectElement.disabled = true;
         return;
     }
+
     // Optional placeholder
     if (placeholder) {
-        selectElement.innerHTML = `<option value="">${placeholder}</option>`;
+        const placeholderOption = document.createElement("option");
+        placeholderOption.value = "";
+        placeholderOption.textContent = placeholder;
+        placeholderOption.disabled = true; // Make placeholder unselectable if needed
+        // placeholderOption.selected = true; // Select it initially
+        selectElement.appendChild(placeholderOption);
     }
+
     items.forEach(item => {
         const option = document.createElement("option");
         option.value = item;
         option.textContent = item;
         selectElement.appendChild(option);
     });
+
     // Try to restore previous selection or select first item
+    let valueSet = false;
     if (items.includes(currentValue)) {
         selectElement.value = currentValue;
+        valueSet = true;
     } else if (defaultSelectFirst && items.length > 0) {
          selectElement.value = items[0];
+         valueSet = true;
     }
+
+     // If no value was set (e.g., placeholder was added but nothing else selected)
+     if (!valueSet && placeholder) {
+         selectElement.value = ""; // Ensure placeholder is selected
+     }
+
     selectElement.disabled = false;
 }
 
@@ -187,9 +244,8 @@ async function fetchAPI(endpoint, options = {}) {
     const defaultHeaders = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
     options.headers = { ...defaultHeaders, ...options.headers };
     const method = options.method || 'GET';
-    logger.debug(`fetchAPI Request: ${method} ${url}`, options.body ? JSON.parse(options.body) : '');
-    // Don't hide global errors here, let the caller manage based on context
-    // setElementState(SELECTORS.globalErrorDisplay, 'hidden');
+    const requestBody = options.body ? JSON.parse(options.body) : '';
+    logger.debug(`fetchAPI Request: ${method} ${url}`, requestBody);
 
     try {
         const response = await fetch(url, options);
@@ -197,39 +253,56 @@ async function fetchAPI(endpoint, options = {}) {
         const contentType = response.headers.get("content-type");
 
         if (contentType && contentType.includes("application/json")) {
-             responseData = await response.json(); // Attempt to parse JSON
+             try {
+                 responseData = await response.json(); // Attempt to parse JSON
+             } catch (jsonError) {
+                  logger.error(`API Error (${method} ${url} - ${response.status}): Failed to parse JSON response.`, jsonError);
+                  // Throw a specific error for JSON parsing failure
+                  throw new Error(`Invalid JSON response from server (Status: ${response.status})`);
+             }
         } else if (response.status !== 204) { // Handle non-JSON, non-empty responses if necessary
-             logger.warn(`Received non-JSON response from ${method} ${url} (Status: ${response.status})`);
+             logger.warn(`Received non-JSON response from ${method} ${url} (Status: ${response.status}). Body might be plain text.`);
+             // Optionally try reading as text: responseData = await response.text();
         }
 
         logger.debug(`fetchAPI Response Status: ${response.status} for ${method} ${url}`);
 
         if (!response.ok) {
-            // Try to get detail, fallback to statusText, then generic message
-            const errorMessage = responseData?.detail || responseData?.message || response.statusText || `HTTP error ${response.status}`;
+            // Try to get detail from JSON, fallback to statusText, then generic message
+            const errorMessage = responseData?.detail // FastAPI typical error field
+                              || responseData?.message // Other potential error field
+                              || response.statusText   // Standard HTTP status text
+                              || `HTTP error ${response.status}`; // Generic fallback
             logger.error(`API Error (${method} ${url} - ${response.status}): ${errorMessage}`, responseData);
-            throw new Error(errorMessage); // Throw standardized error
+            // Display global error for backend errors (like 500s)
+            setElementState(SELECTORS.globalErrorDisplay, 'error', `Server Error (${response.status}): ${errorMessage}`);
+            throw new Error(errorMessage); // Throw standardized error message
         }
 
+         // Clear global error on successful API call
+         setElementState(SELECTORS.globalErrorDisplay, 'hidden');
          logger.debug(`fetchAPI Response Data:`, responseData);
         return responseData; // Return parsed data (or null for 204)
 
     } catch (error) {
-        logger.error(`Network/Fetch Error (${method} ${url}):`, error);
-        // Display global error only on Network/Fetch errors, not backend 4xx/5xx handled above
-        if (!error.message.startsWith('HTTP error') && !error.message.includes('Stock data not found')) {
-             setElementState(SELECTORS.globalErrorDisplay, 'error', `Network Error: ${error.message || 'Failed to fetch'}`);
-        }
-        throw error; // Re-throw for specific UI handling if needed
+        // Catch network errors or errors thrown above (JSON parse, backend error)
+        logger.error(`Fetch/Network Error or API Error (${method} ${url}):`, error);
+        // Display global error, using the error message generated above or from network failure
+        setElementState(SELECTORS.globalErrorDisplay, 'error', `${error.message || 'Network error or invalid response'}`);
+        throw error; // Re-throw for specific UI handling if needed by caller
     }
 }
+
 
 /** Applies a temporary highlight effect to an element */
 function highlightElement(element) {
     if (!element) return;
     element.classList.add('value-changed');
+    // Use requestAnimationFrame for potentially smoother removal
     setTimeout(() => {
-        element?.classList.remove('value-changed'); // Add optional chaining just in case
+        requestAnimationFrame(() => {
+            element?.classList.remove('value-changed'); // Optional chaining for safety
+        });
     }, HIGHLIGHT_DURATION_MS);
 }
 
@@ -257,25 +330,37 @@ function setupEventListeners() {
     document.querySelector(SELECTORS.updateChartButton)?.addEventListener("click", fetchPayoffChart);
     document.querySelector(SELECTORS.clearPositionsButton)?.addEventListener("click", clearAllPositions);
 
-    // Add listener for strategy table interaction (event delegation)
+    // Event delegation for strategy table interaction
     const strategyTableBody = document.querySelector(SELECTORS.strategyTableBody);
     if (strategyTableBody) {
-        strategyTableBody.addEventListener('change', handleStrategyTableChange);
+        strategyTableBody.addEventListener('input', handleStrategyTableChange); // Use 'input' for immediate feedback on number change
         strategyTableBody.addEventListener('click', handleStrategyTableClick);
     }
+
+    // Event delegation for option chain table clicks (moved from fetchOptionChain)
+     const optionChainTableBody = document.querySelector(SELECTORS.optionChainTableBody);
+     if (optionChainTableBody) {
+         optionChainTableBody.addEventListener('click', handleOptionChainClick);
+     }
 }
 
+
 function loadMarkdownParser() {
-    if (typeof marked === 'undefined') {
-        try {
-            const script = document.createElement("script");
-            script.src = "https://cdn.jsdelivr.net/npm/marked/marked.min.js";
-            script.onload = () => logger.info("Markdown parser (marked.js) loaded.");
-            script.onerror = () => logger.error("Failed to load Markdown parser (marked.js). Analysis rendering may fail.");
-            document.head.appendChild(script);
-        } catch (e) {
-             logger.error("Error creating script tag for marked.js", e);
-        }
+    // Check if marked is already loaded (e.g., if script tag was already in HTML)
+    if (typeof marked !== 'undefined') {
+        logger.info("Markdown parser (marked.js) already available.");
+        return;
+    }
+    // Dynamically load if not present
+    try {
+        const script = document.createElement("script");
+        script.src = "https://cdn.jsdelivr.net/npm/marked/marked.min.js";
+        script.async = true; // Load asynchronously
+        script.onload = () => logger.info("Markdown parser (marked.js) loaded dynamically.");
+        script.onerror = () => logger.error("Failed to load Markdown parser (marked.js). Analysis rendering may fail.");
+        document.head.appendChild(script);
+    } catch (e) {
+         logger.error("Error creating script tag for marked.js", e);
     }
 }
 
@@ -292,10 +377,8 @@ function startAutoRefresh() {
     logger.info(`Starting auto-refresh every ${REFRESH_INTERVAL_MS}ms for ${activeAsset}`);
     // Store previous data *before* starting the interval
     previousSpotPrice = currentSpotPrice;
-    // previousOptionChainData needs to be populated by fetchOptionChain initially
+    // previousOptionChainData should be populated by the initial fetchOptionChain call
     autoRefreshIntervalId = setInterval(refreshLiveData, REFRESH_INTERVAL_MS);
-    // Optionally trigger one immediate refresh on start?
-    // refreshLiveData();
 }
 
 function stopAutoRefresh() {
@@ -312,21 +395,26 @@ async function refreshLiveData() {
         stopAutoRefresh();
         return;
     }
+    const currentExpiry = document.querySelector(SELECTORS.expiryDropdown)?.value;
+    if (!currentExpiry) {
+        logger.debug("Auto-refresh skipped: No expiry selected.");
+        return; // Don't refresh chain if no expiry selected
+    }
+
     logger.debug(`Auto-refreshing data for ${activeAsset}...`);
-    // Fetch data concurrently, but don't stop interval on individual errors
-    // Use Promise.allSettled to avoid stopping if one fails
+    // Fetch data concurrently using Promise.allSettled to avoid stopping if one fails
     const results = await Promise.allSettled([
         fetchNiftyPrice(activeAsset, true), // Pass true to indicate it's a refresh call
         fetchOptionChain(false, true) // No scroll, but is refresh call
     ]);
 
     // Log errors from settled promises if any
-    if (results[0].status === 'rejected') {
-        logger.warn(`Auto-refresh: Spot price fetch failed: ${results[0].reason?.message || results[0].reason}`);
-    }
-     if (results[1].status === 'rejected') {
-        logger.warn(`Auto-refresh: Option chain fetch failed: ${results[1].reason?.message || results[1].reason}`);
-    }
+    results.forEach((result, index) => {
+        if (result.status === 'rejected') {
+            const source = index === 0 ? 'Spot price' : 'Option chain';
+             logger.warn(`Auto-refresh: ${source} fetch failed: ${result.reason?.message || result.reason}`);
+        }
+    });
 }
 
 
@@ -341,7 +429,7 @@ async function handleAssetChange() {
     activeAsset = asset; // Update global state
     stopAutoRefresh(); // Stop refresh when changing asset
 
-    // Clear previous data used for highlighting
+    // Clear previous data used for highlighting and state
     previousOptionChainData = {};
     previousSpotPrice = 0;
     currentSpotPrice = 0; // Reset current spot price
@@ -349,13 +437,14 @@ async function handleAssetChange() {
     if (!asset) {
         // Reset dependent UI if no asset selected
         populateDropdown(SELECTORS.expiryDropdown, [], "-- Select Asset First --");
-        setElementState(SELECTORS.optionChainTableBody, 'content'); // Set state
+        setElementState(SELECTORS.optionChainTableBody, 'content');
         document.querySelector(SELECTORS.optionChainTableBody).innerHTML = `<tr><td colspan="7">Select an Asset</td></tr>`;
-        setElementState(SELECTORS.analysisResultContainer, 'content'); // Set state
-        document.querySelector(SELECTORS.analysisResultContainer).innerHTML = '';
+        setElementState(SELECTORS.analysisResultContainer, 'content');
+        document.querySelector(SELECTORS.analysisResultContainer).innerHTML = 'Select an asset to load analysis...';
         setElementState(SELECTORS.spotPriceDisplay, 'content'); // Set state
         document.querySelector(SELECTORS.spotPriceDisplay).textContent = 'Spot Price: -';
         resetResultsUI();
+        setElementState(SELECTORS.globalErrorDisplay, 'hidden'); // Hide global error
         return;
     }
 
@@ -367,12 +456,8 @@ async function handleAssetChange() {
     resetResultsUI(); // Clear previous results on asset change
     setElementState(SELECTORS.globalErrorDisplay, 'hidden'); // Clear global error on new asset load
 
-    // --- Call Debug Endpoint for Flawed Background Task (Backend Side) ---
-    // This remains backend-specific, frontend doesn't directly control the backend thread
-    // but changing the asset here *should* make the backend thread target the new asset.
-    // The POST request sent previously is just for debugging/forcing selection if needed,
-    // maybe not essential for normal operation if backend reads `selected_asset`.
-    // Let's keep the debug POST for now as per your original code's intent.
+    // --- Call Debug Endpoint (Optional but present in original logic) ---
+    // This tells the backend's background task which asset to focus on.
     try {
         await fetchAPI('/debug/set_selected_asset', {
              method: 'POST', body: JSON.stringify({ asset: asset })
@@ -380,54 +465,54 @@ async function handleAssetChange() {
         logger.warn(`Sent debug request to set backend selected_asset to ${asset}`);
     } catch (debugErr) {
         logger.error("Failed to send debug asset selection:", debugErr.message);
-        // Don't block UI, just show a temporary global error
+        // Display temporary global error, doesn't block UI
         setElementState(SELECTORS.globalErrorDisplay, 'error', `Debug Sync Failed: ${debugErr.message}`);
-        // Hide it after a few seconds
         setTimeout(() => setElementState(SELECTORS.globalErrorDisplay, 'hidden'), 5000);
     }
     // --- End Debug Call ---
 
     try {
-        // Fetch core data in parallel
+        // Fetch core data in parallel using allSettled
         const [spotResult, expiryResult, analysisResult] = await Promise.allSettled([
-            fetchNiftyPrice(asset), // Initial fetch
+            fetchNiftyPrice(asset), // Initial fetch (not refresh)
             fetchExpiries(asset),
             fetchAnalysis(asset)
         ]);
 
         let hasCriticalError = false;
+
+        // Process results
         if (spotResult.status === 'rejected') {
             logger.error(`Error fetching spot price: ${spotResult.reason?.message || spotResult.reason}`);
-            // Spot price failure might be acceptable for some views, but not ATM calc
+            // Spot price failure is problematic but maybe allow continuing
         }
         if (expiryResult.status === 'rejected') {
             logger.error(`Error fetching expiries: ${expiryResult.reason?.message || expiryResult.reason}`);
             hasCriticalError = true; // Can't load chain without expiries
+            setElementState(SELECTORS.expiryDropdown, 'error', 'Failed to load expiries');
+            setElementState(SELECTORS.optionChainTableBody, 'error', 'Failed to load expiries');
         }
         if (analysisResult.status === 'rejected') {
             logger.error(`Error fetching analysis: ${analysisResult.reason?.message || analysisResult.reason}`);
-            // Analysis failure is less critical, page can still function
+            // Analysis failure is less critical, set error state for its container
+             setElementState(SELECTORS.analysisResultContainer, 'error', `Analysis Error: ${analysisResult.reason.message}`);
         }
 
-        // If expiries loaded successfully, option chain fetch was triggered within fetchExpiries
-        // If expiries failed, we need to show an error state for the chain
-        if (hasCriticalError) {
-             setElementState(SELECTORS.optionChainTableBody, 'error', 'Failed to load expiries');
-             setElementState(SELECTORS.expiryDropdown, 'error', 'Failed to load expiries');
-             // Optionally show a global error
-             setElementState(SELECTORS.globalErrorDisplay, 'error', `Failed to load essential data for ${asset}.`);
-        } else {
-            // Start auto-refresh ONLY if initial load was mostly successful
+        // If initial load was okay (no critical errors), start auto-refresh
+        if (!hasCriticalError) {
             startAutoRefresh();
+        } else {
+             setElementState(SELECTORS.globalErrorDisplay, 'error', `Failed to load essential data for ${asset}. Check console.`);
         }
 
     } catch (err) {
-        // Should be caught by Promise.allSettled, but for safety
-        logger.error(`Error fetching initial data for ${asset}:`, err);
+        // Catch unexpected errors during orchestration
+        logger.error(`Unexpected error fetching initial data for ${asset}:`, err);
         setElementState(SELECTORS.globalErrorDisplay, 'error', `Failed to load page data for ${asset}.`);
         stopAutoRefresh(); // Stop refresh on major initial load error
     }
 }
+
 
 /** Handles expiry dropdown change */
 async function handleExpiryChange() {
@@ -466,15 +551,22 @@ async function loadAssets() {
             assetDropdown.value = defaultAsset;
             logger.info(`Defaulting asset selection to: ${defaultAsset}`);
             await handleAssetChange(); // Trigger data load for default
+        } else if (assets.length === 0){
+             logger.warn("No assets found in database.");
+             setElementState(SELECTORS.assetDropdown, 'error', 'No assets found');
+             await handleAssetChange(); // Clear dependent fields
         } else {
-            logger.warn("No assets found. Cannot set default.");
-            await handleAssetChange(); // Call handler to clear dependent fields
+             // Assets exist but neither NIFTY nor the first one is defaultable? Unlikely.
+             await handleAssetChange(); // Clear dependent fields
         }
 
     } catch (error) {
+        logger.error("Failed to load assets:", error);
         setElementState(SELECTORS.assetDropdown, 'error', `Assets Error: ${error.message}`);
         setElementState(SELECTORS.expiryDropdown, 'error', 'Asset load failed');
         setElementState(SELECTORS.optionChainTableBody, 'error', 'Asset load failed');
+        // Show global error as this is critical failure
+        setElementState(SELECTORS.globalErrorDisplay, 'error', `Failed to load assets: ${error.message}`);
     }
 }
 
@@ -483,11 +575,15 @@ async function fetchAnalysis(asset) {
     if (!asset) return;
     setElementState(SELECTORS.analysisResultContainer, 'loading', 'Fetching analysis...');
     try {
-        // Wait for marked.js
-        for (let i=0; i<5 && typeof marked === 'undefined'; i++) {
-            await new Promise(resolve => setTimeout(resolve, 300));
+        // Ensure marked.js is loaded
+        let attempts = 0;
+        while (typeof marked === 'undefined' && attempts < 10) {
+            await new Promise(resolve => setTimeout(resolve, 200)); // Wait 200ms
+            attempts++;
         }
-        if (typeof marked === 'undefined') throw new Error("Markdown parser failed to load.");
+        if (typeof marked === 'undefined') {
+            throw new Error("Markdown parser (marked.js) failed to load in time.");
+        }
 
         const data = await fetchAPI("/get_stock_analysis", {
             method: "POST", body: JSON.stringify({ asset })
@@ -495,14 +591,19 @@ async function fetchAnalysis(asset) {
         const analysisContainer = document.querySelector(SELECTORS.analysisResultContainer);
         if (analysisContainer) {
             const rawAnalysis = data?.analysis || "*No analysis content received.*";
-            // Basic sanitization (replace potential script tags)
-            const potentiallySanitized = rawAnalysis.replace(/<script.*?>.*?<\/script>/gi, '');
+            // Basic sanitization (remove script tags) - consider more robust library if needed
+            const potentiallySanitized = rawAnalysis.replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '');
+            // Use marked.parse() which should be available now
             analysisContainer.innerHTML = marked.parse(potentiallySanitized);
             setElementState(SELECTORS.analysisResultContainer, 'content');
+        } else {
+             logger.warn("Analysis container not found in DOM.");
         }
     } catch (error) {
-        // Use the error message from fetchAPI (which includes backend detail)
+        // Display error within the analysis container
         setElementState(SELECTORS.analysisResultContainer, 'error', `Analysis Error: ${error.message}`);
+        // Log the full error for debugging
+        logger.error(`Error fetching analysis for ${asset}:`, error);
     }
 }
 
@@ -519,21 +620,26 @@ async function fetchExpiries(asset) {
 
         const selectedExpiry = document.querySelector(SELECTORS.expiryDropdown)?.value;
         if (selectedExpiry) {
-            await handleExpiryChange(); // Load chain for the selected expiry
+            // handleExpiryChange will be called automatically by the change event if value changed
+            // If the value didn't change (e.g., only one expiry), manually trigger chain load
+            if (document.querySelector(SELECTORS.expiryDropdown).selectedIndex === (expiries.length > 0 ? 1 : 0)) { // Check if first actual option selected
+                 await fetchOptionChain(true); // Manually load chain for the single/first expiry
+            }
         } else {
+             logger.warn(`No expiry dates found for asset: ${asset}`);
             setElementState(SELECTORS.optionChainTableBody, 'content');
             document.querySelector(SELECTORS.optionChainTableBody).innerHTML = `<tr><td colspan="7">No expiry dates found for ${asset}</td></tr>`;
         }
 
     } catch (error) {
         setElementState(SELECTORS.expiryDropdown, 'error', `Expiries Error: ${error.message}`);
-        setElementState(SELECTORS.optionChainTableBody, 'error', 'Could not load chain (expiry fetch failed)');
+        // Don't set chain error here, let the caller (handleAssetChange) manage overall state
         throw error; // Re-throw so handleAssetChange knows about the failure
     }
 }
 
 
-/** Fetches and displays the spot price, optionally highlights changes */
+/** Fetches and displays the spot price using the correct endpoint */
 async function fetchNiftyPrice(asset, isRefresh = false) {
     if (!asset) return;
     const priceElement = document.querySelector(SELECTORS.spotPriceDisplay);
@@ -544,29 +650,37 @@ async function fetchNiftyPrice(asset, isRefresh = false) {
     }
 
     try {
+        // Use the dedicated endpoint /get_spot_price
         const data = await fetchAPI(`/get_spot_price?asset=${encodeURIComponent(asset)}`);
-        const newSpotPrice = data?.spot_price ?? 0;
+        const newSpotPrice = data?.spot_price; // Backend returns float or null
+        const timestamp = data?.timestamp; // Get timestamp if available
 
-        // Store previous price before updating global state if it's the first fetch or manual call
-         if (!isRefresh || previousSpotPrice === 0) {
+        if (newSpotPrice === null || typeof newSpotPrice === 'undefined') {
+             throw new Error("Spot price not available from API.");
+        }
+
+        // Store previous price *before* updating global state if it's the first fetch or manual call
+        if (!isRefresh || previousSpotPrice === 0) {
             previousSpotPrice = currentSpotPrice;
-         }
+        }
 
         currentSpotPrice = newSpotPrice; // Update global state
 
         if (priceElement) {
-            priceElement.textContent = `Spot Price: ${formatCurrency(currentSpotPrice, 2, 'N/A')}`;
+            const timeText = timestamp ? ` (as of ${new Date(timestamp).toLocaleTimeString()})` : '';
+            priceElement.textContent = `Spot Price: ${formatCurrency(currentSpotPrice, 2, 'N/A')}${timeText}`;
+
              if (!isRefresh) { // Set content state only on manual/initial load
                  setElementState(SELECTORS.spotPriceDisplay, 'content');
              }
 
-            // Highlight if the price changed during a refresh cycle
+            // Highlight if the price changed during a refresh cycle AND previous price was valid
             if (isRefresh && currentSpotPrice !== previousSpotPrice && previousSpotPrice !== 0) {
                  logger.debug(`Spot price changed: ${previousSpotPrice} -> ${currentSpotPrice}`);
                  highlightElement(priceElement);
-                 previousSpotPrice = currentSpotPrice; // Update previous price after highlighting
+                 previousSpotPrice = currentSpotPrice; // Update previous price *after* highlighting
             } else if (isRefresh) {
-                 // If it's a refresh but the price didn't change, ensure previous is updated
+                 // If it's a refresh but the price didn't change, ensure previous is updated anyway
                  previousSpotPrice = currentSpotPrice;
             }
         }
@@ -579,9 +693,11 @@ async function fetchNiftyPrice(asset, isRefresh = false) {
              // Log error during refresh but don't change UI state drastically
              logger.warn(`Spot Price refresh Error (${asset}):`, error.message);
          }
-         // Optionally: Stop refresh if spot price fails repeatedly?
+         // Re-throw error if it's critical for initial load?
+         if (!isRefresh) throw error;
     }
 }
+
 
 /** Fetches and displays the option chain, optionally highlights changes */
 async function fetchOptionChain(scrollToATM = false, isRefresh = false) {
@@ -601,16 +717,21 @@ async function fetchOptionChain(scrollToATM = false, isRefresh = false) {
     try {
         // Ensure spot price is available for ATM calculation if scrolling
         if(currentSpotPrice <= 0 && scrollToATM) {
-            logger.info("Spot price is 0, fetching before option chain for ATM scroll...");
-            await fetchNiftyPrice(asset); // Wait for spot price fetch
+            logger.info("Spot price is 0 or unavailable, fetching before option chain for ATM scroll...");
+            try {
+                 await fetchNiftyPrice(asset); // Wait for spot price fetch
+            } catch (spotError) {
+                logger.warn("Failed to fetch spot price for ATM calculation:", spotError.message);
+            }
             if(currentSpotPrice <= 0) {
-                logger.warn("Spot price still unavailable, cannot calculate ATM strike accurately.");
-                scrollToATM = false; // Disable ATM scrolling
+                logger.warn("Spot price still unavailable after fetch attempt, cannot calculate ATM strike accurately.");
+                scrollToATM = false; // Disable ATM scrolling if spot price fetch failed
             }
         }
 
         const data = await fetchAPI(`/get_option_chain?asset=${encodeURIComponent(asset)}&expiry=${encodeURIComponent(expiry)}`);
-        const currentChainData = data?.option_chain; // Keep the fetched data structure
+        // Backend returns {"option_chain": {strike: {call: {...}, put: {...}}}}
+        const currentChainData = data?.option_chain;
 
         if (!currentChainData || Object.keys(currentChainData).length === 0) {
             if(tableBody) tableBody.innerHTML = `<tr><td colspan="7">No option chain data available for ${asset} on ${expiry}</td></tr>`;
@@ -622,63 +743,62 @@ async function fetchOptionChain(scrollToATM = false, isRefresh = false) {
         // --- Render Table & Handle Highlights ---
         const strikes = Object.keys(currentChainData).map(Number).sort((a, b) => a - b);
         const atmStrike = currentSpotPrice > 0 ? findATMStrike(strikes, currentSpotPrice) : null;
-        const newTbody = document.createElement("tbody");
+        const newTbody = document.createElement("tbody"); // Create new tbody element
 
         strikes.forEach(strike => {
-            const optionData = currentChainData[strike];
+            const optionData = currentChainData[strike] || { call: null, put: null }; // Default if strike somehow missing
             const prevOptionData = previousOptionChainData[strike] || { call: {}, put: {} }; // Get previous data for this strike
             const tr = document.createElement("tr");
-            tr.dataset.strike = strike;
+            tr.dataset.strike = strike; // Store strike on the row
 
             if (atmStrike !== null && Math.abs(strike - atmStrike) < 0.01) {
                 tr.classList.add("atm-strike");
             }
 
+            // Default to empty objects if call/put data is null/missing
             const call = optionData.call || {};
             const put = optionData.put || {};
             const prevCall = prevOptionData.call || {};
             const prevPut = prevOptionData.put || {};
 
-            // Define columns and their properties
+            // Define columns and their properties (matching HTML thead order)
             const columns = [
                 // Calls
-                { class: 'call clickable price', type: 'CE', key: 'last_price', prevData: prevCall, currentData: call, format: val => formatNumber(val, 2, '-') },
-                { class: 'call oi', key: 'open_interest', prevData: prevCall, currentData: call, format: val => formatNumber(val, 0, '-') },
-                { class: 'call iv', key: 'implied_volatility', prevData: prevCall, currentData: call, format: val => `${formatNumber(val, 2, '-')} %` },
+                { class: 'call clickable price', type: 'CE', key: 'last_price', data: call, prevData: prevCall, format: val => formatNumber(val, 2, '-') },
+                { class: 'call oi', key: 'open_interest', data: call, prevData: prevCall, format: val => formatNumber(val, 0, '-') },
+                { class: 'call iv', key: 'implied_volatility', data: call, prevData: prevCall, format: val => `${formatNumber(val, 2, '-')} %` },
                 // Strike
                 { class: 'strike', key: 'strike', isStrike: true, format: val => val },
                 // Puts
-                { class: 'put iv', key: 'implied_volatility', prevData: prevPut, currentData: put, format: val => `${formatNumber(val, 2, '-')} %` },
-                { class: 'put oi', key: 'open_interest', prevData: prevPut, currentData: put, format: val => formatNumber(val, 0, '-') },
-                { class: 'put clickable price', type: 'PE', key: 'last_price', prevData: prevPut, currentData: put, format: val => formatNumber(val, 2, '-') },
+                { class: 'put iv', key: 'implied_volatility', data: put, prevData: prevPut, format: val => `${formatNumber(val, 2, '-')} %` },
+                { class: 'put oi', key: 'open_interest', data: put, prevData: prevPut, format: val => formatNumber(val, 0, '-') },
+                { class: 'put clickable price', type: 'PE', key: 'last_price', data: put, prevData: prevPut, format: val => formatNumber(val, 2, '-') },
             ];
 
             columns.forEach(col => {
                 const td = document.createElement('td');
                 td.className = col.class;
-                let currentValue = col.isStrike ? strike : col.currentData[col.key];
+                let currentValue = col.isStrike ? strike : col.data[col.key]; // Get value from current data
                 td.textContent = col.format(currentValue);
 
-                // Add data attributes for clickable cells
-                if (col.type) td.dataset.type = col.type;
-                if (col.key === 'last_price') td.dataset.price = currentValue || 0;
+                // Add data attributes for clickable cells to easily get data on click
+                if (col.type) {
+                     td.dataset.type = col.type;
+                     // Also store IV in dataset for addPosition helper
+                     const ivValue = col.data['implied_volatility'];
+                     if (ivValue !== null && typeof ivValue !== 'undefined') {
+                         td.dataset.iv = ivValue;
+                     }
+                }
+                if (col.key === 'last_price') td.dataset.price = currentValue ?? 0; // Use ?? for null/undefined -> 0
 
                 // Highlight check for refresh
                 if (isRefresh && !col.isStrike) {
-                     let previousValue = col.prevData[col.key];
-                     // Treat null/undefined as equivalent for change detection? Or different? Let's treat as different.
-                     // Use a tolerance for float comparison if needed, e.g., for IV/Price
-                     const tolerance = 0.001;
-                     let changed = false;
-                     if (typeof currentValue === 'number' && typeof previousValue === 'number') {
-                         changed = Math.abs(currentValue - previousValue) > tolerance;
-                     } else {
-                         changed = currentValue !== previousValue; // Strict comparison for non-numbers or null/undefined
-                     }
-
-                    if (changed && typeof previousValue !== 'undefined') { // Only highlight if previous data existed
-                        logger.debug(`Change detected: Strike ${strike}, Key ${col.key}, Prev: ${previousValue}, Curr: ${currentValue}`);
-                        highlightElement(td);
+                    let previousValue = col.prevData[col.key];
+                    // Strict comparison handles null/undefined vs value, and value vs value changes
+                    if (currentValue !== previousValue && typeof previousValue !== 'undefined') {
+                         logger.debug(`Change detected: Strike ${strike}, Type ${col.type || 'N/A'}, Key ${col.key}, Prev: ${previousValue}, Curr: ${currentValue}`);
+                         highlightElement(td);
                     }
                 }
                 tr.appendChild(td);
@@ -687,25 +807,30 @@ async function fetchOptionChain(scrollToATM = false, isRefresh = false) {
             newTbody.appendChild(tr);
         });
 
+        // Replace the old tbody with the new one
         if (tableBody) {
-             tableBody.parentNode.replaceChild(newTbody, tableBody);
+            // tableBody.innerHTML = newTbody.innerHTML; // Less efficient?
+            tableBody.parentNode.replaceChild(newTbody, tableBody);
+             // Re-attach event listener to the new tbody
+             newTbody.addEventListener('click', handleOptionChainClick);
              if (!isRefresh) setElementState(SELECTORS.optionChainTableBody, 'content');
         }
 
-        // Add event listener *after* replacing
-        newTbody.addEventListener('click', handleOptionChainClick);
 
         // Store current data for next refresh comparison AFTER rendering
         previousOptionChainData = currentChainData;
 
-        // Scroll after rendering
+        // Scroll after rendering and replacing tbody
         if (scrollToATM && atmStrike !== null && !isRefresh) { // Only scroll on initial load/manual change
             setTimeout(() => {
-                const atmRow = newTbody.querySelector(".atm-strike");
+                // Query the new tbody for the ATM row
+                const newTableBody = document.querySelector(SELECTORS.optionChainTableBody); // Re-select the new body
+                const atmRow = newTableBody?.querySelector(".atm-strike");
                 if (atmRow) {
                     atmRow.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
-                } else { logger.warn("ATM strike row not found for scrolling."); }
-            }, 100);
+                    logger.debug(`Scrolled to ATM strike: ${atmStrike}`);
+                } else { logger.warn(`ATM strike row (${atmStrike}) not found for scrolling.`); }
+            }, 150); // Slightly increased delay
         }
 
     } catch (error) {
@@ -733,14 +858,16 @@ function handleOptionChainClick(event) {
     if (!row || !row.dataset.strike) return;
 
     const strike = parseFloat(row.dataset.strike);
-    const type = targetCell.dataset.type;
-    const price = parseFloat(targetCell.dataset.price); // Price from the cell dataset
+    const type = targetCell.dataset.type; // 'CE' or 'PE'
+    const price = parseFloat(targetCell.dataset.price); // Price from the cell's dataset
+    const iv = parseFloat(targetCell.dataset.iv); // IV from the cell's dataset
 
     if (!isNaN(strike) && type && !isNaN(price)) {
-         addPosition(strike, type, price);
+         // Pass IV to addPosition, can be NaN if not found/parsed
+         addPosition(strike, type, price, iv);
     } else {
-        logger.warn('Could not add position - invalid data from clicked cell', { strike, type, price });
-        alert('Could not retrieve option details. Please try again.');
+        logger.warn('Could not add position - invalid data from clicked cell', { strike, type, price, iv });
+        alert('Could not retrieve complete option details (strike, type, price). Please try again.');
     }
 }
 
@@ -748,7 +875,7 @@ function handleOptionChainClick(event) {
 function handleStrategyTableClick(event) {
      // Check for Remove button click
      const removeButton = event.target.closest('button.remove-btn');
-     if (removeButton?.dataset.index) {
+     if (removeButton?.dataset.index) { // Optional chaining
          const index = parseInt(removeButton.dataset.index, 10);
          if (!isNaN(index)) { removePosition(index); }
          return; // Stop further processing
@@ -756,20 +883,21 @@ function handleStrategyTableClick(event) {
 
      // Check for Toggle Buy/Sell button click
      const toggleButton = event.target.closest('button.toggle-buy-sell');
-     if (toggleButton?.dataset.index) {
+     if (toggleButton?.dataset.index) { // Optional chaining
           const index = parseInt(toggleButton.dataset.index, 10);
          if (!isNaN(index)) { toggleBuySell(index); }
          return; // Stop further processing
      }
 }
 
-/** Handles changes within the strategy table body (for lots input) */
+/** Handles input changes within the strategy table body (for lots input) */
 function handleStrategyTableChange(event) {
-    const lotsInput = event.target.closest('input.lots-input');
-     if (lotsInput?.dataset.index) { // Optional chaining
-        const index = parseInt(lotsInput.dataset.index, 10);
+    // Target input elements of type number with class lots-input
+    if (event.target.matches('input[type="number"].lots-input') && event.target.dataset.index) {
+        const index = parseInt(event.target.dataset.index, 10);
         if (!isNaN(index)) {
-            updateLots(index, lotsInput.value);
+            // Use event.target.value directly
+            updateLots(index, event.target.value);
         }
     }
 }
@@ -780,88 +908,108 @@ function handleStrategyTableChange(event) {
 // ===============================================================
 
 /** Adds a position (called by handleOptionChainClick) */
-function addPosition(strike, type, price) {
+function addPosition(strike, type, price, iv) { // Added iv parameter
     const expiry = document.querySelector(SELECTORS.expiryDropdown)?.value;
     if (!expiry) { alert("Please select an expiry date first."); return; }
 
     const lastPrice = (typeof price === 'number' && !isNaN(price)) ? price : 0;
+    const impliedVol = (typeof iv === 'number' && !isNaN(iv) && iv > 0) ? iv : null; // Use fetched IV, null if invalid/missing
+    const dte = calculateDaysToExpiry(expiry);
+
+    if (impliedVol === null) {
+        logger.warn(`Adding position ${type} ${strike} @ ${expiry} without valid IV (${iv}). Greeks calculation may fail for this leg.`);
+        // Optionally alert user? alert(`Warning: Could not find Implied Volatility for ${type} ${strike}. Greeks may be inaccurate.`);
+    }
+     if (dte === null) {
+        logger.error(`Could not calculate Days to Expiry for ${expiry}. Greeks calculation will fail.`);
+        alert(`Error: Invalid expiry date ${expiry} provided.`);
+        return; // Don't add position if DTE calculation fails
+    }
+
 
     const newPosition = {
         strike_price: strike,
         expiry_date: expiry,
         option_type: type, // 'CE' or 'PE'
-        lots: 1,           // Default to 1 lot (Buy)
+        lots: 1,           // Default to 1 lot (BUY)
+        tr_type: 'b',      // Default to buy ('b')
         last_price: lastPrice,
-        // ADDED: Store IV and days_to_expiry if available, needed for Greeks
-        // These need to be fetched from the table or calculated
-        iv: getOptionValueFromTable(strike, type, '.iv'), // Helper needed
-        days_to_expiry: calculateDaysToExpiry(expiry), // Helper needed
+        // Store IV and DTE needed for Greeks payload
+        iv: impliedVol, // Store fetched or null IV
+        days_to_expiry: dte, // Store calculated DTE
     };
     strategyPositions.push(newPosition);
-    updateStrategyTable();
+    updateStrategyTable(); // Update UI
     logger.info("Added position:", newPosition);
-    // Don't auto-update chart on add, let user click Update
+    // Optional: Automatically update chart on add?
+    // fetchPayoffChart();
 }
 
-/** Helper to get a specific value (like IV) from the option chain table */
-function getOptionValueFromTable(strike, type, cellSelectorSuffix) {
-    const tableBody = document.querySelector(SELECTORS.optionChainTableBody);
-    if (!tableBody) return null;
-    const row = tableBody.querySelector(`tr[data-strike="${strike}"]`);
-    if (!row) return null;
-    const cellSelector = `td.${type.toLowerCase()}${cellSelectorSuffix}`; // e.g., td.ce.iv
-    const cell = row.querySelector(cellSelector);
-    if (!cell) return null;
-    // Extract numeric value, handling percentages etc.
-    const text = cell.textContent;
-    if (text && text !== '-') {
-        const num = parseFloat(text.replace('%', '').trim());
-        return isNaN(num) ? null : num;
-    }
-    return null;
-}
+/** Helper to get a specific value (like IV) from the currently rendered option chain table */
+// DEPRECATED: IV is now passed directly from the clicked cell's dataset in handleOptionChainClick
+/* function getOptionValueFromTable(strike, type, cellSelectorSuffix) { ... } */
 
-/** Helper to calculate days to expiry */
+/** Helper to calculate days to expiry from YYYY-MM-DD string */
 function calculateDaysToExpiry(expiryDateStr) {
     try {
-        const expiryDate = new Date(expiryDateStr + 'T00:00:00'); // Treat as local date start
+        // Ensure the date string is valid before creating a Date object
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(expiryDateStr)) {
+             throw new Error("Invalid date format. Expected YYYY-MM-DD.");
+        }
+
+        // Create date objects at UTC midnight to avoid timezone issues affecting day difference
+        const expiryDate = new Date(expiryDateStr + 'T00:00:00Z');
         const today = new Date();
-        today.setHours(0, 0, 0, 0); // Set today to start of day for accurate diff
-        const diffTime = expiryDate - today;
-        if (diffTime < 0) return 0; // Expiry passed
+        // Get today's date at UTC midnight
+        const todayUTC = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+
+         // Check if dates are valid after creation
+        if (isNaN(expiryDate.getTime()) || isNaN(todayUTC.getTime())) {
+            throw new Error("Could not parse dates.");
+        }
+
+        const diffTime = expiryDate - todayUTC; // Difference in milliseconds
+
+        // Calculate days, rounding up. DTE=0 for today's expiry.
         const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-        return diffDays;
+
+        // Return 0 if expiry is in the past according to UTC midnight comparison
+        return Math.max(0, diffDays);
+
     } catch (e) {
         logger.error("Error calculating days to expiry for", expiryDateStr, e);
         return null; // Indicate error
     }
 }
 
+
 /** Updates the strategy table in the UI */
 function updateStrategyTable() {
     const tableBody = document.querySelector(SELECTORS.strategyTableBody);
     if (!tableBody) return;
-    tableBody.innerHTML = "";
+    tableBody.innerHTML = ""; // Clear previous rows
 
     if (strategyPositions.length === 0) {
         tableBody.innerHTML = '<tr><td colspan="7">No positions added. Click option prices in the chain to add.</td></tr>';
-        resetResultsUI();
+        // Don't reset results here, let clearAllPositions or fetchPayoffChart handle it
         return;
     }
 
     strategyPositions.forEach((pos, index) => {
+        // Determine buy/sell based on lots sign
         const isLong = pos.lots >= 0;
+        pos.tr_type = isLong ? 'b' : 's'; // Update internal state if needed (though updateLots should handle this)
         const positionType = isLong ? "BUY" : "SELL";
         const positionClass = isLong ? "long-position" : "short-position";
         const buttonClass = isLong ? "button-buy" : "button-sell";
 
         const row = document.createElement("tr");
         row.className = positionClass;
-        row.dataset.index = index;
+        row.dataset.index = index; // Add index for easy access
 
         row.innerHTML = `
             <td>${pos.option_type}</td>
-            <td>${pos.strike_price}</td>
+            <td>${formatNumber(pos.strike_price, 2)}</td>
             <td>${pos.expiry_date}</td>
             <td>
                 <input type="number" value="${pos.lots}" data-index="${index}" min="-100" max="100" step="1" class="lots-input" aria-label="Lots for position ${index+1}">
@@ -871,37 +1019,42 @@ function updateStrategyTable() {
             </td>
             <td>${formatCurrency(pos.last_price, 2)}</td>
             <td>
-                <button class="remove-btn" data-index="${index}" aria-label="Remove position ${index+1}">×</button>
+                <button class="remove-btn" data-index="${index}" aria-label="Remove position ${index+1}" title="Remove this leg">×</button>
             </td>
         `;
         tableBody.appendChild(row);
     });
 }
 
-/** Updates the number of lots for a position (called by delegation) */
+/** Updates the number of lots for a position */
 function updateLots(index, value) {
     if (index < 0 || index >= strategyPositions.length) return;
+
     const newLots = parseInt(value, 10);
 
     if (isNaN(newLots)) {
-         alert("Please enter a valid integer for lots.");
+         // Optionally provide feedback to the user
+         // alert("Please enter a valid integer for lots.");
+         // Revert input value to the current state
          const inputElement = document.querySelector(`${SELECTORS.strategyTableBody} input.lots-input[data-index="${index}"]`);
          if(inputElement) inputElement.value = strategyPositions[index].lots;
+         logger.warn(`Invalid lots input for index ${index}: "${value}"`);
          return;
     }
 
     if (newLots === 0) {
         logger.info(`Lots set to 0 for index ${index}, removing position.`);
-        removePosition(index); // Remove position if lots are zero
+        removePosition(index); // Remove position if lots become zero
     } else {
         const previousLots = strategyPositions[index].lots;
         strategyPositions[index].lots = newLots;
+        strategyPositions[index].tr_type = newLots >= 0 ? 'b' : 's'; // Update buy/sell type
 
-        // Update UI elements for the specific row
+        // Update UI elements for the specific row for immediate feedback
         const row = document.querySelector(`${SELECTORS.strategyTableBody} tr[data-index="${index}"]`);
         const toggleButton = row?.querySelector(`button.toggle-buy-sell[data-index="${index}"]`);
 
-        if (toggleButton && row) {
+        if (row && toggleButton) {
              const isNowLong = newLots >= 0;
              const positionType = isNowLong ? "BUY" : "SELL";
              const buttonClass = isNowLong ? "button-buy" : "button-sell";
@@ -911,28 +1064,32 @@ function updateLots(index, value) {
             toggleButton.classList.add(buttonClass);
             row.className = isNowLong ? "long-position" : "short-position";
         } else {
-             updateStrategyTable(); // Fallback if elements not found
+            logger.warn(`Could not find row/button elements for index ${index} during lot update, doing full table refresh.`);
+             updateStrategyTable(); // Fallback if specific elements not found
         }
         logger.info(`Updated lots for index ${index} from ${previousLots} to ${newLots}`);
     }
-    // Don't auto-update chart on lot change, let user click Update
+    // User must click "Update" to see calculation changes
 }
 
 
-/** Toggles a position between Buy and Sell (called by delegation) */
+/** Toggles a position between Buy and Sell */
 function toggleBuySell(index) {
     if (index < 0 || index >= strategyPositions.length) return;
 
     const previousLots = strategyPositions[index].lots;
-    strategyPositions[index].lots *= -1; // Flip the sign
+    let newLots = -previousLots; // Flip the sign
 
-    // Handle case where flipping results in 0 (e.g., was 0 initially) -> default to Buy 1
-     if (strategyPositions[index].lots === 0) {
-         strategyPositions[index].lots = 1;
+    // Handle case where flipping results in 0 (e.g., if it was 0) -> default to Buy 1
+     if (newLots === 0) {
+         newLots = 1;
          logger.info(`Lots were 0 for index ${index}, toggling to 1 (BUY).`);
      }
 
-    logger.info(`Toggled Buy/Sell for index ${index}. Prev lots: ${previousLots}, New lots: ${strategyPositions[index].lots}`);
+    strategyPositions[index].lots = newLots;
+    strategyPositions[index].tr_type = newLots >= 0 ? 'b' : 's'; // Update buy/sell type
+
+    logger.info(`Toggled Buy/Sell for index ${index}. Prev lots: ${previousLots}, New lots: ${newLots}`);
 
     // Update the specific row UI
     const row = document.querySelector(`${SELECTORS.strategyTableBody} tr[data-index="${index}"]`);
@@ -940,7 +1097,7 @@ function toggleBuySell(index) {
     const lotsInput = row?.querySelector(`input.lots-input[data-index="${index}"]`);
 
     if (row && toggleButton && lotsInput) {
-        const isLong = strategyPositions[index].lots >= 0;
+        const isLong = newLots >= 0;
         const positionType = isLong ? "BUY" : "SELL";
         const buttonClass = isLong ? "button-buy" : "button-sell";
 
@@ -948,66 +1105,87 @@ function toggleBuySell(index) {
         toggleButton.classList.remove("button-buy", "button-sell");
         toggleButton.classList.add(buttonClass);
         row.className = isLong ? "long-position" : "short-position";
-        lotsInput.value = strategyPositions[index].lots; // Update number input
+        lotsInput.value = newLots; // Update number input to reflect change
     } else {
+        logger.warn(`Could not find row/button/input elements for index ${index} during toggle, doing full table refresh.`);
         updateStrategyTable(); // Fallback
     }
-    // Don't auto-update chart on toggle, let user click Update
+    // User must click "Update" to see calculation changes
 }
 
 
-/** Removes a position from the strategy (called by delegation) */
+/** Removes a position from the strategy */
 function removePosition(index) {
-     if (index < 0 || index >= strategyPositions.length) return;
-    strategyPositions.splice(index, 1);
-    updateStrategyTable();
-    logger.info("Removed position at index", index);
-    // Update results only if there are remaining positions
-    if (strategyPositions.length > 0) {
+    if (index < 0 || index >= strategyPositions.length) return;
+    const removedPos = strategyPositions.splice(index, 1); // Remove and get the removed item
+    logger.info("Removed position at index", index, removedPos[0]);
+    updateStrategyTable(); // Update the table UI (indices will shift)
+
+    // Update results only if there are remaining positions and chart isn't showing placeholder
+    const chartContainer = document.querySelector(SELECTORS.payoffChartContainer);
+    const hasChartContent = chartContainer && !chartContainer.querySelector('.placeholder-text');
+
+    if (strategyPositions.length > 0 && hasChartContent) {
+        logger.info("Remaining positions exist, updating calculations...");
         fetchPayoffChart(); // Update results after removal
-    } else {
+    } else if (strategyPositions.length === 0) {
+        logger.info("Strategy is now empty, resetting results UI.");
         resetResultsUI(); // Clear results if strategy is now empty
     }
 }
 
+
 /** Clears all positions and resets UI */
 function clearAllPositions() {
-    logger.info("Clearing all positions...");
-    strategyPositions = [];
-    updateStrategyTable();
-    resetResultsUI();
-    stopAutoRefresh(); // Stop refresh when clearing strategy
-    logger.info("Strategy cleared.");
+    if (strategyPositions.length === 0) return; // Do nothing if already empty
+    if (confirm("Are you sure you want to clear all strategy legs?")) {
+        logger.info("Clearing all positions...");
+        strategyPositions = [];
+        updateStrategyTable();
+        resetResultsUI();
+        // Don't stop auto-refresh here, asset/expiry are still selected
+        logger.info("Strategy cleared.");
+    }
 }
+
 
 /** Resets the chart and results UI to initial state */
 function resetResultsUI() {
      const chartContainer = document.querySelector(SELECTORS.payoffChartContainer);
      if (chartContainer) {
-         // No Plotly purge needed as we use image now
          chartContainer.innerHTML = '<div class="placeholder-text">Add positions and click "Update" to see the payoff chart.</div>';
          setElementState(SELECTORS.payoffChartContainer, 'content');
      }
 
      // Reset other containers/tables
      setElementState(SELECTORS.taxInfoContainer, 'content');
-     document.querySelector(SELECTORS.taxInfoContainer).innerHTML = "";
+     document.querySelector(SELECTORS.taxInfoContainer).innerHTML = '<p class="loading-text">Update strategy to calculate charges.</p>'; // Reset placeholder
+
      setElementState(SELECTORS.greeksTable, 'content');
      const greeksTable = document.querySelector(SELECTORS.greeksTable);
      if (greeksTable) {
-         const greekBody = greeksTable.querySelector('tbody'); if(greekBody) greekBody.innerHTML = "";
-         const greekFoot = greeksTable.querySelector('tfoot'); if(greekFoot) greekFoot.innerHTML = "";
+         // Reset caption, clear body/foot
+          const caption = greeksTable.querySelector('caption'); if (caption) caption.textContent = 'Portfolio Option Greeks';
+          const greekBody = greeksTable.querySelector('tbody'); if(greekBody) greekBody.innerHTML = '<tr><td colspan="9" class="loading-text">Update strategy to calculate Greeks.</td></tr>'; // Reset placeholder
+          const greekFoot = greeksTable.querySelector('tfoot'); if(greekFoot) greekFoot.innerHTML = "";
      }
-     setElementState(SELECTORS.costBreakdownList, 'content');
-     document.querySelector(SELECTORS.costBreakdownList).innerHTML = "";
-     setElementState(SELECTORS.costBreakdownContainer, 'hidden'); // Hide the details initially
 
-     // Reset metrics display
-     displayMetric("N/A", SELECTORS.maxProfitDisplay, "Max Profit: ");
-     displayMetric("N/A", SELECTORS.maxLossDisplay, "Max Loss: ");
-     displayMetric("N/A", SELECTORS.breakevenDisplay, "Breakeven: ");
-     displayMetric("N/A", SELECTORS.rewardToRiskDisplay, "Reward:Risk: ");
-     displayMetric("N/A", SELECTORS.netPremiumDisplay, "Net Premium: ");
+     setElementState(SELECTORS.costBreakdownList, 'content');
+     document.querySelector(SELECTORS.costBreakdownList).innerHTML = ""; // Clear list
+     setElementState(SELECTORS.costBreakdownContainer, 'hidden'); // Hide the details initially
+     const detailsElement = document.querySelector(SELECTORS.costBreakdownContainer);
+     if (detailsElement) detailsElement.open = false; // Ensure it's closed
+
+
+     // Reset metrics display using the specific value spans
+     displayMetric("N/A", SELECTORS.maxProfitDisplay);
+     displayMetric("N/A", SELECTORS.maxLossDisplay);
+     displayMetric("N/A", SELECTORS.breakevenDisplay);
+     displayMetric("N/A", SELECTORS.rewardToRiskDisplay);
+     displayMetric("N/A", SELECTORS.netPremiumDisplay);
+
+     // Reset the labels as well if needed (optional, displayMetric only changes value part)
+     // document.querySelector('#maxProfit .metric-label').textContent = 'Max Profit:'; // Example
 }
 
 
@@ -1022,49 +1200,65 @@ async function fetchPayoffChart() {
     const updateButton = document.querySelector(SELECTORS.updateChartButton);
 
     if (!asset) { alert("Please select an asset."); return; }
-    if (strategyPositions.length === 0) { resetResultsUI(); alert("Please add positions to the strategy first."); return; }
+    if (strategyPositions.length === 0) {
+         resetResultsUI(); // Clear UI if no positions
+         alert("Please add positions to the strategy first.");
+         return;
+    }
     if (!chartContainer) { logger.error("Payoff chart container element not found."); return; }
 
+    // Set loading states for all results areas
     setElementState(SELECTORS.payoffChartContainer, 'loading', 'Generating results...');
     setElementState(SELECTORS.taxInfoContainer, 'loading', 'Calculating...');
     setElementState(SELECTORS.greeksTable, 'loading', 'Calculating...');
-    setElementState(SELECTORS.costBreakdownContainer, 'hidden');
-    displayMetric("...", SELECTORS.maxProfitDisplay, "Max Profit: ");
-    displayMetric("...", SELECTORS.maxLossDisplay, "Max Loss: ");
-    displayMetric("...", SELECTORS.breakevenDisplay, "Breakeven: ");
-    displayMetric("...", SELECTORS.rewardToRiskDisplay, "Reward:Risk: ");
-    displayMetric("...", SELECTORS.netPremiumDisplay, "Net Premium: ");
+    setElementState(SELECTORS.costBreakdownContainer, 'hidden'); // Hide breakdown during load
+    // Set metrics to loading state
+    displayMetric("...", SELECTORS.maxProfitDisplay);
+    displayMetric("...", SELECTORS.maxLossDisplay);
+    displayMetric("...", SELECTORS.breakevenDisplay);
+    displayMetric("...", SELECTORS.rewardToRiskDisplay);
+    displayMetric("...", SELECTORS.netPremiumDisplay);
+
     if (updateButton) updateButton.disabled = true;
 
-    // Prepare request data - *Ensure required fields for Greeks are included*
-    const requestData = {
-        asset: asset,
-        strategy: strategyPositions.map(pos => {
-            // Get IV and calculate Days to Expiry for Greeks calculation
-            const iv = getOptionValueFromTable(pos.strike_price, pos.option_type, '.iv');
-            const days_to_expiry = calculateDaysToExpiry(pos.expiry_date);
+    // --- Prepare Request Data ---
+    // Ensure all required fields (including iv, days_to_expiry) are present
+    let dataIsValid = true;
+    const requestStrategy = strategyPositions.map((pos, index) => {
+        // Recalculate DTE just in case expiry changed relative to today
+        const currentDTE = calculateDaysToExpiry(pos.expiry_date);
+        if (currentDTE === null) {
+             logger.error(`Invalid expiry date found for leg ${index+1} during final validation.`);
+             dataIsValid = false;
+        }
+        // Ensure IV is present (it should be from addPosition, but double check)
+        if (pos.iv === null) {
+             logger.warn(`Missing IV for leg ${index+1} (${pos.option_type} ${pos.strike_price}). Greeks may be inaccurate.`);
+             // Decide if this is critical? For now, allow sending null.
+        }
 
-            // Log warning if IV or days are missing, as Greeks calc will fail for this leg
-            if (iv === null) logger.warn(`Missing IV for leg: ${pos.option_type} ${pos.strike_price} @ ${pos.expiry_date}`);
-            if (days_to_expiry === null) logger.warn(`Could not calculate days_to_expiry for leg: ${pos.expiry_date}`);
+        return {
+            option_type: pos.option_type, // CE or PE
+            strike_price: String(pos.strike_price), // Send as string
+            tr_type: pos.lots >= 0 ? "b" : "s", // Determine buy/sell
+            option_price: String(pos.last_price), // Send as string
+            expiry_date: pos.expiry_date,
+            lots: String(Math.abs(pos.lots)), // Send absolute lots as string
+            lot_size: null, // Let backend fetch default lot size based on asset
+            // Include IV and DTE needed for Greeks
+            iv: pos.iv, // Send stored IV (can be null)
+            days_to_expiry: currentDTE, // Send current DTE (can be null if expiry invalid)
+        };
+    });
 
-            return {
-                // Fields for Payoff/Tax/Metrics
-                option_type: pos.option_type,
-                strike_price: String(pos.strike_price),
-                option_price: String(pos.last_price),
-                expiry_date: pos.expiry_date,
-                lots: String(Math.abs(pos.lots)), // Send absolute lots
-                tr_type: pos.lots >= 0 ? "b" : "s", // Determine buy/sell from sign
-                // Additional fields potentially needed by backend for Greeks
-                iv: iv, // Send fetched IV (can be null)
-                days_to_expiry: days_to_expiry, // Send calculated days (can be null)
-                op_type: pos.option_type === 'CE' ? 'c' : 'p', // Send 'c' or 'p'
-                lot: Math.abs(pos.lots), // Send absolute lots again if needed separately
-                // lot_size: Might need lot size if backend doesn't fetch it reliably? (Assuming backend handles it)
-            };
-        })
-    };
+    if (!dataIsValid) {
+        alert("Invalid expiry date found in one or more legs. Cannot calculate.");
+         setElementState(SELECTORS.payoffChartContainer, 'error', 'Invalid expiry date found.');
+         if (updateButton) updateButton.disabled = false;
+         return;
+    }
+
+    const requestData = { asset: asset, strategy: requestStrategy };
     logger.debug("Sending request to /get_payoff_chart:", requestData);
 
     try {
@@ -1073,104 +1267,104 @@ async function fetchPayoffChart() {
         });
         logger.debug("Received response from /get_payoff_chart:", data);
 
-        // Validate response structure
-        if (!data || data.success === false || !data.image_base64 || !data.metrics || !data.charges || data.greeks === undefined) {
-            const errorDetail = data?.detail || data?.message || "Server response missing expected data or indicated failure.";
-            logger.error("Payoff response validation failed.", errorDetail, data);
-            throw new Error(errorDetail);
-        }
-
-        // Render Chart Image
-        if (chartContainer && data.image_base64) {
+        // --- Render Chart Image ---
+        if (data && data.image_base64) {
             chartContainer.innerHTML = ""; // Clear loading/placeholder
             const img = document.createElement("img");
             img.src = `data:image/png;base64,${data.image_base64}`;
             img.alt = `Option Strategy Payoff Chart for ${asset}`;
-            img.className = "payoff-chart-image";
+            img.className = "payoff-chart-image"; // Add class for styling
             chartContainer.appendChild(img);
             setElementState(SELECTORS.payoffChartContainer, 'content');
             logger.info("Successfully rendered Matplotlib chart image.");
-        } else if (chartContainer) {
-             setElementState(SELECTORS.payoffChartContainer, 'error', 'Chart image missing');
-             logger.error("Payoff chart image_base64 missing in successful response.");
+        } else {
+             // Handle case where backend succeeded but didn't return image (or data is null)
+             logger.error("Payoff chart image_base64 missing in response or data is null.");
+             setElementState(SELECTORS.payoffChartContainer, 'error', 'Chart image generation failed or missing.');
         }
 
         // --- Display Metrics, Breakdown, Taxes, Greeks ---
-        // Metrics
-        if (data.metrics?.metrics) {
-            const metrics = data.metrics.metrics;
-            displayMetric(metrics.max_profit, SELECTORS.maxProfitDisplay, "Max Profit: ", "", 2, true);
-            displayMetric(metrics.max_loss, SELECTORS.maxLossDisplay, "Max Loss: ", "", 2, true);
-            const breakevens = Array.isArray(metrics.breakeven_points) && metrics.breakeven_points.length > 0
-                ? metrics.breakeven_points.map(p => formatCurrency(p, 2, 'N/A')).join(', ') : "None";
-            displayMetric(breakevens, SELECTORS.breakevenDisplay, "Breakeven: ");
-            displayMetric(metrics.reward_to_risk_ratio, SELECTORS.rewardToRiskDisplay, "Reward:Risk: ");
-            const netPremiumPrefix = metrics.net_premium >= 0 ? "Net Credit: " : "Net Debit: ";
-            displayMetric(Math.abs(metrics.net_premium), SELECTORS.netPremiumDisplay, netPremiumPrefix, "", 2, true);
+        // Metrics (handle potential null data)
+        const metricsData = data?.metrics?.metrics; // Access nested metrics safely
+        if (metricsData) {
+            displayMetric(metricsData.max_profit, SELECTORS.maxProfitDisplay, "", "", 2, true);
+            displayMetric(metricsData.max_loss, SELECTORS.maxLossDisplay, "", "", 2, true);
+            const breakevens = Array.isArray(metricsData.breakeven_points) && metricsData.breakeven_points.length > 0
+                ? metricsData.breakeven_points.map(p => formatCurrency(p, 2, 'N/A', '₹')).join(', ')
+                : "None";
+            displayMetric(breakevens, SELECTORS.breakevenDisplay); // Display as is
+            displayMetric(metricsData.reward_to_risk_ratio, SELECTORS.rewardToRiskDisplay); // Format handles ∞ etc.
+            // Determine prefix for Net Premium based on sign
+            const netPremiumValue = metricsData.net_premium;
+            const netPremiumPrefix = (typeof netPremiumValue === 'number' && netPremiumValue >= 0) ? "Net Credit: " : "Net Debit: ";
+            displayMetric(Math.abs(netPremiumValue), SELECTORS.netPremiumDisplay, netPremiumPrefix, "", 2, true);
         } else {
-             logger.warn("Metrics data missing or invalid.");
-             displayMetric("N/A", SELECTORS.maxProfitDisplay, "Max Profit: ");
-             displayMetric("N/A", SELECTORS.maxLossDisplay, "Max Loss: ");
-             displayMetric("N/A", SELECTORS.breakevenDisplay, "Breakeven: ");
-             displayMetric("N/A", SELECTORS.rewardToRiskDisplay, "Reward:Risk: ");
-             displayMetric("N/A", SELECTORS.netPremiumDisplay, "Net Premium: ");
+             logger.warn("Metrics data missing or invalid in response.");
+             displayMetric("N/A", SELECTORS.maxProfitDisplay);
+             displayMetric("N/A", SELECTORS.maxLossDisplay);
+             displayMetric("N/A", SELECTORS.breakevenDisplay);
+             displayMetric("N/A", SELECTORS.rewardToRiskDisplay);
+             displayMetric("N/A", SELECTORS.netPremiumDisplay);
         }
 
-        // Cost Breakdown
+        // Cost Breakdown (Premium only)
         const breakdownList = document.querySelector(SELECTORS.costBreakdownList);
         const breakdownContainer = document.querySelector(SELECTORS.costBreakdownContainer);
-        const costBreakdownData = data.metrics?.cost_breakdown_per_leg;
+        const costBreakdownData = data?.metrics?.cost_breakdown_per_leg; // From metrics response
         if (breakdownList && breakdownContainer && Array.isArray(costBreakdownData) && costBreakdownData.length > 0) {
-            breakdownList.innerHTML = "";
+            breakdownList.innerHTML = ""; // Clear previous
             costBreakdownData.forEach(item => {
                 const li = document.createElement("li");
-                const premiumEffect = item.effect === 'Paid' ? `(Paid ${formatCurrency(Math.abs(item.total_premium))})` : `(Received ${formatCurrency(item.total_premium)})`;
-                li.textContent = `${item.action} ${item.quantity} x ${item.type} @ ${item.strike} ${premiumEffect}`;
+                const absPremium = Math.abs(item.total_premium);
+                const premiumEffect = item.effect === 'Paid' ? `(Paid ${formatCurrency(absPremium)})` : `(Received ${formatCurrency(absPremium)})`;
+                // Use Buy/Sell from action field, lots/lot_size for quantity
+                li.textContent = `${item.action} ${item.lots}x${item.lot_size} ${item.type} @ ${item.strike} ${premiumEffect}`;
                 breakdownList.appendChild(li);
             });
-             setElementState(SELECTORS.costBreakdownContainer, 'content'); // Use state to show
+             setElementState(SELECTORS.costBreakdownContainer, 'content'); // Use state to make visible
              breakdownContainer.style.display = ""; // Ensure visible
-             breakdownContainer.open = false; // Default closed
+             breakdownContainer.open = false; // Default closed state for details
         } else if (breakdownContainer) {
-            setElementState(SELECTORS.costBreakdownContainer, 'hidden');
+            setElementState(SELECTORS.costBreakdownContainer, 'hidden'); // Hide if no data
         }
 
-        // Taxes/Charges
+        // Taxes/Charges (handle potential null data)
         const taxContainer = document.querySelector(SELECTORS.taxInfoContainer);
-        if (taxContainer && data.charges) {
-            renderTaxTable(taxContainer, data.charges);
-            setElementState(SELECTORS.taxInfoContainer, 'content');
-        } else if (taxContainer) {
-             taxContainer.innerHTML = "<p>Charge data unavailable.</p>";
-             setElementState(SELECTORS.taxInfoContainer, 'content');
+        if (taxContainer) {
+            if (data?.charges) {
+                renderTaxTable(taxContainer, data.charges);
+                setElementState(SELECTORS.taxInfoContainer, 'content');
+            } else {
+                 logger.warn("Charges data missing in response.");
+                 taxContainer.innerHTML = "<p>Charge data unavailable.</p>";
+                 setElementState(SELECTORS.taxInfoContainer, 'content'); // Set content state even for placeholder
+            }
         }
 
-        // Greeks (using the corrected renderer)
+        // Greeks (handle potential null/undefined data)
         const greeksTable = document.querySelector(SELECTORS.greeksTable);
-        // data.greeks should be the list directly from the backend now
-        if (greeksTable && Array.isArray(data.greeks)) {
-             renderGreeksTable(greeksTable, data.greeks); // Pass the list
-             setElementState(SELECTORS.greeksTable, 'content');
-        } else if (greeksTable) {
-            logger.warn("Greeks data received from backend is not an array:", data.greeks);
-            renderGreeksTable(greeksTable, null); // Let renderer handle invalid input
-            setElementState(SELECTORS.greeksTable, 'error', 'Invalid Greeks Format');
+        if (greeksTable) {
+            // Pass the greeks list (which could be null/undefined) directly
+            renderGreeksTable(greeksTable, data?.greeks); // Renderer handles null/array cases
+            setElementState(SELECTORS.greeksTable, 'content'); // Set content state after rendering
         }
 
 
     } catch (error) {
         logger.error("Error fetching or displaying payoff results:", error);
+        // Set error states for all results areas
         setElementState(SELECTORS.payoffChartContainer, 'error', `Calculation Error: ${error.message}`);
-        displayMetric("Error", SELECTORS.maxProfitDisplay, "Max Profit: ");
-        displayMetric("Error", SELECTORS.maxLossDisplay, "Max Loss: ");
-        displayMetric("Error", SELECTORS.breakevenDisplay, "Breakeven: ");
-        displayMetric("Error", SELECTORS.rewardToRiskDisplay, "Reward:Risk: ");
-        displayMetric("Error", SELECTORS.netPremiumDisplay, "Net Premium: ");
+        displayMetric("Error", SELECTORS.maxProfitDisplay);
+        displayMetric("Error", SELECTORS.maxLossDisplay);
+        displayMetric("Error", SELECTORS.breakevenDisplay);
+        displayMetric("Error", SELECTORS.rewardToRiskDisplay);
+        displayMetric("Error", SELECTORS.netPremiumDisplay);
         setElementState(SELECTORS.taxInfoContainer, 'error', 'Calculation Failed');
         setElementState(SELECTORS.greeksTable, 'error', 'Calculation Failed');
         setElementState(SELECTORS.costBreakdownContainer, 'hidden');
 
     } finally {
+         // Always re-enable the button
          if (updateButton) updateButton.disabled = false;
     }
 }
@@ -1178,23 +1372,33 @@ async function fetchPayoffChart() {
 // --- Rendering Helpers for Payoff Results ---
 
 function renderTaxTable(containerElement, taxData) {
-    if (!taxData || !taxData.breakdown_per_leg || !taxData.charges_summary) {
-        containerElement.innerHTML = "<p>Charge calculation data not available.</p>";
+    // Guard against null/undefined taxData or missing nested properties
+    if (!taxData || !taxData.breakdown_per_leg || !taxData.charges_summary || !Array.isArray(taxData.breakdown_per_leg)) {
+        containerElement.innerHTML = "<p>Charge calculation data is incomplete or unavailable.</p>";
+        logger.warn("renderTaxTable called with invalid or incomplete taxData:", taxData);
         return;
     }
-    containerElement.innerHTML = `
-        <details class="results-details tax-details">
-            <summary><strong>Estimated Charges Breakdown (Total: ${formatCurrency(taxData.total_estimated_cost, 2)})</strong></summary>
-            <div class="table-wrapper"></div>
-        </details>
-    `;
 
-    const tableWrapper = containerElement.querySelector('.table-wrapper');
+    containerElement.innerHTML = ""; // Clear previous content
+
+    const details = document.createElement('details');
+    details.className = "results-details tax-details";
+    details.open = false; // Default closed
+
+    const summary = document.createElement('summary');
+    summary.innerHTML = `<strong>Estimated Charges Breakdown (Total: ${formatCurrency(taxData.total_estimated_cost, 2)})</strong>`;
+    details.appendChild(summary);
+
+    const tableWrapper = document.createElement('div');
+    tableWrapper.className = 'table-wrapper thin-scrollbar'; // Add scrollbar class
+    details.appendChild(tableWrapper);
+
     const table = document.createElement("table");
-    table.className = "results-table charges-table";
+    table.className = "results-table charges-table data-table"; // Add data-table class
     const charges = taxData.charges_summary || {};
-    const breakdown = taxData.breakdown_per_leg || [];
+    const breakdown = taxData.breakdown_per_leg;
 
+    // Ensure all expected keys exist in breakdown items, providing defaults
     const tableBody = breakdown.map(t => `
         <tr>
             <td>${t.transaction_type || '?'}</td>
@@ -1208,10 +1412,20 @@ function renderTaxTable(containerElement, taxData) {
             <td>${formatNumber(t.txn_charge, 4, '0.0000')}</td>
             <td>${formatNumber(t.brokerage, 2, '0.00')}</td>
             <td>${formatNumber(t.gst, 2, '0.00')}</td>
-            <td class="note" title="${t.stt_note || ''}">${(t.stt_note || '').substring(0, 15)}...</td>
+            <td class="note" title="${t.stt_note || ''}">${((t.stt_note || '').substring(0, 15))}${ (t.stt_note || '').length > 15 ? '...' : ''}</td>
         </tr>`).join('');
 
-    // Colspan = 12
+    // Ensure all expected keys exist in charges summary
+    const total_stt = charges.stt ?? 0;
+    const total_stamp = charges.stamp_duty ?? 0;
+    const total_sebi = charges.sebi_fee ?? 0;
+    const total_txn = charges.txn_charges ?? 0; // Note: backend key is txn_charges
+    const total_brokerage = charges.brokerage ?? 0;
+    const total_gst = charges.gst ?? 0;
+    const overall_total = taxData.total_estimated_cost ?? 0;
+
+
+    // Colspan = 12 based on header
     table.innerHTML = `
         <thead>
             <tr><th>Act</th><th>Type</th><th>Strike</th><th>Lots</th><th>Premium</th><th>STT</th><th>Stamp</th><th>SEBI</th><th>Txn</th><th>Broker</th><th>GST</th><th title="Securities Transaction Tax Note">STT Note</th></tr>
@@ -1219,32 +1433,41 @@ function renderTaxTable(containerElement, taxData) {
         <tbody>${tableBody}</tbody>
         <tfoot>
             <tr class="totals-row">
-                <td colspan="5">Total</td>
-                <td>${formatCurrency(charges.stt, 2)}</td>
-                <td>${formatCurrency(charges.stamp_duty, 2)}</td>
-                <td>${formatCurrency(charges.sebi_fee, 4)}</td>
-                <td>${formatCurrency(charges.txn_charges, 4)}</td>
-                <td>${formatCurrency(charges.brokerage, 2)}</td>
-                <td>${formatCurrency(charges.gst, 2)}</td>
-                <td>Total: ${formatCurrency(taxData.total_estimated_cost, 2)}</td>
+                <td colspan="5" style="text-align: right; font-weight: bold;">Total</td>
+                <td>${formatCurrency(total_stt, 2)}</td>
+                <td>${formatCurrency(total_stamp, 2)}</td>
+                <td>${formatCurrency(total_sebi, 4)}</td>
+                <td>${formatCurrency(total_txn, 4)}</td>
+                <td>${formatCurrency(total_brokerage, 2)}</td>
+                <td>${formatCurrency(total_gst, 2)}</td>
+                <td style="font-weight: bold;">${formatCurrency(overall_total, 2)}</td>
             </tr>
         </tfoot>`;
+
     tableWrapper.appendChild(table);
+    containerElement.appendChild(details);
 }
 
+
 /**
- * Renders the Greeks table.
+ * Renders the Greeks table based on the list provided by the backend.
+ * Calculates portfolio totals on the frontend.
  * @param {HTMLElement} tableElement - The table element to render into.
- * @param {Array | null | undefined} greeksList - The list of Greek results per leg directly from the backend.
+ * @param {Array | null | undefined} greeksList - The list of Greek results per leg like: [{leg_index: N, input_data: {...}, calculated_greeks_per_share: {...}}, ...].
  */
 function renderGreeksTable(tableElement, greeksList) {
+    // Clear previous table content (headers, body, footer)
+    tableElement.innerHTML = '';
+    // Add caption back
+    const caption = tableElement.createCaption();
+    caption.className = "table-caption";
+    caption.textContent = "Portfolio Option Greeks";
+
     // --- Check if the input is a valid array ---
     if (!Array.isArray(greeksList)) {
-        logger.warn("Greeks data provided is not an array or is null/undefined.");
-        tableElement.innerHTML = `
-            <caption class="table-caption">Portfolio Option Greeks</caption>
-            <thead><tr><th>Info</th></tr></thead>
-            <tbody><tr><td class="error-message">Greeks data unavailable or invalid format received.</td></tr></tbody>`;
+        logger.warn("Greeks data provided is not an array or is null/undefined. Cannot render table.");
+        const tbody = tableElement.createTBody();
+        tbody.innerHTML = `<tr><td colspan="9" class="error-message">Greeks data unavailable or invalid format received.</td></tr>`; // Colspan=9
         return;
     }
 
@@ -1253,102 +1476,130 @@ function renderGreeksTable(tableElement, greeksList) {
     // --- Case 1: No legs returned by backend ---
     if (totalLegsProcessed === 0) {
          logger.info("No Greek results returned from backend.");
-         tableElement.innerHTML = `
-            <caption class="table-caption">Portfolio Option Greeks</caption>
-            <thead><tr><th>Info</th></tr></thead>
-            <tbody><tr><td>No strategy legs were processed for Greeks.</td></tr></tbody>`;
+         const tbody = tableElement.createTBody();
+         tbody.innerHTML = `<tr><td colspan="9">No strategy legs were processed for Greeks (e.g., missing IV).</td></tr>`; // Colspan=9
          return;
     }
 
     // --- Proceed with rendering ---
-    let hasCalculatedGreeks = false; // Track if we can calculate totals
+    caption.textContent = `Portfolio Option Greeks (${totalLegsProcessed} Leg${totalLegsProcessed > 1 ? 's' : ''} Processed)`;
+
+    // --- Create Header ---
+    const thead = tableElement.createTHead();
+    thead.innerHTML = `
+        <tr>
+            <th>Action</th>
+            <th>Quantity</th>
+            <th>Type</th>
+            <th>Strike</th>
+            <th title="Portfolio Delta: Change in option value per ₹1 change in underlying">Δ Delta</th>
+            <th title="Portfolio Gamma: Change in Delta per ₹1 change in underlying">Γ Gamma</th>
+            <th title="Portfolio Theta: Change in option value per day passing (Daily Decay)">Θ Theta/Day</th>
+            <th title="Portfolio Vega: Change in option value per 1% change in Implied Volatility">Vega</th>
+            <th title="Portfolio Rho: Change in option value per 1% change in Interest Rate">Ρ Rho</th>
+        </tr>`;
+
+    // --- Create Body & Calculate Totals ---
+    const tbody = tableElement.createTBody();
+    let hasCalculatedGreeks = false; // Track if we have valid numbers for totals
     const totals = { delta: 0, gamma: 0, theta: 0, vega: 0, rho: 0 };
-    // Note: The backend scale factor was 100 in the example, adjust if different
-    const backend_scaling_factor = 100.0;
+    let skippedLegsCount = 0;
 
-    const tableBodyContent = greeksList.map(g => {
-        // Each 'g' should be the object like: { leg_index: N, input_data: {...}, calculated_greeks: {...} }
-        if (!g || !g.input_data || !g.calculated_greeks) {
-            // Handle potential malformed item in the list (shouldn't happen ideally)
+    greeksList.forEach(g => {
+        const row = tbody.insertRow();
+        // Safely access nested data
+        const inputData = g?.input_data;
+        const gv = g?.calculated_greeks_per_share; // Backend sends PER-SHARE greeks
+
+        if (!inputData || !gv) {
+            // Handle potential malformed item in the list
             logger.warn("Malformed item found in Greeks list:", g);
-            return `<tr class="greeks-skipped"><td colspan="9" class="error-message">Invalid data for leg</td></tr>`;
+            row.className = 'greeks-skipped';
+            const cell = row.insertCell();
+            cell.colSpan = 9; // Span all columns
+            cell.textContent = `Invalid data for leg index ${g?.leg_index || 'unknown'}`;
+            cell.classList.add('error-message');
+            skippedLegsCount++;
+            return; // Skip this iteration
         }
 
-        const leg = g.input_data;
-        const gv = g.calculated_greeks;
-        const action = (leg.tr_type || '?').toUpperCase();
-        // Determine quantity from input_data (assuming lots/lot_size are there)
-        // Need to ensure input_data has these fields when backend prepares it.
-        const lots = typeof leg.lot === 'number' ? leg.lot : parseInt(leg.lot || '0', 10);
-        const lot_size = typeof leg.lot_size === 'number' ? leg.lot_size : parseInt(leg.lot_size || '0', 10);
+        const action = (inputData.tr_type || '?').toUpperCase(); // 'B' or 'S'
+        // Backend should provide these in input_data if needed, or we get from strategyPositions?
+        // Let's assume they are in input_data for consistency:
+        const lots = typeof inputData.lots === 'number' ? inputData.lots : parseInt(inputData.lots || '0', 10); // Added 'lots' to input_data expectation
+        const lot_size = typeof inputData.lot_size === 'number' ? inputData.lot_size : parseInt(inputData.lot_size || '0', 10); // Added 'lot_size'
         const quantity = lots * lot_size;
-        const lotsDisplay = `${lots}x${lot_size}`;
+        const lotsDisplay = (lots && lot_size) ? `${lots}x${lot_size}=${quantity}` : 'N/A';
+        const optType = (inputData.op_type || '?').toUpperCase(); // 'C' or 'P'
+        const strike = inputData.strike || '?';
 
+        // Fill cell data for the leg
+        row.insertCell().textContent = action;
+        row.insertCell().textContent = lotsDisplay;
+        row.insertCell().textContent = optType;
+        row.insertCell().textContent = formatNumber(strike, 2); // Format strike
 
-        // Accumulate totals using PER-SHARE greeks * quantity
-        if (quantity > 0 && typeof gv.delta === 'number' && typeof gv.gamma === 'number' && typeof gv.theta === 'number' && typeof gv.vega === 'number' && typeof gv.rho === 'number') {
-            totals.delta += (gv.delta / backend_scaling_factor) * quantity;
-            totals.gamma += (gv.gamma / backend_scaling_factor) * quantity;
-            totals.theta += (gv.theta / backend_scaling_factor) * quantity; // Theta is per day
-            totals.vega += (gv.vega / backend_scaling_factor) * quantity;   // Vega is per 1% IV change
-            totals.rho += (gv.rho / backend_scaling_factor) * quantity;     // Rho is per 1% rate change
-            hasCalculatedGreeks = true;
+        // Format and display PER-SHARE greeks for the leg
+        row.insertCell().textContent = formatNumber(gv.delta, 4, '-');
+        row.insertCell().textContent = formatNumber(gv.gamma, 4, '-');
+        row.insertCell().textContent = formatNumber(gv.theta, 4, '-');
+        row.insertCell().textContent = formatNumber(gv.vega, 4, '-');
+        row.insertCell().textContent = formatNumber(gv.rho, 4, '-');
+
+        // --- Accumulate PORTFOLIO totals ---
+        // Check if all necessary Greek values are valid numbers and quantity is positive
+        if (quantity > 0 &&
+            typeof gv.delta === 'number' && isFinite(gv.delta) &&
+            typeof gv.gamma === 'number' && isFinite(gv.gamma) &&
+            typeof gv.theta === 'number' && isFinite(gv.theta) &&
+            typeof gv.vega === 'number' && isFinite(gv.vega) &&
+            typeof gv.rho === 'number' && isFinite(gv.rho) )
+        {
+            // Add (per-share greek * quantity) to totals
+            totals.delta += gv.delta * quantity;
+            totals.gamma += gv.gamma * quantity;
+            totals.theta += gv.theta * quantity; // Theta is per day
+            totals.vega += gv.vega * quantity;   // Vega is per 1% IV change
+            totals.rho += gv.rho * quantity;     // Rho is per 1% rate change
+            hasCalculatedGreeks = true; // Mark that we have at least one valid calculation
+            row.classList.add('greeks-calculated');
         } else {
-             logger.warn(`Greeks values invalid or quantity invalid for leg index ${g.leg_index}, skipping totals. Greeks:`, gv, `Quantity: ${quantity}`);
+            logger.warn(`Greeks values invalid or quantity zero for leg index ${g.leg_index}, skipping totals. Greeks:`, gv, `Quantity: ${quantity}`);
+            row.classList.add('greeks-skipped');
+            skippedLegsCount++;
+             // Add a visual indicator maybe?
+             row.style.opacity = '0.6';
+             row.title = 'Greeks invalid or quantity zero, excluded from totals.';
         }
+    });
 
-        // Render the row for this leg
-        return `<tr class="greeks-calculated">
-                    <td>${action}</td>
-                    <td>${lotsDisplay}</td>
-                    <td>${(leg.op_type || '?').toUpperCase()}</td>
-                    <td>${leg.strike || '?'}</td>
-                    <td>${formatNumber(gv.delta, 2, '-')}</td>
-                    <td>${formatNumber(gv.gamma, 4, '-')}</td>
-                    <td>${formatNumber(gv.theta, 2, '-')}</td>
-                    <td>${formatNumber(gv.vega, 2, '-')}</td>
-                    <td>${formatNumber(gv.rho, 2, '-')}</td>
-                </tr>`;
+    // --- Create Footer with Totals ---
+    const tfoot = tableElement.createTFoot();
+    const footerRow = tfoot.insertRow();
+    footerRow.className = 'totals-row';
 
-    }).join('');
+    if (hasCalculatedGreeks) {
+        const headerCell = footerRow.insertCell();
+        headerCell.colSpan = 4; // Span first 4 columns
+        headerCell.textContent = 'Total Portfolio Greeks';
+        headerCell.style.textAlign = 'right';
+        headerCell.style.fontWeight = 'bold';
 
-    // Final table structure
-    tableElement.className = "results-table greeks-table";
-    // Note: We don't have 'skipped_count' directly anymore unless backend provides it separately.
-    // Caption reflects the number of legs *successfully* processed shown in the table.
-    const captionText = `Portfolio Option Greeks (${totalLegsProcessed} Leg${totalLegsProcessed > 1 ? 's' : ''} Processed)`;
-    tableElement.innerHTML = `
-        <caption class="table-caption">${captionText}</caption>
-        <thead>
-            <tr>
-                <th>Action</th>
-                <th>Quantity</th>
-                <th>Type</th>
-                <th>Strike</th>
-                <th title="Scaled Delta per share (x${backend_scaling_factor})">Δ Delta</th>
-                <th title="Scaled Gamma per share (x${backend_scaling_factor})">Γ Gamma</th>
-                <th title="Scaled Theta per share (x${backend_scaling_factor}, Daily)">Θ Theta/Day</th>
-                <th title="Scaled Vega per share (x${backend_scaling_factor}, per 1% IV)">Vega</th>
-                <th title="Scaled Rho per share (x${backend_scaling_factor}, per 1% Rate)">Ρ Rho</th>
-            </tr>
-        </thead>
-        <tbody>${tableBodyContent}</tbody>
-        <tfoot>
-            ${hasCalculatedGreeks ?
-                `<tr class="totals-row">
-                    <td colspan="4">Total Portfolio Greeks</td>
-                    <td>${formatNumber(totals.delta, 4)}</td>
-                    <td>${formatNumber(totals.gamma, 4)}</td>
-                    <td>${formatNumber(totals.theta, 4)}</td>
-                    <td>${formatNumber(totals.vega, 4)}</td>
-                    <td>${formatNumber(totals.rho, 4)}</td>
-                </tr>`
-                :
-                `<tr class="totals-row">
-                    <td colspan="9">No Greeks calculated for totals.</td>
-                </tr>`
-            }
-        </tfoot>`;
+        // Display calculated portfolio totals
+        footerRow.insertCell().textContent = formatNumber(totals.delta, 4);
+        footerRow.insertCell().textContent = formatNumber(totals.gamma, 4);
+        footerRow.insertCell().textContent = formatNumber(totals.theta, 4);
+        footerRow.insertCell().textContent = formatNumber(totals.vega, 4);
+        footerRow.insertCell().textContent = formatNumber(totals.rho, 4);
+    } else if (totalLegsProcessed > 0) {
+         // Data received, but no valid Greeks could be calculated for totals
+         const cell = footerRow.insertCell();
+         cell.colSpan = 9; // Span all columns
+         cell.textContent = `No valid Greeks data found for total calculation (${skippedLegsCount}/${totalLegsProcessed} legs skipped).`;
+         cell.style.textAlign = 'center';
+    } else {
+         // This case should be handled earlier (empty greeksList)
+    }
 }
 
 
@@ -1359,12 +1610,20 @@ function renderGreeksTable(tableElement, greeksList) {
 /** Finds the strike closest to the current spot price */
 function findATMStrike(strikes = [], spotPrice) {
     if (!Array.isArray(strikes) || strikes.length === 0 || typeof spotPrice !== 'number' || spotPrice <= 0) {
+         logger.warn("Cannot find ATM strike: Invalid strikes array or spot price.", { strikes, spotPrice });
          return null;
     }
-    const numericStrikes = strikes.map(Number).filter(n => !isNaN(n));
-    if(numericStrikes.length === 0) return null;
+    // Ensure strikes are numbers for comparison
+    const numericStrikes = strikes.map(Number).filter(n => !isNaN(n) && isFinite(n));
+    if(numericStrikes.length === 0) {
+        logger.warn("Cannot find ATM strike: No valid numeric strikes found.");
+        return null;
+    }
 
-    return numericStrikes.reduce((prev, curr) =>
+    // Use reduce to find the strike with the minimum absolute difference
+    const closestStrike = numericStrikes.reduce((prev, curr) =>
         Math.abs(curr - spotPrice) < Math.abs(prev - spotPrice) ? curr : prev
     );
+    logger.debug(`Calculated ATM strike: ${closestStrike} for spot price: ${spotPrice}`);
+    return closestStrike;
 }

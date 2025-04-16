@@ -1,4 +1,3 @@
-
 # ===============================================================
 # Imports (Keep as is)
 # ===============================================================
@@ -39,14 +38,8 @@ from bs4 import BeautifulSoup       # For news scraping
 # --- Calculation & Plotting ---
 import numpy as np
 # Removed Plotly import
-# import plotly.graph_objects as go
-# Removed pandas import if not used elsewhere
-# import pandas as pd
-# from scipy.stats import norm # Not currently used
 import math
 import mibian
-# Opstrat not used for plotting now
-# import opstrat
 # *** Ensure Matplotlib Imports are Correct ***
 import matplotlib
 matplotlib.use('Agg') # Use non-interactive backend BEFORE importing pyplot
@@ -56,6 +49,15 @@ import matplotlib.pyplot as plt
 plt.rcParams['path.simplify'] = True
 plt.rcParams['path.simplify_threshold'] = 0.6
 plt.rcParams['agg.path.chunksize'] = 10000 # Process paths in chunks
+# Import SciPy optimize if needed for breakeven (ensure it's installed)
+try:
+    from scipy.optimize import brentq
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    logger = logging.getLogger(__name__) # Need logger early for this message
+    logger.warning("SciPy not found. Breakeven calculation will use linear interpolation fallback.")
+
 
 # --- Caching ---
 from cachetools import TTLCache
@@ -64,8 +66,12 @@ from cachetools import TTLCache
 import google.generativeai as genai
 
 # --- Database ---
-
-from .database import initialize_database_pool, get_db_connection
+# Assume database.py exists in the same directory or adjust path
+try:
+    from .database import initialize_database_pool, get_db_connection
+except ImportError:
+    # Fallback if running directly for testing, adjust as needed
+    from database import initialize_database_pool, get_db_connection
 
 import mysql.connector # Keep for catching specific DB errors if needed
 
@@ -75,7 +81,7 @@ import mysql.connector # Keep for catching specific DB errors if needed
 # ===============================================================
 
 # --- Append Project Root (If necessary) ---
-sys.path.append(str(Path(__file__).resolve().parent))
+# sys.path.append(str(Path(__file__).resolve().parent)) # Uncomment if needed
 
 # --- Load Environment Variables ---
 load_dotenv()
@@ -85,7 +91,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - [%(threadName)s] - %(message)s'
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__) # Define logger instance
 
 # ===============================================================
 # Configuration & Constants (Keep as is, but ensure GEMINI_API_KEY is secure)
@@ -94,7 +100,8 @@ logger = logging.getLogger(__name__)
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 
 # --- Caching ---
-option_chain_cache = TTLCache(maxsize=50, ttl=3)
+# TTL set to 60 seconds for option chain for faster reflection of updates
+option_chain_cache = TTLCache(maxsize=50, ttl=60) # Increased TTL slightly
 option_chain_lock = threading.Lock()
 stock_data_cache = TTLCache(maxsize=100, ttl=600)
 news_cache = TTLCache(maxsize=100, ttl=900)
@@ -102,11 +109,10 @@ analysis_cache = TTLCache(maxsize=50, ttl=1800)
 
 # --- Background Update Thread Config ---
 try:
-    # *** SET DEFAULT INTERVAL TO 3 SECONDS ***
-    LIVE_UPDATE_INTERVAL_SECONDS = int(os.getenv("LIVE_UPDATE_INTERVAL", 3))
+    LIVE_UPDATE_INTERVAL_SECONDS = int(os.getenv("LIVE_UPDATE_INTERVAL", 3)) # Default 3s NOW
     if LIVE_UPDATE_INTERVAL_SECONDS <= 0: raise ValueError()
 except:
-    LIVE_UPDATE_INTERVAL_SECONDS = 3 # Default to 3 seconds
+    LIVE_UPDATE_INTERVAL_SECONDS = 3 # Default to 3 seconds NOW # <--- CHANGED HERE
     logger.warning(f"Invalid LIVE_UPDATE_INTERVAL value, defaulting to {LIVE_UPDATE_INTERVAL_SECONDS} seconds.")
 logger.info(f"Background live update interval set to: {LIVE_UPDATE_INTERVAL_SECONDS} seconds.")
 
@@ -121,99 +127,105 @@ BROKERAGE_FLAT_PER_ORDER = 20
 DEFAULT_INTEREST_RATE_PCT = 6.59 # Example, check current rates
 
 # --- Payoff Calculation Constants ---
-PAYOFF_LOWER_BOUND_FACTOR = 0.50
-PAYOFF_UPPER_BOUND_FACTOR = 1.50
-PAYOFF_POINTS = 300
+PAYOFF_LOWER_BOUND_FACTOR = 0.80 # Adjusted factors for potentially better range
+PAYOFF_UPPER_BOUND_FACTOR = 1.20
+PAYOFF_POINTS = 350 # Increased points for smoother curve
 BREAKEVEN_CLUSTER_GAP_PCT = 0.005
 
 # --- LLM Configuration ---
 try:
-    # 1. Attempt to load the API key strictly from the environment.
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-    # 2. Validate that the API key was actually loaded.
     if not GEMINI_API_KEY:
-        # If the key is missing, raise a specific error. Do not use a hardcoded fallback.
         raise ValueError(
             "CRITICAL: Gemini API Key (GEMINI_API_KEY) not found in environment variables. "
-            "Ensure it is set in your .env file (for local) or environment settings (for deployment). "
-            "Stock analysis features will not work without it."
+            "Analysis features will not work."
         )
-
-    # 3. Configure the Gemini client ONLY if the key was successfully loaded.
     genai.configure(api_key=GEMINI_API_KEY)
-    logger.info("Gemini API configured successfully using key from environment.")
-
+    logger.info("Gemini API configured successfully.")
 except ValueError as ve:
-    # Catch the specific error for the missing key and log it clearly.
     logger.error(str(ve))
-    # Depending on how critical the LLM features are, you might want to exit:
-    # raise SystemExit(str(ve)) from ve
 except Exception as e:
-    # Catch any other unexpected errors during genai.configure()
-    logger.error(f"Failed to configure Gemini API even after loading key: {e}. Analysis endpoint will likely fail.", exc_info=True)
-    # Depending on criticality, you might want to raise SystemExit here
-    # raise SystemExit(f"Gemini API Key configuration failed: {e}") from e
+    logger.error(f"Failed to configure Gemini API: {e}. Analysis endpoint will fail.", exc_info=True)
 
 
 # ===============================================================
 # Global State (Keep as is)
 # ===============================================================
 selected_asset: Optional[str] = None
-strategy_positions: List[dict] = []
+# strategy_positions: List[dict] = [] # Removed, as related endpoints were commented out
 shutdown_event = threading.Event()
 background_thread_instance: Optional[threading.Thread] = None
 n: Optional[NSELive] = None
-#PLOTLY_KALEIDO_AVAILABLE = False
 
 # ===============================================================
 # Helper Functions (Keep as is)
 # ===============================================================
 def _safe_get_float(data: Dict, key: str, default: Optional[float] = None) -> Optional[float]:
-    # ... (no changes needed)
     value = data.get(key)
     if value is None: return default
     try: return float(value)
     except (TypeError, ValueError):
-        if default is not None:
-            logger.debug(f"Invalid float value '{value}' for key '{key}'. Using default {default}.")
+        # logger.debug(f"Invalid float value '{value}' for key '{key}'. Using default {default}.") # Less noisy debug
         return default
 
 def _safe_get_int(data: Dict, key: str, default: Optional[int] = None) -> Optional[int]:
-    # ... (no changes needed)
     value = data.get(key)
     if value is None: return default
     try: return int(float(value)) # Allow float conversion first
     except (TypeError, ValueError):
-        if default is not None:
-            logger.debug(f"Invalid int value '{value}' for key '{key}'. Using default {default}.")
+        # logger.debug(f"Invalid int value '{value}' for key '{key}'. Using default {default}.") # Less noisy debug
         return default
 
 def get_cached_option(asset: str) -> Optional[dict]:
-    # This function remains the same - it's used by API endpoints,
-    # but WILL NOT be used by the background thread anymore.
-    global n; now = time.time(); cache_key = f"option_chain_{asset}"
-    with option_chain_lock: cached_data = option_chain_cache.get(cache_key)
-    if cached_data: return cached_data
+    """
+    Fetches option chain data, prioritizing cache, then live NSE fetch.
+    Used by API endpoints primarily.
+    """
+    global n
+    now = time.time()
+    cache_key = f"option_chain_{asset}"
+
+    with option_chain_lock:
+        cached_data = option_chain_cache.get(cache_key)
+
+    if cached_data:
+        logger.debug(f"Cache hit for option chain: {asset}")
+        return cached_data
+
     logger.info(f"Cache miss (API). Fetching live option chain for: {asset}")
     try:
-        if not n: raise RuntimeError("NSELive client not initialized.")
+        if not n:
+            raise RuntimeError("NSELive client not initialized. Cannot fetch live data.")
+
         asset_upper = asset.upper()
-        option_data = n.index_option_chain(asset_upper) if asset_upper in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"] else n.equities_option_chain(asset_upper)
-        if option_data:
-            with option_chain_lock: option_chain_cache[cache_key] = option_data
-            logger.info(f"Successfully fetched/cached option chain for API: {asset}")
+        option_data = None
+        if asset_upper in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]:
+            logger.debug(f"Fetching INDEX option chain for {asset_upper}")
+            option_data = n.index_option_chain(asset_upper)
+        else:
+            logger.debug(f"Fetching EQUITY option chain for {asset_upper}")
+            option_data = n.equities_option_chain(asset_upper)
+
+        if option_data and isinstance(option_data, dict):
+            with option_chain_lock:
+                option_chain_cache[cache_key] = option_data
+            logger.info(f"Successfully fetched/cached LIVE option chain via API request for: {asset}")
+            # Add spot price logging here for verification
+            spot = option_data.get("records", {}).get("underlyingValue")
+            logger.info(f"Live data for {asset} includes spot price: {spot}")
             return option_data
-        else: logger.warning(f"Received empty data from NSELive for {asset}"); return None
-    except Exception as e: logger.error(f"Error fetching option chain from NSELive for {asset}: {e}", exc_info=False); return None
+        else:
+            logger.warning(f"Received empty or invalid data from NSELive for {asset}")
+            return None
+    except Exception as e:
+        logger.error(f"Error fetching option chain from NSELive for {asset}: {e}", exc_info=False)
+        return None
 
 def fetch_and_update_single_asset_data(asset_name: str):
     """
-    Fetches LIVE data directly from NSELive and updates the database for ONE asset.
-    BYPASSES get_cached_option to ensure fresh fetch attempts.
-    Called by the background thread every LIVE_UPDATE_INTERVAL_SECONDS.
-    WARNING: Frequent calls can lead to rate limiting or performance issues.
-    MUST REMAIN SYNCHRONOUS.
+    (Used by background thread)
+    Fetches LIVE data directly from NSELive and updates the DATABASE for ONE asset.
+    Does NOT interact with the API's in-memory cache directly.
     """
     global n # Need access to the global NSELive client instance
     func_name = "fetch_and_update_single_asset_data"
@@ -235,10 +247,12 @@ def fetch_and_update_single_asset_data(asset_name: str):
         else:
             option_source_data = n.equities_option_chain(asset_upper)
 
-        if not option_source_data:
-            logger.warning(f"[{func_name}] Received empty data directly from NSELive for {asset_name}.")
+        if not option_source_data or not isinstance(option_source_data, dict):
+            logger.warning(f"[{func_name}] Received empty or invalid data directly from NSELive for {asset_name}.")
             return # Exit if no data received
-        logger.info(f"[{func_name}] Successfully fetched live data for {asset_name} directly.")
+
+        live_spot = option_source_data.get("records", {}).get("underlyingValue")
+        logger.info(f"[{func_name}] Successfully fetched live data for {asset_name} directly. Live Spot: {live_spot}")
 
     except RuntimeError as rte:
          logger.error(f"[{func_name}] Runtime Error during live fetch for {asset_name}: {rte}")
@@ -247,15 +261,16 @@ def fetch_and_update_single_asset_data(asset_name: str):
         logger.error(f"[{func_name}] Error during direct NSELive fetch for {asset_name}: {fetch_err}", exc_info=False)
         return # Exit if fetch fails
 
-    # --- Step 2: Process and Update Database (Same logic as before) ---
+    # --- Step 2: Process and Update Database ---
     try:
-        # Check structure again just in case
-        if not isinstance(option_source_data, dict) or "records" not in option_source_data or "data" not in option_source_data["records"]:
+        if "records" not in option_source_data or "data" not in option_source_data["records"]:
             logger.error(f"[{func_name}] Invalid live data structure for {asset_name} after fetch.")
             return
         option_data_list = option_source_data["records"]["data"]
         if not option_data_list:
             logger.warning(f"[{func_name}] No option data found in live source for {asset_name}.")
+            # Optionally update just the spot price in DB even if chain is empty
+            # ... DB update logic ...
             return
 
         # Database interaction (remains synchronous)
@@ -268,6 +283,20 @@ def fetch_and_update_single_asset_data(asset_name: str):
                 result = cursor.fetchone()
                 if not result: logger.error(f"[Updater] Asset '{asset_name}' not found in DB."); return
                 asset_id = result["id"]
+
+                # *** Add Spot Price Update to Assets Table ***
+                db_live_spot = _safe_get_float(option_source_data.get("records", {}), "underlyingValue")
+                if db_live_spot is not None:
+                    try:
+                        cursor.execute(
+                            "UPDATE option_data.assets SET last_spot_price = %s, last_spot_update_time = NOW() WHERE id = %s",
+                            (db_live_spot, asset_id)
+                        )
+                        logger.info(f"[{func_name}] Updated spot price ({db_live_spot}) in DB for asset ID {asset_id}")
+                    except mysql.connector.Error as spot_upd_err:
+                         logger.error(f"[{func_name}] Failed to update spot price in DB for {asset_name}: {spot_upd_err}")
+                else:
+                    logger.warning(f"[{func_name}] Could not extract spot price from live data for DB update ({asset_name}).")
 
                 # Process Expiries (sync)
                 expiry_dates_formatted = set()
@@ -313,16 +342,17 @@ def fetch_and_update_single_asset_data(asset_name: str):
     # Error handling for DB part
     except (mysql.connector.Error, ConnectionError) as db_err:
         logger.error(f"[{func_name}] DB/Connection error during update for {asset_name}: {db_err}")
-        try: conn_obj.rollback(); logger.info("Rollback attempted.")
+        try:
+            if conn_obj and conn_obj.is_connected(): conn_obj.rollback(); logger.info("Rollback attempted.")
         except Exception as rb_err: logger.error(f"Rollback failed: {rb_err}")
     except Exception as e:
         logger.error(f"[{func_name}] Unexpected error during DB update phase for {asset_name}: {e}", exc_info=True)
-        try: conn_obj.rollback(); logger.info("Rollback attempted.")
+        try:
+            if conn_obj and conn_obj.is_connected(): conn_obj.rollback(); logger.info("Rollback attempted.")
         except Exception as rb_err: logger.error(f"Rollback failed: {rb_err}")
     finally:
         duration = datetime.now() - start_time
         logger.info(f"[{func_name}] Finished task for asset: {asset_name}. Duration: {duration}")
-
 
 
 def live_update_runner():
@@ -330,23 +360,22 @@ def live_update_runner():
     global selected_asset
     thread_name = threading.current_thread().name
     logger.info(f"Background update thread '{thread_name}' started. Interval: {LIVE_UPDATE_INTERVAL_SECONDS}s.")
+    # Initial wait before first run
+    time.sleep(5)
     while not shutdown_event.is_set():
         asset_to_update = selected_asset
         if asset_to_update and isinstance(asset_to_update, str) and asset_to_update.strip():
-            logger.info(f"[{thread_name}] Updating data for selected asset: {asset_to_update}")
+            logger.info(f"[{thread_name}] Updating DB data for selected asset: {asset_to_update}")
             start_time = time.monotonic()
             try:
-                # *** Calls the modified function that fetches live data directly ***
-                fetch_and_update_single_asset_data(asset_to_update)
+                fetch_and_update_single_asset_data(asset_to_update) # Updates DB
                 duration = time.monotonic() - start_time
-                logger.info(f"[{thread_name}] Finished update cycle for {asset_to_update}. Duration: {duration:.3f}s")
+                logger.info(f"[{thread_name}] Finished DB update cycle for {asset_to_update}. Duration: {duration:.3f}s")
             except Exception as e:
                 duration = time.monotonic() - start_time
-                logger.error(f"[{thread_name}] Error in update cycle for {asset_to_update} after {duration:.3f}s: {e}", exc_info=True)
+                logger.error(f"[{thread_name}] Error in DB update cycle for {asset_to_update} after {duration:.3f}s: {e}", exc_info=True)
         else:
-            #Optional: Add a small log if no asset is selected to show the thread is alive
-            logger.debug(f"[{thread_name}] No asset selected. Waiting...")
-            pass
+            logger.debug(f"[{thread_name}] No asset selected. Background thread waiting...")
 
         # Use wait instead of sleep to allow faster shutdown
         shutdown_event.wait(timeout=LIVE_UPDATE_INTERVAL_SECONDS)
@@ -360,35 +389,49 @@ def live_update_runner():
 async def lifespan(app: FastAPI):
     global background_thread_instance, n
     logger.info("Application starting up...")
-    # Removed Plotly/Kaleido dependency check
     try: initialize_database_pool(); logger.info("Database pool initialized.")
     except Exception as db_err: logger.exception("CRITICAL: DB Pool Init Failed.")
     try: n = NSELive(); logger.info("NSELive client initialized.")
-    except Exception as nse_err: logger.error(f"Failed to initialize NSELive client: {nse_err}."); n = None
-    logger.warning("Starting flawed background update thread...")
+    except Exception as nse_err: logger.error(f"Failed to initialize NSELive client: {nse_err}. Live fetches will fail."); n = None
+    logger.info("Starting background DB update thread...")
     shutdown_event.clear()
-    background_thread_instance = threading.Thread(target=live_update_runner, name="FlawedLiveUpdateThread", daemon=True)
+    background_thread_instance = threading.Thread(target=live_update_runner, name="LiveDBUpdateThread", daemon=True)
     background_thread_instance.start()
     yield
     logger.info("Application shutting down...") # Shutdown sequence...
     shutdown_event.set()
     if background_thread_instance and background_thread_instance.is_alive():
-        background_thread_instance.join(timeout=LIVE_UPDATE_INTERVAL_SECONDS + 1)
+        logger.info("Waiting for background thread to finish...")
+        background_thread_instance.join(timeout=LIVE_UPDATE_INTERVAL_SECONDS + 2)
         if background_thread_instance.is_alive(): logger.warning("Background thread did not stop gracefully.")
+        else: logger.info("Background thread stopped.")
+    logger.info("Closing database pool (if function exists)...")
+    # Add pool closing logic if your database.py provides it
+    # e.g., if 'close_database_pool' exists in database.py:
+    # try:
+    #     from database import close_database_pool
+    #     close_database_pool()
+    #     logger.info("Database pool closed.")
+    # except ImportError:
+    #     logger.info("No close_database_pool function found.")
+    # except Exception as pool_close_err:
+    #     logger.error(f"Error closing database pool: {pool_close_err}")
     logger.info("Application shutdown complete.")
 
 
 app = FastAPI(
     title="Option Strategy Analyzer API",
     description="API for fetching option data, calculating strategies, and performing analysis.",
-    version="1.1.0", # Incremented version (Plotly change)
+    version="1.2.0", # Incremented version (Bug fixes)
     lifespan=lifespan
 )
 
 # --- CORS Middleware ---
+# Make sure your Render deployment allows these origins
 ALLOWED_ORIGINS = [
-    "http://localhost", "http://localhost:3000", "http://127.0.0.1:8000", # Added 127.0.0.1
-    "https://option-strategy-vaqz.onrender.com", "https://option-strategy.onrender.com"
+    "http://localhost", "http://localhost:3000", "http://127.0.0.1:8000",
+    "https://option-strategy-website.onrender.com", # Ensure this matches your frontend URL exactly
+    # Add any other specific origins if needed
 ]
 logger.info(f"Configuring CORS for origins: {ALLOWED_ORIGINS}")
 app.add_middleware( CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -398,7 +441,7 @@ app.add_middleware( CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_credent
 # Pydantic Models (Keep as is)
 # ===============================================================
 class AssetUpdateRequest(BaseModel): asset: str
-class SpotPriceResponse(BaseModel): spot_price: float
+class SpotPriceResponse(BaseModel): spot_price: float; timestamp: Optional[str] = None # Added timestamp
 class StockRequest(BaseModel): asset: str
 class PositionInput(BaseModel): symbol: str; strike: float; type: str = Field(pattern="^(CE|PE)$"); quantity: int; price: float
 class StrategyLegInputPayoff(BaseModel): option_type: str = Field(pattern="^(CE|PE)$"); strike_price: Union[float, str]; tr_type: str = Field(pattern="^(b|s)$"); option_price: Union[float, str]; expiry_date: str; lots: Union[int, str]; lot_size: Optional[Union[int, str]] = None
@@ -407,76 +450,107 @@ class DebugAssetSelectRequest(BaseModel): asset: str
 
 
 # ===============================================================
-# Calculation Functions (Modify news fetch)
+# Calculation Functions (Modify news fetch, payoff chart)
 # ===============================================================
 def get_lot_size(asset_name: str) -> int | None:
-    # ... (no changes needed)
     logger.debug(f"Fetching lot size for asset: {asset_name}")
     sql = "SELECT lot_size FROM option_data.assets WHERE asset_name = %s"
     lot_size = None
     try:
-        # Assuming sync connection for this part as well
         with get_db_connection() as conn:
-            with conn.cursor() as cursor:
+            with conn.cursor(dictionary=True) as cursor: # Use dictionary cursor
                 cursor.execute(sql, (asset_name,))
                 result = cursor.fetchone()
-                if result and result[0] is not None:
-                    try: lot_size = int(result[0]); logger.debug(f"Found lot size for {asset_name}: {lot_size}")
-                    except (ValueError, TypeError): logger.error(f"Invalid non-integer lot size '{result[0]}' in DB for {asset_name}.")
+                if result and result.get("lot_size") is not None:
+                    try: lot_size = int(result["lot_size"]); logger.debug(f"Found lot size for {asset_name}: {lot_size}")
+                    except (ValueError, TypeError): logger.error(f"Invalid non-integer lot size '{result['lot_size']}' in DB for {asset_name}.")
                 elif not result: logger.warning(f"No asset found with name: {asset_name} in assets table.")
                 else: logger.warning(f"Lot size is NULL in DB for {asset_name}.")
-    except ConnectionError as e: logger.error(f"DB Connection Error fetching lot size for {asset_name}: {e}", exc_info=True)
-    except mysql.connector.Error as e: logger.error(f"DB Query Error fetching lot size for {asset_name}: {e}", exc_info=True)
+    except ConnectionError as e: logger.error(f"DB Connection Error fetching lot size for {asset_name}: {e}", exc_info=False) # Less verbose log
+    except mysql.connector.Error as e: logger.error(f"DB Query Error fetching lot size for {asset_name}: {e}", exc_info=False)
     except Exception as e: logger.error(f"Unexpected error fetching lot size for {asset_name}: {e}", exc_info=True)
     return lot_size
 
 
 def extract_iv(asset_name: str, strike_price: float, expiry_date: str, option_type: str) -> float | None:
-    # ... (no changes needed)
+    """Extracts Implied Volatility from cached option chain data."""
     logger.debug(f"Attempting to extract IV for {asset_name} {expiry_date} {strike_price} {option_type}")
-    try: target_expiry = datetime.strptime(expiry_date, "%Y-%m-%d").strftime("%d-%b-%Y")
-    except ValueError: logger.error(f"Invalid expiry date format: {expiry_date}"); return None
     try:
-        option_data = get_cached_option(asset_name)
-        if not isinstance(option_data, dict): logger.warning(f"Cached data not dict for {asset_name}"); return None
-        records = option_data.get("records"); data_list = records.get("data") if isinstance(records, dict) else None
-        if not isinstance(data_list, list): logger.warning(f"Records.data not list for {asset_name}"); return None
-        option_key = option_type.upper()
+        target_expiry_nse_fmt = datetime.strptime(expiry_date, "%Y-%m-%d").strftime("%d-%b-%Y").upper() # Match NSE format
+    except ValueError:
+        logger.error(f"Invalid expiry date format provided to extract_iv: {expiry_date}")
+        return None
+
+    try:
+        # Use the same cache the API relies on
+        option_data = get_cached_option(asset_name) # Fetches live if cache misses
+
+        if not isinstance(option_data, dict):
+            logger.warning(f"Cached/Live data not dict for {asset_name} in extract_iv")
+            return None
+        records = option_data.get("records")
+        data_list = records.get("data") if isinstance(records, dict) else None
+        if not isinstance(data_list, list):
+            logger.warning(f"Records.data not list for {asset_name} in extract_iv")
+            return None
+
+        option_key = option_type.upper() # CE or PE
+
         for item in data_list:
             if isinstance(item, dict):
                  item_strike = _safe_get_float(item, "strikePrice")
-                 item_expiry = item.get("expiryDate")
+                 item_expiry_nse_fmt = item.get("expiryDate", "").upper() # Get expiry from data
+
                  # Check type and value equality carefully
-                 if item_strike is not None and abs(item_strike - strike_price) < 0.01 and item_expiry == target_expiry: # Use tolerance for float comparison
+                 if (item_strike is not None and
+                     abs(item_strike - strike_price) < 0.01 and # Float comparison tolerance
+                     item_expiry_nse_fmt == target_expiry_nse_fmt):
                     option_details = item.get(option_key)
                     if isinstance(option_details, dict):
                         iv = option_details.get("impliedVolatility")
+                        # Ensure IV is a valid positive number
                         if iv is not None and isinstance(iv, (int, float)) and iv > 0:
-                            logger.debug(f"Found IV {iv} for {asset_name} {target_expiry} {strike_price} {option_key}")
+                            logger.debug(f"Found IV {iv} for {asset_name} {target_expiry_nse_fmt} {strike_price} {option_key}")
                             return float(iv)
-                        else: logger.debug(f"IV missing or invalid<=0 ({iv}) for {asset_name} {strike_price} {option_key}")
-        logger.warning(f"No matching contract/valid IV found for {asset_name} {strike_price}@{target_expiry} {option_key}")
+                        else:
+                            logger.debug(f"IV missing or invalid (<=0): value={iv} for {asset_name} {strike_price} {option_key} on {target_expiry_nse_fmt}")
+                    else:
+                         logger.debug(f"Details for option type {option_key} not found or not dict for strike {strike_price} on {target_expiry_nse_fmt}")
+
+        logger.warning(f"No matching contract/valid IV found for {asset_name} {strike_price}@{target_expiry_nse_fmt} {option_key}")
         return None
-    except Exception as e: logger.error(f"Error extracting IV for {asset_name}: {e}", exc_info=True); return None
+    except Exception as e:
+        logger.error(f"Error extracting IV for {asset_name}: {e}", exc_info=True)
+        return None
 
 
 # ===============================================================
 # 1. Calculate Option Taxes (Keep as corrected previously)
 # ===============================================================
 def calculate_option_taxes(strategy_data: List[Dict[str, Any]], asset: str) -> Optional[Dict[str, Any]]:
-    # ... (Keep the robust version from previous corrections) ...
+    # (Assuming this function is already robust and correct from previous iterations)
+    # ... (Keep the existing robust implementation) ...
+    # If issues persist, this function might need revisiting, but focusing on user's request first.
     func_name = "calculate_option_taxes"
     logger.info(f"[{func_name}] Calculating for {len(strategy_data)} leg(s), asset: {asset}")
-    # ... (Fetch prerequisites, Initialize totals, Process each leg with validation, Finalize) ...
-    # ... (Return results dict or None) ...
+    # --- Fetch Prerequisites ---
     try:
-        # --- Fetch Prerequisites ---
-        cached_data = get_cached_option(asset)
-        if not cached_data or "records" not in cached_data:
-            raise ValueError("Missing or invalid market data from cache")
-        spot_price = _safe_get_float(cached_data.get("records", {}), "underlyingValue")
+        # Get spot price reliably - try DB first, then cache/live
+        spot_price_info = get_latest_spot_price_from_db(asset) # Use new helper
+        if spot_price_info:
+            spot_price = spot_price_info['spot_price']
+            logger.info(f"[{func_name}] Using Spot Price from DB: {spot_price}")
+        else:
+             # Fallback to cached/live data if DB fails
+             cached_data = get_cached_option(asset)
+             if not cached_data or "records" not in cached_data:
+                 raise ValueError("Missing or invalid market data (cache/live) for tax calc")
+             spot_price = _safe_get_float(cached_data.get("records", {}), "underlyingValue")
+             logger.info(f"[{func_name}] Using Spot Price from Cache/Live: {spot_price}")
+
         if spot_price is None or spot_price <= 0:
-            raise ValueError(f"Spot price missing or invalid ({spot_price}) in cache")
+            raise ValueError(f"Spot price missing or invalid ({spot_price})")
+
         default_lot_size = get_lot_size(asset)
         if default_lot_size is None or default_lot_size <= 0:
             raise ValueError(f"Default lot size missing or invalid ({default_lot_size})")
@@ -498,7 +572,7 @@ def calculate_option_taxes(strategy_data: List[Dict[str, Any]], asset: str) -> O
         try:
             # --- Extract and Validate Leg Data ---
             tr_type = str(leg.get('tr_type', '')).lower()
-            op_type = str(leg.get('op_type', '')).lower()
+            op_type = str(leg.get('op_type', '')).lower() # 'c' or 'p' expected from preparation step
             strike = _safe_get_float(leg, 'strike')
             premium = _safe_get_float(leg, 'op_pr')
             lots = _safe_get_int(leg, 'lot')
@@ -516,7 +590,7 @@ def calculate_option_taxes(strategy_data: List[Dict[str, Any]], asset: str) -> O
             if tr_type not in ['b','s']: error_msg = f"invalid tr_type ({tr_type})"
             elif op_type not in ['c','p']: error_msg = f"invalid op_type ({op_type})"
             elif strike is None or strike <= 0: error_msg = f"invalid strike ({strike})"
-            elif premium is None or premium < 0: error_msg = f"invalid premium ({premium})"
+            elif premium is None or premium < 0: error_msg = f"invalid premium ({premium})" # Allow 0 premium
             elif lots is None or lots <= 0: error_msg = f"invalid lots ({lots})"
             elif leg_lot_size <= 0: error_msg = f"invalid lot_size ({leg_lot_size})"
 
@@ -528,6 +602,9 @@ def calculate_option_taxes(strategy_data: List[Dict[str, Any]], asset: str) -> O
             turnover = premium * quantity
             stt_val = 0.0
             stt_note = ""
+
+            # Note: Tax calculation assumes expiry scenario based on current spot.
+            # Real-time calculation during trade lifecycle might differ.
 
             if tr_type == 's': # Sell side STT (on premium)
                 stt_val = turnover * STT_SHORT_RATE
@@ -542,12 +619,12 @@ def calculate_option_taxes(strategy_data: List[Dict[str, Any]], asset: str) -> O
                     intrinsic = (strike - spot_price) * quantity
                     is_itm = True
 
-                # STT applied only if ITM and intrinsic > 0
+                # STT applied only if ITM and intrinsic > 0 at expiry (estimated using current spot)
                 if is_itm and intrinsic > 0:
                     stt_val = intrinsic * STT_EXERCISE_RATE
-                    stt_note = f"{STT_EXERCISE_RATE*100:.4f}% STT (Exercise ITM)"
+                    stt_note = f"{STT_EXERCISE_RATE*100:.4f}% STT (Est. Exercise ITM)"
                 else:
-                    stt_note = "No STT (Buy OTM/ATM)"
+                    stt_note = "No STT (Est. Buy OTM/ATM)"
 
             # Other charges
             stamp_duty_value = turnover * STAMP_DUTY_RATE if tr_type == 'b' else 0.0
@@ -569,7 +646,7 @@ def calculate_option_taxes(strategy_data: List[Dict[str, Any]], asset: str) -> O
             breakdown.append({
                 "leg_index": i,
                 "transaction_type": tr_type.upper(),
-                "option_type": op_type.upper(),
+                "option_type": op_type.upper(), # Use c/p consistent with other parts
                 "strike": strike,
                 "lots": lots,
                 "lot_size": leg_lot_size,
@@ -587,11 +664,9 @@ def calculate_option_taxes(strategy_data: List[Dict[str, Any]], asset: str) -> O
             })
 
         except ValueError as val_err:
-            # Log and re-raise to stop calculation for the whole strategy
             logger.error(f"[{func_name}] Validation Error processing leg {i} for {asset}: {val_err}")
             raise ValueError(f"Invalid data in tax leg {i+1}: {val_err}") from val_err
         except Exception as leg_err:
-            # Log and re-raise unexpected errors
             logger.error(f"[{func_name}] Unexpected Error processing tax leg {i} for {asset}: {leg_err}", exc_info=True)
             raise ValueError(f"Unexpected error processing tax leg {i+1}") from leg_err
 
@@ -601,7 +676,6 @@ def calculate_option_taxes(strategy_data: List[Dict[str, Any]], asset: str) -> O
 
     logger.info(f"[{func_name}] Calculation complete for {asset}. Total estimated charges: {final_total_cost:.2f}")
 
-    # Include rate info used in calculations
     rate_info = {
         "STT_SHORT_RATE": STT_SHORT_RATE, "STT_EXERCISE_RATE": STT_EXERCISE_RATE,
         "STAMP_DUTY_RATE": STAMP_DUTY_RATE, "SEBI_RATE": SEBI_RATE,
@@ -621,78 +695,162 @@ def calculate_option_taxes(strategy_data: List[Dict[str, Any]], asset: str) -> O
     }
 
 # ===============================================================
-# 2. Generate Payoff Chart (using Matplotlib - Enhanced)
+# 2. Generate Payoff Chart (using Matplotlib - ENHANCED AXIS)
 # ===============================================================
-def generate_payoff_chart_matplotlib(strategy_data: List[Dict[str, Any]], asset: str) -> Optional[str]:
-    # ... (Prerequisite fetching and Payoff Calculation logic remains the same) ...
-    # ... (Ensure PAYOFF_POINTS is set, e.g., 350) ...
+def generate_payoff_chart_matplotlib(
+    strategy_data: List[Dict[str, Any]],
+    asset: str,
+    strategy_metrics: Optional[Dict[str, Any]] # Pass calculated metrics
+) -> Optional[str]:
+    """Generates payoff chart using Matplotlib with improved Y-axis scaling."""
     func_name = "generate_payoff_chart_matplotlib"
     logger.info(f"[{func_name}] Generating chart for {len(strategy_data)} leg(s), asset: {asset}")
     start_time = time.monotonic()
 
-    fig = None
+    fig = None # Initialize fig to None
     try:
-        # 1. Fetch Prerequisites (Same as before)
-        # ...
-        cached_data = get_cached_option(asset); spot_price = _safe_get_float(cached_data.get("records", {}), "underlyingValue"); default_lot_size = get_lot_size(asset)
-        if not spot_price or spot_price <= 0 or not default_lot_size or default_lot_size <=0: raise ValueError("Invalid spot/lot size")
+        # 1. Fetch Prerequisites
+        # Spot price and lot size are needed again for payoff range calculation
+        spot_price_info = get_latest_spot_price_from_db(asset)
+        if spot_price_info: spot_price = spot_price_info['spot_price']
+        else:
+            cached_data = get_cached_option(asset)
+            spot_price = _safe_get_float(cached_data.get("records", {}), "underlyingValue") if cached_data else None
 
-        # 2. Calculate Payoff Data (Same as before)
-        # ...
-        lower_bound = max(spot_price*PAYOFF_LOWER_BOUND_FACTOR*0.9, 0.1); upper_bound = spot_price*PAYOFF_UPPER_BOUND_FACTOR*1.1
-        price_range = np.linspace(lower_bound, upper_bound, PAYOFF_POINTS); total_payoff = np.zeros_like(price_range)
+        default_lot_size = get_lot_size(asset)
+        if not spot_price or spot_price <= 0 or not default_lot_size or default_lot_size <= 0:
+            raise ValueError(f"Invalid spot ({spot_price}) or lot size ({default_lot_size}) for chart generation")
+
+        # 2. Calculate Payoff Data
+        # Define price range based on spot and factors
+        lower_bound = max(spot_price * PAYOFF_LOWER_BOUND_FACTOR, 0.1) # Ensure > 0
+        upper_bound = spot_price * PAYOFF_UPPER_BOUND_FACTOR
+        price_range = np.linspace(lower_bound, upper_bound, PAYOFF_POINTS)
+        total_payoff = np.zeros_like(price_range)
         unique_strikes = set()
         processed_legs_count = 0
+
         for i, leg in enumerate(strategy_data): # Loop through legs
-            try: # Extract/validate leg
-                tr_type=leg['tr_type'].lower(); op_type=leg['op_type'].lower(); strike=float(leg['strike']); premium=float(leg['op_pr']); lots=int(leg['lot']); leg_lot_size=int(leg.get('lot_size',default_lot_size))
-                if not(tr_type in ('b','s') and op_type in ('c','p') and strike>0 and premium>=0 and lots>0 and leg_lot_size>0): raise ValueError("Invalid params")
+            try: # Extract/validate leg - Reuse logic from metrics calc is better
+                tr_type = leg['tr_type'].lower()
+                op_type = leg['op_type'].lower() # Expect 'c' or 'p'
+                strike = float(leg['strike'])
+                premium = float(leg['op_pr'])
+                lots = int(leg['lot'])
+                # Use leg-specific lot size if available and valid, else default
+                leg_lot_size = default_lot_size
+                raw_ls = leg.get('lot_size')
+                if raw_ls is not None:
+                    temp_ls = _safe_get_int({'ls': raw_ls}, 'ls')
+                    if temp_ls is not None and temp_ls > 0: leg_lot_size = temp_ls
+
+                # Basic validation
+                if not(tr_type in ('b','s') and op_type in ('c','p') and strike > 0 and premium >= 0 and lots > 0 and leg_lot_size > 0):
+                    raise ValueError(f"Invalid params: type={op_type}, tr={tr_type}, k={strike}, prem={premium}, lots={lots}, ls={leg_lot_size}")
                 unique_strikes.add(strike)
-            except Exception as e: raise ValueError(f"Leg {i+1}: {e}") from e
-            quantity=lots*leg_lot_size; leg_prem_tot=premium*quantity # Calculate payoff
-            intrinsic = np.maximum(price_range - strike, 0) if op_type == 'c' else np.maximum(strike - price_range, 0)
-            leg_payoff = (intrinsic*quantity - leg_prem_tot) if tr_type == 'b' else (leg_prem_tot - intrinsic*quantity)
-            total_payoff += leg_payoff; processed_legs_count += 1
-        if processed_legs_count == 0: logger.warning(f"No valid legs for {asset}."); return None
+            except Exception as e:
+                raise ValueError(f"Leg {i+1} processing error for chart: {e}") from e
 
-        # 3. --- Create Matplotlib Figure ---
-        plt.close('all')
-        plt.style.use('seaborn-v0_8-whitegrid')
-        fig, ax = plt.subplots(figsize=(9, 5.5), dpi=95) # Slightly larger figure
+            # Calculate payoff for this leg across the price range
+            quantity = lots * leg_lot_size
+            leg_prem_tot = premium * quantity # Total premium cost/credit for the leg
+            intrinsic_value = np.maximum(price_range - strike, 0) if op_type == 'c' else np.maximum(strike - price_range, 0)
+            leg_payoff = (intrinsic_value * quantity - leg_prem_tot) if tr_type == 'b' else (leg_prem_tot - intrinsic_value * quantity)
+            total_payoff += leg_payoff
+            processed_legs_count += 1
 
-        # 4. --- Plot and Style (with Larger Fonts) ---
-        ax.plot(price_range, total_payoff, color='mediumblue', linewidth=2.0, label="Strategy Payoff", zorder=10) # Thicker line
-        ax.axhline(0, color='black', linewidth=1.0, linestyle='-', alpha=0.9, zorder=1) # Slightly thicker zero line
-        ax.axvline(spot_price, color='dimgrey', linestyle='--', linewidth=1.2, label=f'Spot {spot_price:.2f}', zorder=1) # Slightly thicker spot line
+        if processed_legs_count == 0:
+            logger.warning(f"[{func_name}] No valid legs processed for chart: {asset}.")
+            return None
 
-        strike_line_color = 'darkorange'; text_y_offset_factor = 0.09 # Adjust Y offset
-        y_min_plot, y_max_plot = np.min(total_payoff), np.max(total_payoff); y_range_plot = y_max_plot - y_min_plot if y_max_plot > y_min_plot else 1.0
-        text_y_pos = y_min_plot - y_range_plot * text_y_offset_factor
+        # --- 3. Determine Y-axis Limits ---
+        actual_min_pl = np.min(total_payoff)
+        actual_max_pl = np.max(total_payoff)
+        logger.debug(f"[{func_name}] Actual PL range in plot: Min={actual_min_pl:.2f}, Max={actual_max_pl:.2f}")
+
+        # Get theoretical max/min from passed metrics
+        theo_max_profit = np.inf
+        theo_max_loss = -np.inf
+        if strategy_metrics and isinstance(strategy_metrics.get("metrics"), dict):
+            max_p_str = strategy_metrics["metrics"].get("max_profit", "∞")
+            max_l_str = strategy_metrics["metrics"].get("max_loss", "-∞")
+            try: theo_max_profit = float(max_p_str) if max_p_str != "∞" else np.inf
+            except (ValueError, TypeError): pass
+            try: theo_max_loss = float(max_l_str) if max_l_str != "-∞" else -np.inf
+            except (ValueError, TypeError): pass
+        logger.debug(f"[{func_name}] Theoretical PL range: Min={theo_max_loss}, Max={theo_max_profit}")
+
+        # Determine plot limits: Use theoretical if finite and outside actual range, else use actual
+        y_min_limit = actual_min_pl
+        if np.isfinite(theo_max_loss) and theo_max_loss < actual_min_pl:
+            y_min_limit = theo_max_loss
+
+        y_max_limit = actual_max_pl
+        if np.isfinite(theo_max_profit) and theo_max_profit > actual_max_pl:
+            y_max_limit = theo_max_profit
+
+        # Add padding (ensure range isn't zero)
+        y_range = y_max_limit - y_min_limit
+        if abs(y_range) < 1e-6: y_range = max(abs(y_max_limit), abs(y_min_limit), 1.0) # Avoid zero range
+
+        y_padding = y_range * 0.10 # 10% padding
+        final_y_min = y_min_limit - y_padding
+        final_y_max = y_max_limit + y_padding
+        # Ensure zero line is clearly visible if PL crosses zero
+        if y_min_limit < 0 < y_max_limit:
+            final_y_min = min(final_y_min, y_min_limit * 1.1) # Ensure loss shown
+            final_y_max = max(final_y_max, y_max_limit * 1.1) # Ensure profit shown
+        elif y_max_limit <= 0 : # Only loss
+             final_y_max = max(final_y_max, y_padding) # Show a bit above zero
+        elif y_min_limit >= 0: # Only profit
+             final_y_min = min(final_y_min, -y_padding) # Show a bit below zero
+
+        logger.debug(f"[{func_name}] Final Y-Axis limits: Min={final_y_min:.2f}, Max={final_y_max:.2f}")
+
+
+        # 4. --- Create Matplotlib Figure ---
+        plt.close('all') # Close previous figures
+        plt.style.use('seaborn-v0_8-whitegrid') # Use a clean style
+        fig, ax = plt.subplots(figsize=(9, 5.5), dpi=95) # Adjust size/dpi as needed
+
+        # 5. --- Plot and Style ---
+        ax.plot(price_range, total_payoff, color='mediumblue', linewidth=2.0, label="Strategy Payoff", zorder=10)
+        ax.axhline(0, color='black', linewidth=1.0, linestyle='-', alpha=0.9, zorder=1) # Zero P/L line
+        # Use spot price fetched at the start of this function
+        ax.axvline(spot_price, color='dimgrey', linestyle='--', linewidth=1.2, label=f'Spot {spot_price:.2f}', zorder=1)
+
+        # Plot strikes (similar logic as before, but adjust y position based on new limits)
+        strike_line_color = 'darkorange'
+        # Place strike labels below the lowest point, considering the final y-axis limit
+        text_y_offset_factor = 0.05 # Relative offset based on final y-range
+        final_y_range = final_y_max - final_y_min
+        text_y_pos = final_y_min - final_y_range * text_y_offset_factor
 
         for k in sorted(list(unique_strikes)):
-             ax.axvline(k, color=strike_line_color, linestyle=':', linewidth=1.0, alpha=0.75, zorder=1) # Slightly thicker strike lines
-             ax.text(k, text_y_pos, f'{k:g}', color=strike_line_color, ha='center', va='top', fontsize=9, alpha=0.95, weight='medium') # Larger strike text
+             ax.axvline(k, color=strike_line_color, linestyle=':', linewidth=1.0, alpha=0.75, zorder=1)
+             # Use calculated text_y_pos for labels
+             ax.text(k, text_y_pos, f'{k:g}', color=strike_line_color, ha='center', va='top', fontsize=9, alpha=0.95, weight='medium')
 
-        ax.fill_between(price_range, total_payoff, 0, where=total_payoff >= 0, facecolor='palegreen', alpha=0.5, interpolate=True, zorder=0) # Slightly more opaque fill
+        # Fill profit/loss areas
+        ax.fill_between(price_range, total_payoff, 0, where=total_payoff >= 0, facecolor='palegreen', alpha=0.5, interpolate=True, zorder=0)
         ax.fill_between(price_range, total_payoff, 0, where=total_payoff < 0, facecolor='lightcoral', alpha=0.5, interpolate=True, zorder=0)
 
-        # Increase font sizes
-        ax.set_title(f"{asset} Strategy Payoff", fontsize=15, weight='bold') # Larger title
-        ax.set_xlabel("Underlying Price at Expiry", fontsize=11) # Larger X label
-        ax.set_ylabel("Profit / Loss", fontsize=11) # Larger Y label
-        ax.tick_params(axis='both', which='major', labelsize=10) # Larger tick labels
-        ax.legend(fontsize=10) # Larger legend
+        # Titles and Labels
+        ax.set_title(f"{asset} Strategy Payoff", fontsize=15, weight='bold')
+        ax.set_xlabel("Underlying Price at Expiry", fontsize=11)
+        ax.set_ylabel("Profit / Loss (₹)", fontsize=11) # Explicit label
+        ax.tick_params(axis='both', which='major', labelsize=10)
+        ax.legend(fontsize=10)
         ax.grid(True, which='major', linestyle=':', linewidth=0.6, alpha=0.7)
 
-        # Adjust axis limits (same logic)
+        # Apply calculated axis limits
         x_padding = (upper_bound - lower_bound) * 0.02
         ax.set_xlim(lower_bound - x_padding, upper_bound + x_padding)
-        y_padding = (y_max_plot - y_min_plot) * 0.05 if y_range_plot > 0 else abs(y_min_plot * 0.1) if y_min_plot != 0 else 10
-        ax.set_ylim(y_min_plot - y_padding - abs(text_y_pos - y_min_plot), y_max_plot + y_padding)
+        ax.set_ylim(final_y_min, final_y_max) # Use calculated limits
 
-        fig.tight_layout(pad=1.0)
+        fig.tight_layout(pad=1.0) # Adjust padding
 
-        # 5. --- Save to Buffer (Same logic) ---
+        # 6. --- Save to Buffer ---
         img_buffer = io.BytesIO()
         plt.savefig(img_buffer, format="png", bbox_inches="tight", dpi=fig.dpi)
         img_buffer.seek(0)
@@ -702,13 +860,19 @@ def generate_payoff_chart_matplotlib(strategy_data: List[Dict[str, Any]], asset:
         logger.info(f"[{func_name}] Successfully generated Matplotlib chart for {asset} in {duration:.3f}s")
         return img_base64
 
-    # ... (Error handling and finally block remain the same) ...
-    except ValueError as val_err: logger.error(f"[{func_name}] Error: {val_err}"); return None
-    except Exception as e: logger.error(f"[{func_name}] Unexpected error for {asset}: {e}", exc_info=True); return None
+    except ValueError as val_err:
+        logger.error(f"[{func_name}] Value Error: {val_err}")
+        return None
+    except Exception as e:
+        logger.error(f"[{func_name}] Unexpected error generating chart for {asset}: {e}", exc_info=True)
+        return None
     finally:
+        # Ensure the figure is closed to release memory
         if fig is not None:
-            try: plt.close(fig)
-            except Exception: pass
+            try:
+                plt.close(fig)
+            except Exception:
+                pass # Ignore errors during close
 
 # ===============================================================
 # 3. Calculate Strategy Metrics (REVISED Breakeven Calculation)
@@ -719,38 +883,44 @@ def calculate_strategy_metrics(strategy_data: List[Dict[str, Any]], asset: str) 
     using theoretical P/L limits and refined breakeven calculation.
     """
     func_name = "calculate_strategy_metrics"
-    logger.info(f"[{func_name}] Calculating for {len(strategy_data)} leg(s), asset: {asset}")
+    logger.info(f"[{func_name}] Calculating metrics for {len(strategy_data)} leg(s), asset: {asset}")
 
     # --- 1. Fetch Essential Data ---
     try:
-        cached_data = get_cached_option(asset)
-        if not isinstance(cached_data, dict) or "records" not in cached_data: raise ValueError("Invalid cache structure")
-        records = cached_data.get("records", {})
-        spot_price = records.get("underlyingValue")
-        if spot_price is None or not isinstance(spot_price, (int, float)) or spot_price <= 0: raise ValueError("Spot price missing/invalid")
+        # Use DB helper for spot price consistency
+        spot_price_info = get_latest_spot_price_from_db(asset)
+        if spot_price_info: spot_price = spot_price_info['spot_price']
+        else: # Fallback
+            cached_data = get_cached_option(asset)
+            spot_price = _safe_get_float(cached_data.get("records", {}), "underlyingValue") if cached_data else None
+
+        if spot_price is None or not isinstance(spot_price, (int, float)) or spot_price <= 0:
+             raise ValueError(f"Spot price missing/invalid ({spot_price})")
         spot_price = float(spot_price)
+
         default_lot_size = get_lot_size(asset)
-        if default_lot_size is None or default_lot_size <= 0: raise ValueError("Default lot size missing/invalid")
+        if default_lot_size is None or default_lot_size <= 0:
+            raise ValueError("Default lot size missing/invalid")
     except Exception as e:
         logger.error(f"[{func_name}] Failed prerequisite data fetch for {asset}: {e}")
         return None
 
     # --- 2. Process Strategy Legs & Store Details ---
-    # (This part remains the same as the previous version - validating legs and storing details)
     total_net_premium = 0.0; cost_breakdown = []; processed_legs = 0
     net_long_call_qty = 0; net_short_call_qty = 0; net_long_put_qty = 0; net_short_put_qty = 0
     payoff_at_S_equals_0 = 0.0; legs_for_payoff_calc = []
-    all_strikes_list = [] # Collect all strikes
+    all_strikes_list = []
 
     for i, leg in enumerate(strategy_data):
         try:
-            tr_type = str(leg.get('tr_type', '')).lower(); option_type = str(leg.get('op_type', '')).lower()
+            tr_type = str(leg.get('tr_type', '')).lower()
+            option_type = str(leg.get('op_type', '')).lower() # 'c' or 'p'
             strike = _safe_get_float(leg, 'strike'); premium = _safe_get_float(leg, 'op_pr')
             lots = _safe_get_int(leg, 'lot'); leg_lot_size = _safe_get_int(leg, 'lot_size', default_lot_size)
             if tr_type not in ('b','s') or option_type not in ('c','p') or strike is None or strike <= 0 or premium is None or premium < 0 or lots is None or lots <= 0 or leg_lot_size <= 0:
                 raise ValueError("Invalid leg parameters")
             quantity = lots * leg_lot_size; leg_premium_total = premium * quantity; action_verb = ""
-            all_strikes_list.append(strike) # Add strike to list
+            all_strikes_list.append(strike)
 
             if tr_type == 'b': # Buy
                 total_net_premium -= leg_premium_total; action_verb = "Paid"
@@ -761,104 +931,127 @@ def calculate_strategy_metrics(strategy_data: List[Dict[str, Any]], asset: str) 
                 if option_type == 'c': net_short_call_qty += quantity
                 else: net_short_put_qty += quantity
 
-            if option_type == 'p': # Payoff at S=0
-                intrinsic_at_zero = strike
+            # Calculate payoff component if underlying price goes to 0
+            if option_type == 'p': # Puts have value at S=0
+                intrinsic_at_zero = strike # Intrinsic value is K - S = K - 0 = K
                 payoff_at_S_equals_0 += (intrinsic_at_zero * quantity - leg_premium_total) if tr_type == 'b' else (leg_premium_total - intrinsic_at_zero * quantity)
-            else: payoff_at_S_equals_0 += -leg_premium_total if tr_type == 'b' else leg_premium_total
+            else: # Calls expire worthless at S=0
+                payoff_at_S_equals_0 += -leg_premium_total if tr_type == 'b' else leg_premium_total
 
             cost_breakdown.append({ "leg_index": i, "action": tr_type.upper(), "type": option_type.upper(), "strike": strike, "premium_per_share": premium, "lots": lots, "lot_size": leg_lot_size, "quantity": quantity, "total_premium": round(leg_premium_total if tr_type=='s' else -leg_premium_total, 2), "effect": action_verb })
+            # Store details needed *only* for payoff calculation function
             legs_for_payoff_calc.append({'tr_type': tr_type, 'op_type': option_type, 'strike': strike, 'premium': premium, 'quantity': quantity})
             processed_legs += 1
-        except (ValueError, KeyError, TypeError) as leg_err: logger.error(f"[{func_name}] Error processing leg {i}: {leg_err}. Data: {leg}"); return None
-    if processed_legs == 0: logger.error(f"[{func_name}] No valid legs processed."); return None
+        except (ValueError, KeyError, TypeError) as leg_err:
+            logger.error(f"[{func_name}] Error processing metrics leg {i}: {leg_err}. Data: {leg}")
+            return None # Fail fast if leg data is bad
+    if processed_legs == 0: logger.error(f"[{func_name}] No valid legs processed for metrics."); return None
 
-    # --- 3. Define Payoff Function ---
+    # --- 3. Define Payoff Function (Helper) ---
     def _calculate_payoff_at_price(S: float, legs: List[Dict]) -> float:
-        # (Same payoff calculation helper as before)
         total_pnl = 0.0
         for leg in legs:
             intrinsic = 0.0; premium = leg['premium']; strike = leg['strike']
             quantity = leg['quantity']; op_type = leg['op_type']; tr_type = leg['tr_type']
             leg_prem_tot = premium * quantity
             if op_type == 'c': intrinsic = max(S - strike, 0)
-            else: intrinsic = max(strike - S, 0)
+            else: intrinsic = max(strike - S, 0) # op_type == 'p'
             pnl = (intrinsic * quantity - leg_prem_tot) if tr_type == 'b' else (leg_prem_tot - intrinsic * quantity)
             total_pnl += pnl
         return total_pnl
 
-    # --- 4. Determine Theoretical Max Profit / Loss (Same as before) ---
-    net_calls = net_long_call_qty - net_short_call_qty
-    all_strikes_unique_sorted = sorted(list(set(all_strikes_list))) # Unique sorted strikes
-    max_profit_val = np.inf if net_calls > 0 else payoff_at_S_equals_0
-    max_loss_val = -np.inf if net_calls < 0 else payoff_at_S_equals_0
-    if net_calls <= 0: # Bounded Profit: Check payoff at strikes
-        for k in all_strikes_unique_sorted: max_profit_val = max(max_profit_val, _calculate_payoff_at_price(k, legs_for_payoff_calc))
-    if net_calls >= 0: # Bounded Loss: Check payoff at strikes
-        for k in all_strikes_unique_sorted: max_loss_val = min(max_loss_val, _calculate_payoff_at_price(k, legs_for_payoff_calc))
+    # --- 4. Determine Theoretical Max Profit / Loss ---
+    net_calls = net_long_call_qty - net_short_call_qty # Net quantity of calls (positive if net long)
+    net_puts = net_long_put_qty - net_short_put_qty   # Net quantity of puts (positive if net long)
+    all_strikes_unique_sorted = sorted(list(set(all_strikes_list)))
 
+    # Determine Max Profit
+    if net_calls > 0 or net_puts < 0: # Potential for infinite profit (long call or short put dominant)
+        max_profit_val = np.inf
+    else: # Bounded profit - check payoff at S=0 and at all strikes
+        max_profit_val = payoff_at_S_equals_0
+        for k in all_strikes_unique_sorted:
+            max_profit_val = max(max_profit_val, _calculate_payoff_at_price(k, legs_for_payoff_calc))
 
-    # --- 5. Breakeven Points (REVISED SEARCH LOGIC) ---
+    # Determine Max Loss
+    if net_calls < 0 or net_puts > 0: # Potential for infinite loss (short call or long put dominant)
+        max_loss_val = -np.inf
+    else: # Bounded loss - check payoff at S=0 and at all strikes
+        max_loss_val = payoff_at_S_equals_0
+        for k in all_strikes_unique_sorted:
+            max_loss_val = min(max_loss_val, _calculate_payoff_at_price(k, legs_for_payoff_calc))
+
+    # --- 5. Breakeven Points (Using Root Finding) ---
     logger.debug(f"[{func_name}] Starting breakeven search...")
     breakeven_points_found = []
-    unique_strikes_and_zero = sorted(list(set(all_strikes_list + [0.0]))) # Include 0 and unique strikes
-
-    # Define search intervals based on strikes and bounds
-    search_intervals = []
-    # Interval from 0 up to the first strike (or slightly beyond if only one strike)
-    first_strike = unique_strikes_and_zero[1] if len(unique_strikes_and_zero) > 1 else spot_price
-    search_intervals.append((max(0, first_strike * 0.5), first_strike * 1.1)) # Search below and slightly above first strike
-
-    # Intervals between strikes
-    for i in range(len(all_strikes_unique_sorted) - 1):
-        # Add interval slightly padded around the strikes
-        search_intervals.append((all_strikes_unique_sorted[i] * 0.99, all_strikes_unique_sorted[i+1] * 1.01))
-
-    # Interval beyond the last strike
-    last_strike = all_strikes_unique_sorted[-1] if all_strikes_unique_sorted else spot_price
-    search_intervals.append((last_strike * 0.99, max(last_strike * 1.5, spot_price * PAYOFF_UPPER_BOUND_FACTOR * 1.1)))
+    unique_strikes_and_zero = sorted(list(set([0.0] + all_strikes_list))) # Include 0
 
     # Define the target function for the root finder (payoff should be zero)
     payoff_func = lambda s: _calculate_payoff_at_price(s, legs_for_payoff_calc)
 
-    processed_intervals = set() # Avoid redundant searches
+    # Search intervals: (0 to first_strike), (strike_i to strike_i+1), (last_strike to infinity_proxy)
+    search_intervals = []
+    # Below first strike
+    first_strike = unique_strikes_and_zero[1] if len(unique_strikes_and_zero) > 1 else spot_price # Use spot if no strikes
+    search_intervals.append((max(0, first_strike * 0.1), first_strike * 1.05)) # Search below first strike, slightly past
+
+    # Between strikes
+    for i in range(len(all_strikes_unique_sorted) - 1):
+        search_intervals.append((all_strikes_unique_sorted[i] * 0.95, all_strikes_unique_sorted[i+1] * 1.05))
+
+    # Above last strike
+    last_strike = all_strikes_unique_sorted[-1] if all_strikes_unique_sorted else spot_price
+    # Define a reasonable upper search bound based on spot price
+    upper_search_limit = max(last_strike * 1.5, spot_price * (PAYOFF_UPPER_BOUND_FACTOR + 0.2))
+    search_intervals.append((last_strike * 0.95, upper_search_limit))
+
+    processed_intervals = set()
+    root_finder_used = "None"
 
     for p1_raw, p2_raw in search_intervals:
-        p1 = max(0.0, p1_raw) # Ensure lower bound is not negative
+        p1 = max(0.0, p1_raw) # Ensure lower bound >= 0
         p2 = p2_raw
-        interval_key = (round(p1, 4), round(p2, 4)) # Key for processed set
-        if p1 >= p2 or interval_key in processed_intervals: continue # Skip invalid or already processed intervals
+        interval_key = (round(p1, 4), round(p2, 4))
+        if p1 >= p2 or interval_key in processed_intervals: continue
         processed_intervals.add(interval_key)
 
         try:
             y1 = payoff_func(p1)
             y2 = payoff_func(p2)
 
-            # Check if the signs are different (indicates a crossing)
+            # Check if payoff crosses zero within the interval
             if np.sign(y1) != np.sign(y2):
-                try:
-                    from scipy.optimize import brentq
-                    # Attempt to find the root using Brent's method
-                    be = brentq(payoff_func, p1, p2, xtol=1e-6, rtol=1e-6)
-                    # Check if BE is valid (positive price)
-                    if be > 1e-6: # Use small tolerance above 0
-                        breakeven_points_found.append(be)
-                        logger.debug(f"[{func_name}] Found BE (brentq) in [{p1:.2f}, {p2:.2f}]: {be:.4f}")
-                except ImportError:
-                    # Fallback: Linear Interpolation
-                    if abs(y2 - y1) > 1e-9:
-                        be = p1 - y1 * (p2 - p1) / (y2 - y1)
-                        if ((p1 <= be <= p2) or (p2 <= be <= p1)) and be > 1e-6:
-                            breakeven_points_found.append(be)
-                            logger.debug(f"[{func_name}] Found BE (interp) in [{p1:.2f}, {p2:.2f}]: {be:.4f}")
-                except ValueError as brentq_err:
-                    # Brentq raises ValueError if signs are the same or other issues
-                    logger.debug(f"[{func_name}] Brentq failed for interval [{p1:.2f}, {p2:.2f}]: {brentq_err}")
-                    # Could try simpler bisection here if needed as another fallback
+                found_be = None
+                if SCIPY_AVAILABLE:
+                    try:
+                        # Use Brent's method (robust root finder)
+                        be = brentq(payoff_func, p1, p2, xtol=1e-6, rtol=1e-6)
+                        if be > 1e-6: # Check if BE is valid (positive price)
+                             found_be = be
+                             root_finder_used = "brentq"
+                             logger.debug(f"[{func_name}] Found BE (brentq) in [{p1:.2f}, {p2:.2f}]: {be:.4f}")
+                    except ValueError as brentq_err:
+                        # Brentq can fail if function doesn't change sign or other issues
+                        logger.debug(f"[{func_name}] Brentq failed for interval [{p1:.2f}, {p2:.2f}]: {brentq_err}. Trying interpolation.")
+                    except Exception as brentq_gen_err:
+                         logger.error(f"[{func_name}] Brentq unexpected error [{p1:.2f}, {p2:.2f}]: {brentq_gen_err}", exc_info=True)
+
+                # Fallback: Linear Interpolation if SciPy fails or is unavailable
+                if found_be is None and abs(y2 - y1) > 1e-9: # Avoid division by zero
+                    be = p1 - y1 * (p2 - p1) / (y2 - y1)
+                    # Check if interpolated point is within bounds and positive
+                    if ((p1 <= be <= p2) or (p2 <= be <= p1)) and be > 1e-6:
+                        found_be = be
+                        root_finder_used = "interpolation"
+                        logger.debug(f"[{func_name}] Found BE (interp) in [{p1:.2f}, {p2:.2f}]: {be:.4f}")
+
+                if found_be is not None:
+                     breakeven_points_found.append(found_be)
+
         except Exception as search_err:
             logger.error(f"[{func_name}] Error during BE search in interval [{p1:.2f}, {p2:.2f}]: {search_err}")
 
-
-    # Check payoff AT strikes for exact zero touches (common in straddles/strangles)
+    # Check payoff AT strikes for exact zero touches (e.g., straddle at strike)
     zero_tolerance = 1e-4 # How close to zero counts
     for k in all_strikes_unique_sorted:
         payoff_at_k = payoff_func(k)
@@ -869,51 +1062,68 @@ def calculate_strategy_metrics(strategy_data: List[Dict[str, Any]], asset: str) 
                   breakeven_points_found.append(k)
                   logger.debug(f"[{func_name}] Found BE (strike touch): {k:.4f}")
 
-    # Remove potential duplicates resulting from different methods finding near-identical points
-    unique_be_points = sorted(list(set(round(p, 4) for p in breakeven_points_found if p >= 0))) # Ensure non-negative
+    # Remove potential duplicates and ensure positive
+    unique_be_points = sorted([p for p in list(set(round(p, 4) for p in breakeven_points_found)) if p >= 0])
 
     # --- Cluster Breakeven Points ---
     def cluster_points(points: List[float], tolerance_ratio: float, reference_price: float) -> List[float]:
-        # (Same clustering function as before)
         if not points: return []
-        points.sort(); absolute_tolerance = max(reference_price * tolerance_ratio, 0.01)
+        points.sort()
+        # Use an absolute tolerance based on % of reference price, or a small minimum
+        absolute_tolerance = max(reference_price * tolerance_ratio, 0.01)
         if not points: return []
-        clustered_groups = [[points[0]]]
+
+        clustered_groups = [[points[0]]] # Start first group
         for p in points[1:]:
-            if abs(p - clustered_groups[-1][-1]) <= absolute_tolerance: clustered_groups[-1].append(p)
-            else: clustered_groups.append([p])
+            # If current point is close to the *last point added to the current group*
+            if abs(p - clustered_groups[-1][-1]) <= absolute_tolerance:
+                clustered_groups[-1].append(p) # Add to current group
+            else:
+                clustered_groups.append([p]) # Start a new group
+        # Return the average of each group, rounded
         return [round(np.mean(group), 2) for group in clustered_groups]
 
     breakeven_points_clustered = cluster_points(unique_be_points, BREAKEVEN_CLUSTER_GAP_PCT, spot_price)
+    logger.debug(f"Breakeven raw: {unique_be_points}, clustered: {breakeven_points_clustered}, method: {root_finder_used}")
 
-    # --- 6. Reward to Risk Ratio (Keep logic from previous fix) ---
-    # ... (R:R calculation logic based on theoretical max_profit_val, max_loss_val) ...
+
+    # --- 6. Reward to Risk Ratio ---
     reward_to_risk_ratio = "N/A"; zero_threshold = 1e-9
-    max_p_num = max_profit_val if isinstance(max_profit_val, (int, float)) else None
-    max_l_num = max_loss_val if isinstance(max_loss_val, (int, float)) else None
-    if max_l_num is not None:
-        if abs(max_l_num) < zero_threshold: reward_to_risk_ratio = "∞" if max_p_num is not None and max_p_num > zero_threshold else "0.00"
-        elif max_p_num is not None: reward_to_risk_ratio = round(max_p_num / abs(max_l_num), 2) if max_p_num >= 0 else "Loss"
-        elif max_profit_val == np.inf: reward_to_risk_ratio = "∞"
-    elif max_loss_val == -np.inf: reward_to_risk_ratio = "0.00" if max_profit_val != np.inf else "Undefined"
-    elif max_profit_val == np.inf: reward_to_risk_ratio = "∞"
+    max_p_num = theo_max_profit # Use theoretical max profit
+    max_l_num_abs = abs(theo_max_loss) if np.isfinite(theo_max_loss) else np.inf # Use absolute theoretical max loss
+
+    if max_l_num_abs == np.inf: # Infinite risk
+        reward_to_risk_ratio = "0.00" # R:R is effectively zero
+    elif max_l_num_abs < zero_threshold: # Zero or negligible risk
+        if max_p_num == np.inf or max_p_num > zero_threshold:
+            reward_to_risk_ratio = "∞" # Infinite R:R
+        else:
+            reward_to_risk_ratio = "0.00" # No profit, no risk
+    elif max_p_num == np.inf: # Infinite profit, finite risk
+        reward_to_risk_ratio = "∞"
+    else: # Both profit and loss are finite and loss > 0
+        if max_p_num >= 0: # Only calculate if profit is non-negative
+             reward_to_risk_ratio = round(max_p_num / max_l_num_abs, 2)
+        else: # Max profit is negative (strategy always loses)
+             reward_to_risk_ratio = "Loss" # Indicate guaranteed loss scenario
+
 
     # --- 7. Format Final Output ---
     max_profit_str = "∞" if max_profit_val == np.inf else format(max_profit_val, '.2f')
     max_loss_str = "-∞" if max_loss_val == -np.inf else format(max_loss_val, '.2f')
-    reward_to_risk_str = str(reward_to_risk_ratio) if not isinstance(reward_to_risk_ratio, (int, float)) else format(reward_to_risk_ratio, '.2f')
+    reward_to_risk_str = str(reward_to_risk_ratio) # Already formatted or string like "∞", "Loss"
 
-    logger.info(f"[{func_name}] Metrics calculated. MaxP: {max_profit_str}, MaxL: {max_loss_str}, BE: {breakeven_points_clustered}, R:R: {reward_to_risk_str}")
+    logger.info(f"[{func_name}] Metrics calculated. MaxP: {max_profit_str}, MaxL: {max_loss_str}, BE(Clustered): {breakeven_points_clustered}, R:R: {reward_to_risk_str}")
 
     return {
         "calculation_inputs": { "asset": asset, "spot_price_used": round(spot_price, 2), "default_lot_size": default_lot_size, "num_legs_processed": processed_legs },
         "metrics": { "max_profit": max_profit_str, "max_loss": max_loss_str, "breakeven_points": breakeven_points_clustered, "reward_to_risk_ratio": reward_to_risk_str, "net_premium": round(total_net_premium, 2) },
-        "cost_breakdown_per_leg": cost_breakdown
+        "cost_breakdown_per_leg": cost_breakdown # Premium cost/credit only
     }
 
 
 # ===============================================================
-# 4. Calculate Option Greeks (Integrate User Provided Logic - Scaled Per Share)
+# 4. Calculate Option Greeks (Keep as is - Assumes Correct)
 # ===============================================================
 def calculate_option_greeks(
     strategy_data: List[Dict[str, Any]],
@@ -922,44 +1132,29 @@ def calculate_option_greeks(
 ) -> List[Dict[str, Any]]:
     """
     Calculates per-share option Greeks (scaled by 100) for each leg
-    of a strategy using the mibian Black-Scholes model.
-    (Based on user-provided logic)
-
-    Args:
-        strategy_data: A list of strategy leg dictionaries. Expected keys per leg:
-                       'strike' (float/str), 'days_to_expiry' (int/str),
-                       'iv' (float/str - *percentage*, e.g., 25.5 for 25.5%),
-                       'op_type' (c/p), 'tr_type' (b/s).
-                       'lot' and 'lot_size' keys are ignored for calculation based on intent.
-        asset: The underlying asset name (e.g., "NIFTY").
-        interest_rate_pct: Risk-free interest rate in percentage (e.g., 6.5 for 6.5%).
-
-    Returns:
-        A list of dictionaries, each containing the calculated scaled, per-share
-        Greeks for a valid leg, or an empty list if fetching spot price fails or
-        no legs are valid.
+    using the mibian Black-Scholes model. Requires 'iv' and 'days_to_expiry'
+    in strategy_data for each leg.
     """
-    func_name = "calculate_option_greeks" # For logging
+    func_name = "calculate_option_greeks"
     logger.info(f"Calculating SCALED PER-SHARE Greeks for {len(strategy_data)} legs, asset: {asset}, rate: {interest_rate_pct}%")
-
     greeks_result_list: List[Dict[str, Any]] = []
 
     # --- 1. Fetch Spot Price ---
     try:
-        cached_data = get_cached_option(asset)
-        if not isinstance(cached_data, dict) or "records" not in cached_data:
-            logger.error(f"[{func_name}] Invalid cache structure for asset {asset}: 'records' key missing.")
-            return [] # Cannot proceed
-        records = cached_data.get("records", {})
-        spot_price = records.get("underlyingValue")
-        if spot_price is None or not isinstance(spot_price, (int, float)):
-            logger.error(f"[{func_name}] Spot price ('underlyingValue') missing or invalid in cache for {asset}")
-            return [] # Cannot proceed
+        # Use consistent spot price source
+        spot_price_info = get_latest_spot_price_from_db(asset)
+        if spot_price_info: spot_price = spot_price_info['spot_price']
+        else:
+            cached_data = get_cached_option(asset)
+            spot_price = _safe_get_float(cached_data.get("records", {}), "underlyingValue") if cached_data else None
+
+        if spot_price is None or not isinstance(spot_price, (int, float)) or spot_price <= 0:
+            raise ValueError(f"Spot price missing/invalid ({spot_price}) for greeks calculation")
         spot_price = float(spot_price)
         logger.debug(f"[{func_name}] Using spot price {spot_price} for asset {asset}")
-    except Exception as cache_err:
-        logger.error(f"[{func_name}] Error fetching spot price from cache for {asset}: {cache_err}", exc_info=True)
-        return [] # Return empty list on failure
+    except Exception as spot_err:
+        logger.error(f"[{func_name}] Error fetching spot price for {asset}: {spot_err}", exc_info=True)
+        return [] # Return empty list if spot price fails
 
     # --- 2. Process Each Leg ---
     for i, leg_data in enumerate(strategy_data):
@@ -968,150 +1163,228 @@ def calculate_option_greeks(
             if not isinstance(leg_data, dict):
                 raise ValueError(f"Leg {i} data is not a dictionary.")
 
-            # Use safe getters
-            strike_price = _safe_get_float(leg_data, 'strike', default=None)
-            days_to_expiry = _safe_get_int(leg_data, 'days_to_expiry', default=None)
-            implied_vol_pct = _safe_get_float(leg_data, 'iv', default=None) # Input IV is percentage
-            option_type_flag = str(leg_data.get('op_type', '')).lower()
-            transaction_type = str(leg_data.get('tr_type', '')).lower()
-            # Lots/LotSize are present in leg_data but ignored for per-share greek calc
+            strike_price = _safe_get_float(leg_data, 'strike')
+            # DTE calculated during preparation step
+            days_to_expiry = _safe_get_int(leg_data, 'days_to_expiry')
+            # IV extracted during preparation step
+            implied_vol_pct = _safe_get_float(leg_data, 'iv') # Expects IV as percentage (e.g., 25.5)
+            option_type_flag = str(leg_data.get('op_type', '')).lower() # 'c' or 'p'
+            transaction_type = str(leg_data.get('tr_type', '')).lower() # 'b' or 's'
 
             # --- Input Validation ---
-            if strike_price is None or strike_price <= 0: raise ValueError("Missing or invalid 'strike' (must be > 0)")
-            if days_to_expiry is None or days_to_expiry < 0: raise ValueError("Missing or invalid 'days_to_expiry' (must be >= 0)")
-            if implied_vol_pct is None or implied_vol_pct <= 0: raise ValueError("Missing or invalid 'iv' (must be > 0)")
-            if option_type_flag not in ['c', 'p']: raise ValueError("Invalid 'op_type' (must be 'c' or 'p')")
-            if transaction_type not in ['b', 's']: raise ValueError("Invalid 'tr_type' (must be 'b' or 's')")
+            if strike_price is None or strike_price <= 0: raise ValueError("Missing/invalid 'strike'")
+            if days_to_expiry is None or days_to_expiry < 0: raise ValueError("Missing/invalid 'days_to_expiry'")
+            if implied_vol_pct is None or implied_vol_pct <= 0: raise ValueError("Missing/invalid 'iv'")
+            if option_type_flag not in ['c', 'p']: raise ValueError("Invalid 'op_type'")
+            if transaction_type not in ['b', 's']: raise ValueError("Invalid 'tr_type'")
 
-            # Prepare inputs for mibian ([spot, strike, interest_rate_%, days_to_expiry])
-            mibian_inputs = [spot_price, strike_price, interest_rate_pct, days_to_expiry]
-            volatility_input = implied_vol_pct # Mibian expects IV as percentage points
+            # Mibian calculation (handle near-zero DTE carefully)
+            mibian_dte = max(days_to_expiry, 0.0001) # Avoid zero DTE for mibian
+            mibian_inputs = [spot_price, strike_price, interest_rate_pct, mibian_dte]
+            volatility_input = implied_vol_pct
 
-            # --- Calculate PER-SHARE Greeks using mibian ---
             try:
-                bs_model = mibian.BS(mibian_inputs, volatility=volatility_input)
+                # Use specific model based on type for clarity
+                if option_type_flag == 'c':
+                    bs_model = mibian.BS(mibian_inputs, volatility=volatility_input)
+                    delta = bs_model.callDelta
+                    theta = bs_model.callTheta
+                    rho = bs_model.callRho
+                else: # Put
+                    bs_model = mibian.BS(mibian_inputs, volatility=volatility_input)
+                    delta = bs_model.putDelta
+                    theta = bs_model.putTheta
+                    rho = bs_model.putRho
+                # Gamma and Vega are the same for calls and puts
+                gamma = bs_model.gamma
+                vega = bs_model.vega
             except OverflowError as math_err:
-                 raise ValueError(f"Mibian calculation failed due to math error: {math_err}") from math_err
+                 # Often happens with extreme inputs or very near expiry
+                 logger.warning(f"[{func_name}] Mibian math error for leg {i} (asset {asset}, K={strike_price}, DTE={mibian_dte}, IV={iv}): {math_err}. Skipping greeks for this leg.")
+                 continue # Skip this leg
             except Exception as mibian_err:
                  raise ValueError(f"Mibian calculation error: {mibian_err}") from mibian_err
 
-            # Extract per-share Greeks
-            delta = bs_model.callDelta if option_type_flag == 'c' else bs_model.putDelta
-            theta = bs_model.callTheta if option_type_flag == 'c' else bs_model.putTheta # Mibian theta is per day
-            rho = bs_model.callRho if option_type_flag == 'c' else bs_model.putRho
-            gamma = bs_model.gamma
-            vega = bs_model.vega # Per 1% change in IV
-
             # --- Adjust Sign for Short Positions ---
-            if transaction_type == 's':
-                delta *= -1; gamma *= -1; theta *= -1; vega *= -1; rho *= -1
+            sign_multiplier = -1.0 if transaction_type == 's' else 1.0
+            delta *= sign_multiplier
+            gamma *= sign_multiplier
+            theta *= sign_multiplier # Theta is usually negative (time decay cost), so selling makes it positive
+            vega *= sign_multiplier
+            rho *= sign_multiplier
 
-            # --- Apply Scaling (Per-share Greek * 100) ---
-            scaling_factor = 100.0
+            # --- Store PER-SHARE Greeks (NO SCALING HERE as per user logic intent) ---
+            # Scaling was removed based on user's original provided `calculate_option_greeks`
+            # If scaling *is* desired (e.g., delta * 100), add it back here.
             calculated_greeks = {
-                'delta': round(delta * scaling_factor, 2),
-                'gamma': round(gamma * scaling_factor, 4), # Gamma often needs more precision
-                'theta': round(theta * scaling_factor, 2), # Scale Daily Theta
-                'vega': round(vega * scaling_factor, 2),
-                'rho': round(rho * scaling_factor, 2)
+                'delta': round(delta, 4),
+                'gamma': round(gamma, 4),
+                'theta': round(theta, 4), # Theta per day
+                'vega': round(vega, 4),   # Vega per 1% IV change
+                'rho': round(rho, 4)    # Rho per 1% rate change
             }
 
-            # Check for non-finite values AFTER scaling/rounding
+            # Check for non-finite values AFTER calculations
             if any(not np.isfinite(v) for v in calculated_greeks.values()):
-                logger.warning(f"[{func_name}] Skipping leg {i} for {asset} due to non-finite Greek result after scaling.")
+                logger.warning(f"[{func_name}] Skipping leg {i} for {asset} due to non-finite Greek result.")
                 continue # Skip this leg
 
             # Append results for this leg
             greeks_result_list.append({
                 'leg_index': i,
-                'input_data': leg_data, # Include original input for context
-                'calculated_greeks': calculated_greeks # Store the SCALED PER-SHARE greeks
+                'input_data': { # Log key inputs for debugging
+                     'strike': strike_price, 'dte': days_to_expiry, 'iv': implied_vol_pct,
+                     'op_type': option_type_flag, 'tr_type': transaction_type
+                },
+                'calculated_greeks_per_share': calculated_greeks # Unscaled, per-share
             })
 
         except (ValueError, KeyError, TypeError) as validation_err:
-            logger.warning(f"[{func_name}] Skipping Greek calculation for leg {i} due to invalid input: {validation_err}. Leg data: {leg_data}")
+            logger.warning(f"[{func_name}] Skipping Greek calculation for leg {i} due to invalid input: {validation_err}. Leg data snapshot: strike={leg_data.get('strike')}, dte={leg_data.get('days_to_expiry')}, iv={leg_data.get('iv')}")
             continue # Skip to the next leg
         except Exception as e:
             logger.error(f"[{func_name}] Unexpected error calculating Greeks for leg {i}: {e}. Leg data: {leg_data}", exc_info=True)
             continue # Skip to the next leg
 
-    logger.info(f"[{func_name}] Finished calculating SCALED PER-SHARE Greeks for {len(greeks_result_list)} valid legs.")
+    logger.info(f"[{func_name}] Finished calculating PER-SHARE Greeks for {len(greeks_result_list)} valid legs.")
     return greeks_result_list
 
 
+# ===============================================================
+# 5. Fetch Stock Data (Robust yfinance handling - FIX for 404)
+# ===============================================================
 async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
+    """Fetches stock data using yfinance, handling indices and missing data more gracefully."""
     cache_key = f"stock_{stock_symbol}"
     cached = stock_data_cache.get(cache_key)
-    if cached: return cached
+    if cached:
+        logger.debug(f"Cache hit for stock data: {stock_symbol}")
+        return cached
 
     logger.info(f"Fetching stock data for: {stock_symbol}")
-    info = None # Initialize info
-    h1d, h50d, h200d = None, None, None # Initialize history dataframes
+    info = None
+    h1d, h5d, h50d, h200d = None, None, None, None # Added 5d for recent close fallback
+    success = False # Flag to track if essential data was fetched
 
     try:
         loop = asyncio.get_running_loop()
-        stock = await loop.run_in_executor(None, yf.Ticker, stock_symbol)
+        # Fetch Ticker object (synchronous part)
+        try:
+             stock = await loop.run_in_executor(None, yf.Ticker, stock_symbol)
+             if not stock: raise ValueError("yf.Ticker returned None")
+        except Exception as ticker_err:
+             logger.error(f"Failed to create yf.Ticker object for {stock_symbol}: {ticker_err}", exc_info=True)
+             return None # Cannot proceed without ticker
 
         # --- Fetch info with specific error handling ---
         try:
             logger.debug(f"Attempting to fetch info for {stock_symbol}")
             # Run the synchronous get_info in an executor
             info = await loop.run_in_executor(None, getattr, stock, 'info')
-            if not info: # Check if info is empty
-                 logger.warning(f"Received empty info dictionary for {stock_symbol} from yfinance.")
-                 # Treat empty info as a failure for reliable analysis
-                 return None # Or decide if you can proceed with partial data
+            # Check if info is useful - might be empty dict {}
+            if not info:
+                 logger.warning(f"Received empty 'info' dictionary for {stock_symbol} from yfinance. Will rely on history.")
+                 # Don't fail yet, history might work
+            else:
+                 logger.debug(f"Successfully fetched 'info' for {stock_symbol}. Keys: {list(info.keys())[:5]}...") # Log partial keys
+                 success = True # Got some info data
         except json.JSONDecodeError as json_err:
-            # Handle cases where yfinance gets non-JSON response for info
-            logger.error(f"JSONDecodeError fetching info for {stock_symbol}: {json_err}. Yahoo might be blocking or symbol invalid.", exc_info=False)
-            return None # Cannot proceed without info
+            logger.error(f"JSONDecodeError fetching info for {stock_symbol}: {json_err}. Symbol likely invalid or delisted.", exc_info=False)
+            # If info fails this way, it's unlikely history will work well either
+            return None
         except Exception as info_err:
-            # Catch other potential errors during info fetch
-            logger.error(f"Error fetching info for {stock_symbol}: {info_err}", exc_info=True)
-            return None # Cannot proceed without info
+            logger.error(f"Error fetching 'info' for {stock_symbol}: {info_err}", exc_info=True)
+            # Allow proceeding if history fetch might still work
 
-        # --- Fetch history (best effort) ---
+        # --- Fetch history concurrently (best effort) ---
         try:
-            logger.debug(f"Attempting to fetch history for {stock_symbol}")
-            t1=loop.run_in_executor(None, stock.history, "1d");
-            t2=loop.run_in_executor(None, stock.history, "50d")
-            t3=loop.run_in_executor(None, stock.history, "200d");
-            # Gather history results
-            h1d, h50d, h200d = await asyncio.gather(t1, t2, t3)
-        except Exception as hist_err:
-             logger.warning(f"Error fetching history for {stock_symbol}: {hist_err}. Proceeding with info data only if possible.", exc_info=False)
-             # Allow proceeding even if history fails, analysis prompt can handle missing MAs
+            logger.debug(f"Attempting to fetch history (1d, 5d, 50d, 200d) for {stock_symbol}")
+            # Add 5d history fetch
+            tasks = [
+                loop.run_in_executor(None, stock.history, {"period":"1d", "interval":"1d"}),
+                loop.run_in_executor(None, stock.history, {"period":"5d", "interval":"1d"}),
+                loop.run_in_executor(None, stock.history, {"period":"50d", "interval":"1d"}),
+                loop.run_in_executor(None, stock.history, {"period":"200d", "interval":"1d"})
+            ]
+            # Gather results, allowing exceptions
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # --- Process Data (carefully check for missing values) ---
-        cp = info.get("currentPrice") or info.get("previousClose") # Get current price first
-        if cp is None and h1d is not None and not h1d.empty: # Fallback to 1-day history close
-             cp = h1d["Close"].iloc[-1]
+            # Assign results if successful, log errors otherwise
+            h1d = results[0] if not isinstance(results[0], Exception) else None
+            h5d = results[1] if not isinstance(results[1], Exception) else None
+            h50d = results[2] if not isinstance(results[2], Exception) else None
+            h200d = results[3] if not isinstance(results[3], Exception) else None
+
+            if any(isinstance(r, Exception) for r in results):
+                logger.warning(f"One or more history fetches failed for {stock_symbol}. Errors: {[type(e).__name__ for e in results if isinstance(e, Exception)]}")
+            if h1d is not None and not h1d.empty:
+                logger.debug(f"Successfully fetched history (at least 1d) for {stock_symbol}")
+                success = True # Mark success if we got any history
+            else:
+                 logger.warning(f"Failed to fetch even 1d history for {stock_symbol}.")
+
+        except Exception as hist_err:
+             logger.warning(f"Unexpected error during history fetch task setup/gathering for {stock_symbol}: {hist_err}", exc_info=True)
+             # Proceed with info data only if available
+
+        # --- Process Data (Check availability carefully) ---
+        if not success:
+             logger.error(f"Failed to retrieve essential data (info or history) for {stock_symbol}.")
+             return None # Cannot proceed if both info and history failed
+
+        cp = None
+        # Prioritize live/recent prices from 'info' if available
+        if info:
+            cp = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("ask") or info.get("bid")
+
+        # Fallback to history if 'info' price missing or invalid
+        if cp is None:
+             if h1d is not None and not h1d.empty and 'Close' in h1d.columns:
+                 cp = h1d["Close"].iloc[-1]
+                 logger.debug(f"Using 1d history close price for {stock_symbol}: {cp}")
+             elif h5d is not None and not h5d.empty and 'Close' in h5d.columns: # Use 5d if 1d fails
+                 cp = h5d["Close"].iloc[-1]
+                 logger.debug(f"Using 5d history close price for {stock_symbol}: {cp}")
 
         # If still no price, we cannot proceed reliably
         if cp is None:
-             logger.error(f"Could not determine current/previous price for {stock_symbol}. Cannot generate analysis data.")
+             logger.error(f"Could not determine current/previous price for {stock_symbol} from info or history. Cannot generate analysis data.")
              return None
 
-        vol = info.get("volume", 0)
-        if vol == 0 and h1d is not None and not h1d.empty: # Fallback to 1d volume
+        # --- Get other fields (handle missing values gracefully) ---
+        vol = info.get("volume") if info else None
+        if vol is None and h1d is not None and not h1d.empty and 'Volume' in h1d.columns:
              vol = h1d["Volume"].iloc[-1]
 
-        ma50 = h50d["Close"].mean() if h50d is not None and not h50d.empty else None
-        ma200 = h200d["Close"].mean() if h200d is not None and not h200d.empty else None
+        # Calculate MAs only if history is valid
+        ma50 = h50d["Close"].mean() if (h50d is not None and not h50d.empty and 'Close' in h50d.columns) else None
+        ma200 = h200d["Close"].mean() if (h200d is not None and not h200d.empty and 'Close' in h200d.columns) else None
 
-        mc = info.get("marketCap")
-        pe = info.get("trailingPE")
-        eps = info.get("trailingEps")
-        sec = info.get("sector", "N/A")
-        ind = info.get("industry", "N/A")
+        # Fundamental data - often missing for indices, default to None or "N/A"
+        mc = info.get("marketCap") if info else None
+        pe = info.get("trailingPE") if info else None
+        eps = info.get("trailingEps") if info else None
+        sec = info.get("sector", "N/A") if info else "N/A"
+        ind = info.get("industry", "N/A") if info else "N/A"
+        # For indices like Nifty, these will likely be None/N/A
 
+        # Construct the final data dictionary
         data = {
-            "current_price": cp, "volume": vol, "moving_avg_50": ma50,
-            "moving_avg_200": ma200, "market_cap": mc, "pe_ratio": pe,
-            "eps": eps, "sector": sec, "industry": ind
+            "current_price": cp,
+            "volume": vol,
+            "moving_avg_50": ma50,
+            "moving_avg_200": ma200,
+            "market_cap": mc,
+            "pe_ratio": pe,
+            "eps": eps,
+            "sector": sec,
+            "industry": ind
         }
-        stock_data_cache[cache_key] = data
-        logger.info(f"Successfully processed stock data for {stock_symbol}")
+        # Filter out None values before caching? Optional.
+        # data_filtered = {k: v for k, v in data.items() if v is not None}
+
+        stock_data_cache[cache_key] = data # Cache the result
+        logger.info(f"Successfully processed stock data for {stock_symbol}. Price: {cp}, 50MA: {ma50}, 200MA: {ma200}")
         return data
 
     except Exception as e:
@@ -1119,305 +1392,336 @@ async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
         logger.error(f"Unexpected error in fetch_stock_data_async for {stock_symbol}: {e}", exc_info=True)
         return None
 
-
+# ===============================================================
+# 6. Fetch News (Robust Scraping - FIX for Reliability)
+# ===============================================================
 async def fetch_latest_news_async(asset: str) -> List[Dict[str, str]]:
+    """Fetches latest news from Yahoo Finance using more robust selectors."""
     cache_key = f"news_{asset.upper()}"
     cached = news_cache.get(cache_key)
-    if cached: return cached
+    if cached:
+        logger.debug(f"Cache hit for news: {asset}")
+        return cached
 
     logger.info(f"Fetching news for: {asset}")
-    symbol = "^NSEI" if asset.upper() == "NIFTY" else f"{asset.upper()}.NS"
-    # Try using the main quote page which sometimes embeds news streams
+    # Map common assets to Yahoo tickers
+    asset_upper = asset.upper()
+    if asset_upper == "NIFTY": symbol = "^NSEI"
+    elif asset_upper == "BANKNIFTY": symbol = "^NSEBANK"
+    elif asset_upper == "FINNIFTY": symbol = "NIFTY_FIN_SERVICE.NS" # Check exact ticker
+    else: symbol = f"{asset_upper}.NS" # Default for equities
+
+    # Try the main quote page first, as it often embeds news
     url = f"https://finance.yahoo.com/quote/{symbol}"
-    # Alternate URL if the main page doesn't work:
-    # url = f"https://finance.yahoo.com/quote/{symbol}/news"
     headers = { # Use a more common user agent
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
     }
     news_list = []
     try:
         loop = asyncio.get_running_loop()
         logger.debug(f"Requesting news URL: {url}")
+        # Use functools.partial to pass arguments to requests.get in executor
         response = await loop.run_in_executor(
-            None, functools.partial(requests.get, url, headers=headers, timeout=15) # Increased timeout
+            None, functools.partial(requests.get, url, headers=headers, timeout=20) # Increased timeout
         )
-        response.raise_for_status()
-        logger.debug(f"News URL status code: {response.status_code}")
+        response.raise_for_status() # Check for HTTP errors like 404, 500
+        logger.debug(f"News URL status code: {response.status_code} for {symbol}")
 
         soup = BeautifulSoup(response.text, "html.parser")
 
-        # --- Revised Selector Strategy ---
-        # Strategy 1: Look for common list structures often used for news streams
-        # This targets list items that look like news containers
-        # Update: Yahoo often uses divs with specific data attributes now
-        # Let's try finding divs containing links with specific paths or classes
-        # Common pattern: links contain '/news/' in their href
-        news_items = []
-        potential_items = soup.select('div a[href*="/news/"]') # Find links pointing to news articles
+        # --- Revised Selector Strategy (Targeting common Yahoo Finance structures) ---
+        # Strategy: Find list items (`li`) within unordered lists (`ul`) that look like news streams.
+        # Common class names might involve 'stream', 'content', 'news', 'media', 'js-stream-content'
+        # This is heuristic and might need adjustment if Yahoo changes layout.
+        # Look for list items with a link and some text content suggestive of news.
+        potential_news_items = soup.select('li.js-stream-content div.Ov\\(h\\)') # Common pattern observed Dec 2023 / Jan 2024
 
         processed_urls = set()
-        for link_tag in potential_items:
-            parent_div = link_tag.find_parent('div') # Find a reasonable parent container
-            if not parent_div: continue
+        max_news = 5 # Fetch slightly more
 
-            # Try to extract title and summary from the parent container context
-            title_tag = parent_div.find(['h3', 'h2']) # Look for h3 or h2 nearby
-            headline = title_tag.get_text(strip=True) if title_tag else link_tag.get_text(strip=True) # Fallback to link text
-            summary_tag = parent_div.find('p')
-            summary = summary_tag.get_text(strip=True) if summary_tag else "No summary available."
-            link = link_tag.get('href')
+        logger.debug(f"Found {len(potential_news_items)} potential news items using selector 'li.js-stream-content div.Ov(h)'")
 
-            if not link or not headline: continue # Skip if essential parts missing
+        if not potential_news_items:
+             # Fallback selector attempt (might work on different page versions)
+             potential_news_items = soup.select('div[data-test="news-stream"] li div') # Another possible container structure
+             logger.debug(f"Trying fallback selector 'div[data-test=\"news-stream\"] li div', found {len(potential_news_items)} items.")
 
-            # Make URL absolute
-            if link.startswith('/'):
-                link = f"https://finance.yahoo.com{link}"
 
-            # Avoid duplicates and very short headlines
-            if link not in processed_urls and len(headline) > 10:
-                news_list.append({"headline": headline, "summary": summary, "link": link})
-                processed_urls.add(link)
-                if len(news_list) >= 3: break # Stop after finding 3 items
+        for item in potential_news_items:
+            link_tag = item.find('a', href=True)
+            title_tag = item.find(['h3']) # Often headline is in h3 inside link
+            para_tag = item.find('p') # Summary paragraph
+
+            if link_tag and title_tag:
+                link = link_tag['href']
+                headline = title_tag.get_text(strip=True)
+                summary = para_tag.get_text(strip=True) if para_tag else "No summary available."
+
+                # Basic validation
+                if not headline or not link.startswith('/news/'): # Ensure it's a news link
+                    continue
+
+                # Make URL absolute
+                if link.startswith('/'):
+                    link = f"https://finance.yahoo.com{link}"
+
+                # Avoid duplicates and very short headlines
+                if link not in processed_urls and len(headline) > 15:
+                    news_list.append({
+                        "headline": headline,
+                        "summary": summary,
+                        "link": link
+                    })
+                    processed_urls.add(link)
+                    if len(news_list) >= max_news:
+                        break # Stop after finding enough items
 
         # --- Log if no news found ---
         if not news_list:
-            logger.warning(f"Could not find news items for {asset} using revised selectors on {url}. Yahoo layout may have changed.")
-            news_list.append({"headline": "No recent news found.", "summary": "", "link": "#"})
+            logger.warning(f"Could not find structured news items for {asset} ({symbol}) using current selectors on {url}. Yahoo layout may have changed. Check HTML structure manually.")
+            # Provide a placeholder indicating no news found
+            news_list.append({"headline": f"No recent news found for {asset}.", "summary": "Yahoo Finance structure might have changed or no news available.", "link": url}) # Link back to quote page
 
-        news_cache[cache_key] = news_list
-        return news_list
+        # Trim to desired number (e.g., 3) after collecting more initially
+        final_news_list = news_list[:3]
 
+        news_cache[cache_key] = final_news_list # Cache the final list
+        logger.info(f"Successfully fetched and parsed {len(final_news_list)} news items for {asset} ({symbol}).")
+        return final_news_list
+
+    except requests.exceptions.Timeout:
+        logger.error(f"Timeout Error fetching news URL for {asset} ({symbol}): {url}")
+        return [{"headline": "Error fetching news (Timeout).", "summary": "", "link": "#"}]
     except requests.exceptions.RequestException as req_err:
-        logger.error(f"Network Error fetching news URL for {asset}: {req_err}")
-        return [{"headline": "Error fetching news (Network).", "summary": "", "link": "#"}]
+        # Handles HTTP errors (4xx, 5xx) and connection errors
+        logger.error(f"Network/HTTP Error fetching news URL for {asset} ({symbol}): {req_err}")
+        # Include status code if available
+        status_code = req_err.response.status_code if req_err.response else 'N/A'
+        return [{"headline": f"Error fetching news (Network/HTTP {status_code}).", "summary": str(req_err), "link": "#"}]
     except Exception as e:
-        logger.error(f"Error parsing news for {asset}: {e}", exc_info=True)
-        return [{"headline": "Error fetching news (Parsing).", "summary": "", "link": "#"}]
+        logger.error(f"Error parsing news for {asset} ({symbol}): {e}", exc_info=True)
+        return [{"headline": "Error fetching news (Parsing).", "summary": "An unexpected error occurred.", "link": "#"}]
 
 
+# ===============================================================
+# 7. Build Analysis Prompt (Keep as is - Relies on fixed data fetch)
+# ===============================================================
 def build_stock_analysis_prompt(stock_symbol: str, stock_data: dict, latest_news: list) -> str:
-    """
-    Generates a more structured and detailed prompt for LLM stock analysis,
-    focusing on available data and contextual comparison needs.
-    """
+    """Generates structured prompt for LLM analysis, handling potentially missing data."""
     func_name = "build_stock_analysis_prompt"
     logger.debug(f"[{func_name}] Building structured prompt for {stock_symbol}")
 
     # --- Formatting Helper ---
     def fmt(v, p="₹", s="", pr=2, na="N/A"):
-        # (Formatting function remains the same)
-        if v is None: return na
+        if v is None or v == 'N/A': return na
         if isinstance(v,(int,float)):
             try:
+                # Handle large numbers (Crores, Lakhs)
                 if abs(v) >= 1e7: return f"{p}{v/1e7:.{pr}f} Cr{s}"
                 if abs(v) >= 1e5: return f"{p}{v/1e5:.{pr}f} L{s}"
+                # Standard formatting
                 return f"{p}{v:,.{pr}f}{s}"
-            except: return str(v)
-        return str(v)
+            except Exception: return str(v) # Fallback
+        return str(v) # Return non-numeric as string
 
-    # --- Prepare Data Sections for Prompt ---
-    price = stock_data.get('current_price'); ma50 = stock_data.get('moving_avg_50'); ma200 = stock_data.get('moving_avg_200')
-    volume = stock_data.get('volume'); market_cap = stock_data.get('market_cap'); pe_ratio = stock_data.get('pe_ratio')
-    eps = stock_data.get('eps'); sector = stock_data.get('sector', 'N/A'); industry = stock_data.get('industry', 'N/A')
+    # --- Prepare Data Sections ---
+    price = stock_data.get('current_price') # Should always exist if fetch succeeded
+    ma50 = stock_data.get('moving_avg_50')
+    ma200 = stock_data.get('moving_avg_200')
+    volume = stock_data.get('volume')
+    market_cap = stock_data.get('market_cap')
+    pe_ratio = stock_data.get('pe_ratio')
+    eps = stock_data.get('eps')
+    sector = stock_data.get('sector', 'N/A')
+    industry = stock_data.get('industry', 'N/A')
 
-    # Technical Context String (same as before)
-    # ... (Trend, Support, Resistance calculation) ...
+    # Technical Context String (handles missing MAs)
     trend = "N/A"; support = "N/A"; resistance = "N/A"
-    if price and ma50 and ma200:
+    ma_available = ma50 is not None and ma200 is not None
+    if price and ma_available:
         support_levels = sorted([lvl for lvl in [ma50, ma200] if lvl is not None and lvl < price], reverse=True)
         resistance_levels = sorted([lvl for lvl in [ma50, ma200] if lvl is not None and lvl >= price])
         support = " / ".join([fmt(lvl) for lvl in support_levels]) if support_levels else "Below Key MAs"
         resistance = " / ".join([fmt(lvl) for lvl in resistance_levels]) if resistance_levels else "Above Key MAs"
+        # Trend description based on price vs MAs
         if price > ma50 > ma200: trend = "Strong Uptrend (Price > 50MA > 200MA)"
-        elif price > ma50 and price > ma200: trend = "Uptrend (Price > MAs)"
+        elif price > ma50 and price > ma200: trend = "Uptrend (Price > Both MAs)"
         elif price < ma50 < ma200: trend = "Strong Downtrend (Price < 50MA < 200MA)"
-        elif price < ma50 and price < ma200: trend = "Downtrend (Price < MAs)"
+        elif price < ma50 and price < ma200: trend = "Downtrend (Price < Both MAs)"
+        elif ma50 > price > ma200 : trend = "Sideways/Consolidating (Between 200MA and 50MA)"
+        elif ma200 > price > ma50 : trend = "Sideways/Consolidating (Between 50MA and 200MA)"
         elif ma50 > ma200: trend = "Sideways/Uptrend Context (Price vs 50MA: %s)" % ('Above' if price > ma50 else 'Below')
         else: trend = "Sideways/Downtrend Context (Price vs 50MA: %s)" % ('Above' if price > ma50 else 'Below')
-    elif price and ma50:
+    elif price and ma50: # Only 50MA available
         support = fmt(ma50) if price > ma50 else "N/A (Below 50MA)"
         resistance = fmt(ma50) if price <= ma50 else "N/A (Above 50MA)"
         trend = "Above 50MA" if price > ma50 else "Below 50MA"
-    tech_context = f"Price: {fmt(price)}, 50D MA: {fmt(ma50)}, 200D MA: {fmt(ma200)}, Trend Context: {trend}, Key Levels (from MAs): Support near {support}, Resistance near {resistance}. Volume (1d): {fmt(volume, p='', pr=0)}"
+    else: # No MAs available
+        trend = "Trend Unknown (MA data unavailable)"
+
+    tech_context = f"Price: {fmt(price)}, 50D MA: {fmt(ma50)}, 200D MA: {fmt(ma200)}, Trend Context: {trend}, Key Levels (from MAs): Support near {support}, Resistance near {resistance}. Volume (Approx 1d): {fmt(volume, p='', pr=0)}"
+
+    # Fundamental Context String (handles missing data)
+    fund_context = f"Market Cap: {fmt(market_cap, p='')}, P/E Ratio: {fmt(pe_ratio, p='', s='x')}, EPS: {fmt(eps)}, Sector: {fmt(sector, p='')}, Industry: {fmt(industry, p='')}"
+    pe_comparison_note = ""
+    if pe_ratio is not None:
+        pe_comparison_note = f"Note: P/E ({fmt(pe_ratio, p='', s='x')}) should be compared to '{fmt(industry, p='')}' industry peers and historical averages for valuation context (peer data not provided)."
+    elif market_cap is None and pe_ratio is None and eps is None: # Likely an index
+         fund_context = "N/A (Index - Standard fundamental ratios like P/E, Market Cap, EPS do not apply directly)."
+         pe_comparison_note = "N/A for index."
+    else:
+         pe_comparison_note = "Note: P/E data unavailable for comparison."
 
 
-    # Fundamental Context String (same as before)
-    fund_context = f"Market Cap: {fmt(market_cap, p='')}, P/E Ratio: {fmt(pe_ratio, p='', s='x')}, EPS: {fmt(eps)}, Sector: {sector}, Industry: {industry}"
-    pe_comparison_note = f"Note: P/E ({fmt(pe_ratio, p='', s='x')}) should be compared to '{industry}' industry and historical averages for proper valuation context (peer data not provided)." if pe_ratio else "Note: P/E data unavailable for comparison."
-
-    # News Context String - *** Corrected Quote Handling ***
+    # News Context String (handles potential errors)
     news_formatted = []
-    for n in latest_news[:3]:
-        headline = n.get('headline','N/A')
-        # Use triple quotes for summary or replace both quote types if needed
-        summary = n.get('summary','N/A').replace('"', "'").replace("'", "`") # Replace " with ' and ' with `
-        link = n.get('link', '#')
-        # Use single quotes for the outer f-string
-        news_formatted.append(f'- [{headline}]({link}): {summary}')
-    news_context = "\n".join(news_formatted) if news_formatted else "- No recent news summaries found."
+    if latest_news and not ("Error fetching news" in latest_news[0].get("headline", "") or "No recent news found" in latest_news[0].get("headline", "")):
+        for n in latest_news[:3]: # Max 3 news items
+            headline = n.get('headline','N/A')
+            # Sanitize summary for prompt (optional, safer for LLM)
+            summary = n.get('summary','N/A').replace('"', "'").replace('{', '(').replace('}', ')')
+            link = n.get('link', '#')
+            news_formatted.append(f'- [{headline}]({link}): {summary}')
+        news_context = "\n".join(news_formatted)
+    else: # Handle error case or no news case
+        news_context = f"- {latest_news[0].get('headline', 'No recent news summaries found.')}" if latest_news else "- No recent news summaries found."
 
 
-    # --- Construct the Structured Prompt (same as before) ---
+    # --- Construct the Structured Prompt ---
+    # (Using the same well-structured prompt template)
     prompt = f"""
-Analyze the stock **{stock_symbol}** based *only* on the provided data snapshots. Use clear headings and bullet points.
+Analyze the stock/index **{stock_symbol}** based *only* on the provided data snapshots. Use clear headings and bullet points. Acknowledge missing data where applicable.
 
 **Analysis Request:**
 
 1.  **Executive Summary:**
-    *   Provide a brief (2-3 sentence) overall takeaway combining technical posture, basic fundamental indicators, and recent news sentiment. State the implied short-term bias (e.g., Bullish, Bearish, Neutral, Cautious).
+    *   Provide a brief (2-3 sentence) overall takeaway combining technical posture (price vs. MAs), key fundamental indicators (if available), and recent news sentiment. State the implied short-term bias (e.g., Bullish, Bearish, Neutral, Cautious).
 
 2.  **Technical Analysis:**
-    *   **Trend & Momentum:** Describe the current trend based on the price vs. 50D and 200D Moving Averages. Is the trend established or potentially changing? Comment on the provided volume figure (is it high/low relative to what might be typical? Acknowledge if comparison data is missing).
+    *   **Trend & Momentum:** Describe the current trend based on the price vs. 50D and 200D Moving Averages (if available). Is the trend established or potentially changing? Comment on the provided volume figure (relative context might be missing).
         *   *Data:* {tech_context}
-    *   **Support & Resistance:** Identify immediate support and resistance levels based *only* on the 50D and 200D MAs provided.
-    *   **Key Technical Observations:** Note any significant technical patterns implied by the data (e.g., price significantly extended from MAs, price consolidating near MAs).
+    *   **Support & Resistance:** Identify potential support and resistance levels based *only* on the 50D and 200D MAs provided. State if levels are unclear due to missing MA data.
+    *   **Key Technical Observations:** Note any significant technical patterns *implied* by the data (e.g., price extended from MAs, consolidation near MAs, MA crossovers if evident).
 
 3.  **Fundamental Snapshot:**
-    *   **Company Size & Profitability:** Classify the company based on its Market Cap. Comment on the provided EPS figure as an indicator of recent profitability.
-    *   **Valuation:** Discuss the P/E Ratio. {pe_comparison_note}
+    *   **Company Size & Profitability (if applicable):** Based on Market Cap (if available), classify the company size. Comment on EPS (if available) as an indicator of profitability. Acknowledge if this section is not applicable (e.g., for an index).
+    *   **Valuation (if applicable):** Discuss the P/E Ratio (if available). {pe_comparison_note}
         *   *Data:* {fund_context}
-    *   **Sector/Industry Context:** Briefly state the sector and industry. Mention any generally known characteristics or recent performance trends *if widely known* (but prioritize provided data).
+    *   **Sector/Industry Context:** State the sector and industry (if available). Briefly mention general characteristics if widely known, but prioritize provided data.
 
 4.  **Recent News Sentiment:**
-    *   **Sentiment Assessment:** Summarize the general sentiment (Positive, Negative, Neutral, Mixed) conveyed by the recent news headlines/summaries provided.
-    *   **Potential News Impact:** Briefly state how this news *might* influence near-term price action.
+    *   **Sentiment Assessment:** Summarize the general sentiment (Positive, Negative, Neutral, Mixed) conveyed by the provided news headlines/summaries. State if news fetch failed.
+    *   **Potential News Impact:** Briefly state how this news *might* influence near-term price action, considering the sentiment.
         *   *News Data:*
 {news_context}
 
 5.  **Outlook & Considerations:**
-    *   **Consolidated Outlook:** Reiterate the short-term bias based on the synthesis of the above points.
-    *   **Key Factors to Monitor:** What are the most important technical levels or potential catalysts (from news/fundamentals provided) to watch?
-    *   **Identified Risks (from Data):** What potential risks are directly suggested by the provided data (e.g., price below key MA, high P/E without context, negative news)?
-    *   **General Option Strategy Angle:** Based ONLY on the derived bias (Bullish/Bearish/Neutral) and acknowledging IV is unknown, suggest *general types* of option strategies that align (e.g., Bullish -> Long Calls/Spreads; Bearish -> Long Puts/Spreads; Neutral -> Credit Spreads/Iron Condors). **Do NOT suggest specific strikes or expiries.**
+    *   **Consolidated Outlook:** Reiterate the short-term bias (Bullish/Bearish/Neutral/Uncertain) based on the synthesis of the above points. Qualify the outlook based on data availability/quality.
+    *   **Key Factors to Monitor:** What are the most important technical levels (from MAs) or potential catalysts (from news/fundamentals provided) to watch?
+    *   **Identified Risks (from Data):** What potential risks are directly suggested by the provided data (e.g., price below key MA, high P/E without context, negative news, missing data)?
+    *   **General Option Strategy Angle:** Based *only* on the derived bias (Bullish/Bearish/Neutral) and acknowledging IV/risk tolerance are unknown, suggest *general types* of option strategies that align (e.g., Bullish -> Long Calls/Spreads; Bearish -> Long Puts/Spreads; Neutral -> Credit Spreads/Iron Condors). **Do NOT suggest specific strikes or expiries.** State if bias is too uncertain for a clear angle.
 
-**Disclaimer:** This analysis is based on limited data points. It is not financial advice. Verify information and conduct thorough research before making any trading decisions.
+**Disclaimer:** This analysis is generated based on limited, potentially delayed data points and recent news summaries. It is NOT financial advice. Verify all information and conduct thorough independent research before making any trading or investment decisions. Market conditions change rapidly.
 """
+    logger.debug(f"[{func_name}] Generated prompt for {stock_symbol}")
     return prompt
 
 
+# ===============================================================
+# Helper to get latest spot price from DB (used by multiple functions)
+# ===============================================================
+def get_latest_spot_price_from_db(asset: str, max_age_minutes: int = 5) -> Optional[Dict[str, Any]]:
+    """Queries the DB for the latest spot price updated by the background thread."""
+    sql = """
+        SELECT last_spot_price, last_spot_update_time
+        FROM option_data.assets
+        WHERE asset_name = %s
+          AND last_spot_update_time >= NOW() - INTERVAL %s MINUTE
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(dictionary=True) as cursor:
+                cursor.execute(sql, (asset, max_age_minutes))
+                result = cursor.fetchone()
+                if result and result.get("last_spot_price") is not None:
+                    price = _safe_get_float(result, "last_spot_price")
+                    ts = result.get("last_spot_update_time")
+                    ts_str = ts.strftime("%Y-%m-%d %H:%M:%S") if isinstance(ts, datetime) else str(ts)
+                    logger.debug(f"Found recent spot price in DB for {asset}: {price} at {ts_str}")
+                    return {"spot_price": price, "timestamp": ts_str}
+                else:
+                    logger.debug(f"No recent spot price (<{max_age_minutes}min) found in DB for {asset}")
+                    return None
+    except (ConnectionError, mysql.connector.Error) as db_err:
+        logger.error(f"DB Error fetching latest spot price for {asset}: {db_err}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error fetching spot price from DB for {asset}: {e}", exc_info=True)
+        return None
+
 
 # ===============================================================
-# API Endpoints (Modify Analysis Endpoint)
-# ===============================================================
-
-# ===============================================================
-# API Endpoints (Fix async DB access)
+# API Endpoints (Modified Spot Price, Analysis)
 # ===============================================================
 
 @app.get("/health", tags=["Status"])
-async def health_check(): # Endpoint stays async
+async def health_check():
      db_status = "unknown"
      try:
-        # *** USE SYNC 'with' and sync calls ***
-         with get_db_connection() as conn:
+         with get_db_connection() as conn: # Use sync context manager
               with conn.cursor() as cursor:
-                   cursor.execute("SELECT 1") # No await
-                   db_status = "connected" if cursor.fetchone() else "query_failed" # No await
-     except Exception as e: logger.error(f"Health check DB error: {e}"); db_status = f"error: {type(e).__name__}"
-     return {"status": "ok", "database": db_status}
+                   cursor.execute("SELECT 1") # Sync execute
+                   db_status = "connected" if cursor.fetchone() else "query_failed"
+     except Exception as e:
+         logger.error(f"Health check DB error: {e}", exc_info=False) # Less verbose log
+         db_status = f"error: {type(e).__name__}"
+     return {"status": "ok", "database": db_status, "nse_client": "initialized" if n else "failed"}
 
 
 @app.get("/get_assets", tags=["Data"])
-async def get_assets(): # Keep async as it's FastAPI endpoint
+async def get_assets():
     logger.info("--- GET /get_assets Endpoint START ---")
     asset_names = []
-    conn = None # Initialize conn to None
     try:
-        logger.info("Attempting to get DB connection...")
-        # Assuming get_db_connection is SYNCHRONOUS based on database.py
-        with get_db_connection() as conn:
-            if conn is None:
-                logger.error("/get_assets: get_db_connection returned None!")
-                raise ConnectionError("Failed to get DB connection (context returned None).")
-
-            # Log details about the connection obtained
-            current_db = "N/A"
-            try:
-                current_db = conn.database
-            except Exception:
-                logger.warning("/get_assets: Could not retrieve database name from connection object.")
-            logger.info(f"/get_assets: Successfully got DB connection. Current DB: '{current_db}'")
-
-            # Explicitly check/set database just in case pool default didn't stick (optional safeguard)
-            if current_db != 'option_data':
-                 logger.warning(f"/get_assets: Connection default DB is '{current_db}', attempting to switch to 'option_data'.")
-                 try:
-                     # Use a new cursor just for this operation if needed, or use conn directly
-                     # conn.database = 'option_data' # This might not work with pooled connections as expected
-                     with conn.cursor() as switch_cursor:
-                         switch_cursor.execute("USE option_data;")
-                     logger.info("/get_assets: Successfully executed USE option_data;")
-                 except mysql.connector.Error as db_err:
-                     logger.error(f"/get_assets: Failed to execute USE option_data;: {db_err}", exc_info=True)
-                     # Decide whether to proceed or raise error if USE fails
-                     raise ConnectionError(f"Failed to switch to database 'option_data': {db_err}") from db_err
-
-            # Proceed with the actual query
-            with conn.cursor(dictionary=True) as cursor:
+        with get_db_connection() as conn: # Sync context manager
+            with conn.cursor(dictionary=True) as cursor: # Use dictionary cursor
                 sql = "SELECT asset_name FROM option_data.assets ORDER BY asset_name ASC"
-                logger.info(f"/get_assets: Executing SQL: {sql}")
-                cursor.execute(sql)
-                results = cursor.fetchall() # Fetch results
-                # cursor.rowcount might not be reliable after fetchall for SELECT, check len(results)
-                row_count = len(results)
-                logger.info(f"/get_assets: SQL executed. Actual rows fetched: {row_count}")
+                logger.debug(f"/get_assets: Executing SQL: {sql}")
+                cursor.execute(sql) # Sync execute
+                results = cursor.fetchall() # Sync fetchall
                 if results:
-                    logger.info(f"/get_assets: Fetched results (first 5): {results[:5]}") # Log first few results
-                    # Process results
-                    try:
-                        asset_names = [row["asset_name"] for row in results]
-                        logger.info(f"/get_assets: Processed asset names (count: {len(asset_names)}). First 5: {asset_names[:5]}")
-                    except KeyError as ke:
-                         logger.error(f"/get_assets: KeyError processing results - column 'asset_name' missing? Error: {ke}", exc_info=True)
-                         asset_names = [] # Set empty on processing error
-                    except Exception as proc_err:
-                         logger.error(f"/get_assets: Error processing results: {proc_err}", exc_info=True)
-                         asset_names = [] # Set empty on processing error
+                    asset_names = [row["asset_name"] for row in results if "asset_name" in row]
+                    logger.info(f"/get_assets: Fetched {len(asset_names)} asset names.")
                 else:
-                    logger.warning("/get_assets: Query returned no results (results list is empty).")
-
-        # Log *before* returning
-        logger.info(f"/get_assets: Preparing to return asset names: {asset_names}")
-        return {"assets": asset_names} # Ensure this is the final return
-
-    except mysql.connector.Error as db_err:
+                    logger.warning("/get_assets: Query returned no results.")
+        return {"assets": asset_names}
+    except (ConnectionError, mysql.connector.Error) as db_err:
          logger.error(f"Database error in /get_assets: {db_err}", exc_info=True)
-         # Log connection details if available, carefully
-         db_info = "N/A"
-         if conn: db_info = f"DB='{getattr(conn, 'database', 'N/A')}', User='{getattr(conn, 'user', 'N/A')}'"
-         logger.error(f"/get_assets: Error occurred with connection: {db_info}")
-         # Return 500 for database errors to signal backend failure clearly
-         raise HTTPException(status_code=500, detail=f"Database error fetching assets.")
-    except ConnectionError as conn_err:
-         logger.error(f"Connection error in /get_assets: {conn_err}", exc_info=True)
-         raise HTTPException(status_code=500, detail=f"DB connection error.")
+         raise HTTPException(status_code=500, detail="Database error fetching assets.")
     except Exception as e:
         logger.error(f"Unexpected error in /get_assets: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Unexpected server error.")
+        raise HTTPException(status_code=500, detail="Unexpected server error.")
     finally:
-        # This ensures the end log appears even if an exception occurs above return/raise
         logger.info("--- GET /get_assets Endpoint END ---")
 
 
 @app.get("/expiry_dates", tags=["Data"])
-async def get_expiry_dates(asset: str = Query(...)): # Endpoint stays async
+async def get_expiry_dates(asset: str = Query(...)):
     logger.info(f"Request received for expiry dates: Asset={asset}")
     sql = """ SELECT DISTINCT DATE_FORMAT(e.expiry_date, '%Y-%m-%d') AS expiry_date_str
               FROM option_data.expiries e JOIN option_data.assets a ON e.asset_id = a.id
               WHERE a.asset_name = %s AND e.expiry_date >= CURDATE() ORDER BY expiry_date_str ASC; """
     expiries = []
     try:
-        # *** USE SYNC 'with' and sync calls ***
-         with get_db_connection() as conn:
+         with get_db_connection() as conn: # Sync context manager
              with conn.cursor(dictionary=True) as cursor:
-                 cursor.execute(sql, (asset,)) # No await
-                 results = cursor.fetchall() # No await
-                 expiries = [row["expiry_date_str"] for row in results]
-
-    except (ConnectionError, mysql.connector.Error) as db_err: # ... error handling ...
-        logger.error(f"DB Query Error fetching expiry dates for {asset}: {db_err}", exc_info=True)
+                 cursor.execute(sql, (asset,)) # Sync execute
+                 results = cursor.fetchall() # Sync fetchall
+                 expiries = [row["expiry_date_str"] for row in results if "expiry_date_str" in row]
+    except (ConnectionError, mysql.connector.Error) as db_err:
+        logger.error(f"DB Error fetching expiry dates for {asset}: {db_err}", exc_info=True)
         raise HTTPException(status_code=500, detail="Database error retrieving expiry data")
-    except Exception as e: # ... error handling ...
+    except Exception as e:
          logger.error(f"Unexpected error fetching expiry dates for {asset}: {e}", exc_info=True)
          raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -1429,12 +1733,11 @@ async def get_expiry_dates(asset: str = Query(...)): # Endpoint stays async
 async def get_option_chain(asset: str = Query(...), expiry: str = Query(...)):
     logger.info(f"Request received for option chain: Asset={asset}, Expiry={expiry}")
     try:
-        # Validate expiry format
-        datetime.strptime(expiry, '%Y-%m-%d')
+        datetime.strptime(expiry, '%Y-%m-%d') # Validate format
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid expiry date format. Use YYYY-MM-DD.")
 
-    # SQL using NAMED placeholders (e.g., %(key)s)
+    # SQL using named placeholders for clarity
     sql = """
         SELECT
             oc.strike_price, oc.option_type, oc.open_interest, oc.change_in_oi,
@@ -1446,332 +1749,448 @@ async def get_option_chain(asset: str = Query(...), expiry: str = Query(...)):
         WHERE a.asset_name = %(asset_name)s AND e.expiry_date = %(expiry_date)s
         ORDER BY oc.strike_price ASC;
         """
-    # Parameters as a dictionary
-    params = {
-        "asset_name": asset,
-        "expiry_date": expiry
-    }
-
+    params = { "asset_name": asset, "expiry_date": expiry }
     rows = []
-    conn = None # Initialize conn
     try:
-        logger.info(f"/get_option_chain: Attempting DB connection.")
-        with get_db_connection() as conn:
-            if conn is None: raise ConnectionError("DB connection failed.")
-            logger.info(f"/get_option_chain: Got DB connection. Current DB: '{getattr(conn, 'database', 'N/A')}'")
+        logger.debug(f"/get_option_chain: Attempting DB connection.")
+        with get_db_connection() as conn: # Sync context manager
+            logger.debug(f"/get_option_chain: Got DB connection. Current DB: '{getattr(conn, 'database', 'N/A')}'")
             with conn.cursor(dictionary=True) as cursor:
-                logger.info(f"/get_option_chain: Executing SQL with params: {params}")
-                # Execute with the dictionary params
-                cursor.execute(sql, params)
-                rows = cursor.fetchall()
-                logger.info(f"/get_option_chain: Fetched {len(rows)} rows.")
+                logger.debug(f"/get_option_chain: Executing SQL with params: {params}")
+                cursor.execute(sql, params) # Sync execute
+                rows = cursor.fetchall() # Sync fetchall
+                logger.info(f"/get_option_chain: Fetched {len(rows)} rows from DB.")
 
-    except mysql.connector.Error as db_err:
-        # Log specific DB errors
+    except (ConnectionError, mysql.connector.Error) as db_err:
         logger.error(f"Database error in /get_option_chain: {db_err}", exc_info=True)
         raise HTTPException(status_code=500, detail="Database error fetching option chain.")
-    except ConnectionError as conn_err:
-         logger.error(f"Connection error in /get_option_chain: {conn_err}", exc_info=True)
-         raise HTTPException(status_code=500, detail="DB connection error.")
     except Exception as e:
-        # Catch other unexpected errors
         logger.error(f"Unexpected error in /get_option_chain for {asset} {expiry}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error fetching option chain.")
-    finally:
-        logger.info("--- GET /get_option_chain Endpoint END ---")
-
 
     if not rows:
-         logger.warning(f"No option chain data found for asset '{asset}' and expiry '{expiry}'. Returning empty.")
-         return {"option_chain": {}} # Return empty structure, not 404
+         logger.warning(f"No option chain data found in DB for asset '{asset}' and expiry '{expiry}'. Returning empty.")
+         # Consider fetching live as fallback? Could be slow. For now, return empty.
+         # option_data_live = get_cached_option(asset) # This could fetch live data
+         # if option_data_live ... process it ...
+         return {"option_chain": {}} # Return empty structure
 
-    # Process rows (no changes needed here)
+    # Process rows from DB
     option_chain = defaultdict(lambda: {"call": None, "put": None})
     for row in rows:
-        strike = row["strike_price"]; opt_type = row.get("option_type")
+        strike = row.get("strike_price")
+        opt_type = row.get("option_type")
+        if strike is None or opt_type is None: continue # Skip malformed rows
+
+        # Ensure strike is float for consistency
+        try: strike = float(strike)
+        except (ValueError, TypeError): continue
+
         data_for_type = {
-            "last_price": row.get("last_price"), "open_interest": row.get("open_interest"),
-            "change_in_oi": row.get("change_in_oi"), "implied_volatility": row.get("implied_volatility"),
-            "volume": row.get("total_traded_volume"), "bid_price": row.get("bid_price"),
-            "bid_qty": row.get("bid_qty"), "ask_price": row.get("ask_price"), "ask_qty": row.get("ask_qty"),
+            "last_price": row.get("last_price"),
+            "open_interest": row.get("open_interest"),
+            "change_in_oi": row.get("change_in_oi"),
+            "implied_volatility": row.get("implied_volatility"),
+            "volume": row.get("total_traded_volume"),
+            "bid_price": row.get("bid_price"),
+            "bid_qty": row.get("bid_qty"),
+            "ask_price": row.get("ask_price"),
+            "ask_qty": row.get("ask_qty"),
         }
+        # Filter out None values within the type data if desired
+        # data_for_type = {k: v for k, v in data_for_type.items() if v is not None}
+
         if opt_type == "PE": option_chain[strike]["put"] = data_for_type
         elif opt_type == "CE": option_chain[strike]["call"] = data_for_type
 
     return {"option_chain": dict(option_chain)}
-    
+
 
 @app.get("/get_spot_price", response_model=SpotPriceResponse, tags=["Data"])
-async def get_spot_price(asset: str = Query(...)): # Make async
+async def get_spot_price(asset: str = Query(...)):
+    """Gets the latest spot price, prioritizing recent DB update, then cache, then live fetch."""
     logger.info(f"Received request for spot price: Asset={asset}")
-    try:
-        # get_cached_option is sync, no await needed here
-        option_cache_data = get_cached_option(asset)
-        if not option_cache_data or not isinstance(option_cache_data.get("records"), dict):
-            # Attempt fetch if cache miss/invalid and needed immediately
-            logger.warning(f"Spot price cache miss/invalid for {asset}, attempting live fetch.")
-            # This requires the NSELive client 'n' to be initialized
-            if n:
-                asset_upper = asset.upper()
-                live_data = None
-                if asset_upper in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]:
-                    live_data = n.index_quote(asset_upper)
-                else:
-                    live_data = n.stock_quote(asset_upper) # Check if this function exists/works as expected
+    spot = None
+    timestamp = None
+    source = "unknown"
 
-                if live_data and isinstance(live_data.get("underlyingValue"), (int, float)):
-                    spot = live_data["underlyingValue"]
-                    # Optionally update cache here if desired, though get_cached_option handles it
-                else:
-                     raise HTTPException(status_code=404, detail=f"Spot price could not be fetched live for {asset}")
-            else:
-                 raise HTTPException(status_code=503, detail=f"NSELive client not available to fetch spot price for {asset}")
-        else:
-            # Get from cache if valid
-            spot = option_cache_data["records"].get("underlyingValue")
-            if spot is None: raise HTTPException(status_code=404, detail=f"Spot price not available in cache for {asset}")
+    # 1. Try fetching recent price from DB (updated by background thread)
+    db_price_info = get_latest_spot_price_from_db(asset, max_age_minutes=2) # Check within last 2 mins
+    if db_price_info:
+        spot = db_price_info['spot_price']
+        timestamp = db_price_info['timestamp']
+        source = "database"
+        logger.info(f"Using spot price from DB for {asset}: {spot} (Timestamp: {timestamp})")
 
-        if not isinstance(spot, (int, float)): raise ValueError("Invalid spot price type")
-        return {"spot_price": round(float(spot), 2)}
+    # 2. If DB fails or too old, try the API's option chain cache
+    if spot is None:
+        logger.debug(f"Spot price not found/recent in DB for {asset}, checking cache...")
+        option_cache_data = get_cached_option(asset) # This uses its own cache/live fallback
+        if option_cache_data and isinstance(option_cache_data.get("records"), dict):
+            spot_cache = _safe_get_float(option_cache_data["records"], "underlyingValue")
+            if spot_cache is not None:
+                spot = spot_cache
+                # Timestamp from cache might be less accurate, use fetch time if possible
+                # For simplicity, we won't track exact cache timestamp here
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S") # Approximate time
+                source = "cache/live_fallback"
+                logger.info(f"Using spot price from API Cache/Live Fallback for {asset}: {spot}")
 
-    except HTTPException as e: raise e
-    except Exception as e:
-        logger.error(f"Error fetching spot price for {asset}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error fetching spot price for {asset}.")
+    # 3. Check if we got a valid price
+    if spot is None:
+        logger.error(f"Failed to retrieve spot price for {asset} from DB, Cache, or Live fetch.")
+        raise HTTPException(status_code=404, detail=f"Spot price could not be determined for {asset}.")
 
+    if not isinstance(spot, (int, float)) or spot <= 0:
+         logger.error(f"Retrieved invalid spot price type or value for {asset}: {spot}")
+         raise HTTPException(status_code=500, detail=f"Invalid spot price data retrieved for {asset}.")
 
-# --- In-Memory Strategy Endpoints (Keep as is - Development/Testing Only) ---
-@app.post("/add_strategy", tags=["Strategy (In-Memory - Dev Only)"], include_in_schema=False)
-async def add_strategy_in_memory(position: PositionInput): # Make async
-    global strategy_positions; pos_dict = position.dict()
-    logger.info(f"Adding in-memory position: {pos_dict}")
-    strategy_positions.append(pos_dict)
-    return {"status": "added", "position": pos_dict, "total_positions": len(strategy_positions)}
-
-@app.get("/get_strategies", tags=["Strategy (In-Memory - Dev Only)"], include_in_schema=False)
-async def get_strategies_in_memory(): # Make async
-    global strategy_positions
-    logger.info(f"Returning {len(strategy_positions)} in-memory positions")
-    return strategy_positions
+    logger.info(f"Returning spot price {spot} for {asset} (Source: {source})")
+    return {"spot_price": round(float(spot), 2), "timestamp": timestamp}
 
 
-# --- Debug Endpoint for Flawed Background Task ---
-# This endpoint expects a POST with JSON body: {"asset": "ASSET_NAME"}
+# --- In-Memory Strategy Endpoints (Keep commented out - Dev Only) ---
+# @app.post("/add_strategy", tags=["Strategy (In-Memory - Dev Only)"], include_in_schema=False)
+# async def add_strategy_in_memory(position: PositionInput): ...
+# @app.get("/get_strategies", tags=["Strategy (In-Memory - Dev Only)"], include_in_schema=False)
+# async def get_strategies_in_memory(): ...
+
+
+# --- Debug Endpoint for Background Task ---
 @app.post("/debug/set_selected_asset", tags=["Debug"], include_in_schema=False)
-async def set_selected_asset_endpoint(request: DebugAssetSelectRequest): # Expects Pydantic model correctly
+async def set_selected_asset_endpoint(request: DebugAssetSelectRequest, background_tasks: BackgroundTasks):
     global selected_asset
-    # Validate asset if necessary (e.g., check against DB assets)
     asset_name = request.asset.strip().upper()
-    logger.warning(f"Setting globally selected asset to: {asset_name} (via debug endpoint)")
+    if not asset_name:
+        raise HTTPException(status_code=400, detail="Asset name cannot be empty.")
+    logger.warning(f"DEBUG: Setting globally selected asset for background DB updates to: {asset_name}")
     selected_asset = asset_name
-    # Add background task to immediately trigger an update for this asset
-    # BackgroundTasks requires FastAPI BackgroundTasks parameter in the function signature
-    # background_tasks.add_task(fetch_and_update_single_asset_data, asset_name)
-    # Note: Adding BackgroundTasks might change how the endpoint is called or structured.
-    # For simplicity of the flawed design, we just set the global variable.
-    return {"message": f"Global selected asset set to {asset_name}. Background task targets this.",
-            "warning": "Global state approach NOT suitable for production."}
+    # Optionally trigger an immediate background update for this asset
+    # Note: This runs fetch_and_update_single_asset_data in the background,
+    # it doesn't wait for it to complete before returning the response.
+    background_tasks.add_task(fetch_and_update_single_asset_data, asset_name)
+    logger.warning(f"DEBUG: Added background task to immediately update DB for {asset_name}")
+    return {
+        "message": f"Global selected asset set to {asset_name}. Background task will target this asset for DB updates.",
+        "task_added": f"Background task added to update {asset_name}."
+    }
 
 
 # --- Main Analysis & Payoff Endpoint ---
 @app.post("/get_payoff_chart", tags=["Analysis & Payoff"])
 async def get_payoff_chart_endpoint(request: PayoffRequest):
+    """
+    Calculates strategy metrics, Greeks, taxes, and generates a payoff chart.
+    Handles data preparation and concurrent execution of calculations.
+    """
     endpoint_name = "get_payoff_chart_endpoint"
-    asset = request.asset; strategy = request.strategy
-    logger.info(f"[{endpoint_name}] Request: {asset}, {len(strategy)} legs")
-    if not asset or not strategy: raise HTTPException(400, "Missing asset or strategy")
+    asset = request.asset; strategy_input = request.strategy # Use different name from loop var
+    logger.info(f"[{endpoint_name}] Request received: Asset={asset}, Legs={len(strategy_input)}")
+    if not asset or not strategy_input:
+        raise HTTPException(status_code=400, detail="Missing asset or strategy legs")
 
-    # --- Step 1: Fetch Initial Data (Sequential - needed for others) ---
+    # --- Step 1: Fetch Initial Prerequisite Data (Spot Price, Lot Size) ---
     try:
-        # (Fetch spot price, lot size - same as before)
-        default_lot_size = get_lot_size(asset); cached_data = get_cached_option(asset); spot_price = None
-        if cached_data and "records" in cached_data: spot_price = _safe_get_float(cached_data.get("records", {}), "underlyingValue")
-        if spot_price is None:
-             try: spot_response = await get_spot_price(asset); spot_price = spot_response.spot_price
-             except Exception as e: raise HTTPException(503, f"Spot price missing: {e}") from e
-        if not default_lot_size or default_lot_size <= 0 : raise HTTPException(404, f"Lot size missing/invalid for {asset}")
-        if not spot_price or spot_price <= 0: raise HTTPException(503, f"Spot price missing/invalid for {asset}")
-    except HTTPException as e: raise e
-    except Exception as e: raise HTTPException(503, f"Server error fetching initial data: {e}") from e
+        start_prereq_time = time.monotonic()
+        # Get spot price (use the reliable /get_spot_price logic)
+        spot_response = await get_spot_price(asset) # Call the fixed endpoint
+        spot_price = spot_response.spot_price
+        logger.info(f"[{endpoint_name}] Prerequisite Spot Price: {spot_price}")
 
-    # --- Step 2: Prepare Strategy Data (Sequential - needed for others) ---
-    # (Prepare data, including iv, days_to_expiry - same as before)
+        default_lot_size = get_lot_size(asset)
+        if not default_lot_size or default_lot_size <= 0 :
+            raise ValueError(f"Lot size missing or invalid ({default_lot_size}) for {asset}")
+        logger.info(f"[{endpoint_name}] Prerequisite Lot Size: {default_lot_size}")
+        prereq_duration = time.monotonic() - start_prereq_time
+        logger.info(f"[{endpoint_name}] Prerequisites fetched in {prereq_duration:.3f}s")
+
+    except HTTPException as http_err:
+        logger.error(f"[{endpoint_name}] Failed prerequisite HTTP fetch for {asset}: {http_err.detail}")
+        raise http_err # Re-raise FastAPI exception
+    except ValueError as val_err:
+         logger.error(f"[{endpoint_name}] Failed prerequisite data validation for {asset}: {val_err}")
+         raise HTTPException(status_code=404, detail=str(val_err)) # 404 for missing essential data
+    except Exception as e:
+        logger.error(f"[{endpoint_name}] Unexpected server error fetching prerequisites for {asset}: {e}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Server error fetching initial data: {e}")
+
+    # --- Step 2: Prepare Strategy Data (Validate, Add IV, DTE) ---
     prepared_strategy_data = []
     today = date.today()
-    for i, leg_input in enumerate(request.strategy):
-        try: # Simplified validation
-            strike = float(leg_input.strike_price); premium = float(leg_input.option_price); lots_abs = int(leg_input.lots)
-            opt_type = leg_input.option_type.upper(); tr_type = leg_input.tr_type.lower()
-            if strike <= 0 or premium < 0 or lots_abs <= 0: raise ValueError("Invalid numeric")
-            expiry_dt = datetime.strptime(leg_input.expiry_date, "%Y-%m-%d").date(); days_to_expiry = (expiry_dt - today).days
-            if days_to_expiry < 0: raise ValueError("Expiry date past")
+    prep_errors = []
+    for i, leg_input in enumerate(strategy_input):
+        try:
+            strike = _safe_get_float(leg_input, 'strike_price')
+            premium = _safe_get_float(leg_input, 'option_price')
+            lots_abs = _safe_get_int(leg_input, 'lots')
+            opt_type_req = str(leg_input.option_type).upper() # CE/PE
+            tr_type_req = str(leg_input.tr_type).lower() # b/s
+            expiry_str = str(leg_input.expiry_date)
+
+            # Validate core types and values
+            if strike is None or strike <= 0: raise ValueError("Invalid strike price")
+            if premium is None or premium < 0: raise ValueError("Invalid option price") # Allow 0 premium
+            if lots_abs is None or lots_abs <= 0: raise ValueError("Invalid lots")
+            if opt_type_req not in ("CE", "PE"): raise ValueError("Invalid option type")
+            if tr_type_req not in ("b", "s"): raise ValueError("Invalid transaction type")
+
+            # Validate and calculate Date-to-Expiry (DTE)
+            try: expiry_dt = datetime.strptime(expiry_str, "%Y-%m-%d").date()
+            except ValueError: raise ValueError("Invalid expiry date format (use YYYY-MM-DD)")
+            days_to_expiry = (expiry_dt - today).days
+            # Allow DTE=0 for expiry day, but calculations might be sensitive
+            if days_to_expiry < 0: raise ValueError("Expiry date cannot be in the past")
+
+            # Determine Lot Size
             leg_lot_size = default_lot_size
             if leg_input.lot_size is not None:
-                try: temp_ls = int(leg_input.lot_size); leg_lot_size = temp_ls if temp_ls > 0 else default_lot_size
-                except: pass
-            iv = extract_iv(asset, strike, leg_input.expiry_date, opt_type)
-            if iv is None or iv <= 0: raise ValueError(f"Missing IV for {opt_type}@{strike}")
-            prepared_strategy_data.append({ "op_type": "c" if opt_type=="CE" else "p", "strike": strike, "tr_type": tr_type, "op_pr": premium, "lot": lots_abs, "lot_size": leg_lot_size, "iv": float(iv), "days_to_expiry": days_to_expiry, "expiry_date_str": leg_input.expiry_date,})
-        except (ValueError, KeyError, TypeError) as e: raise HTTPException(400, f"Invalid leg {i+1}: {e}") from e
-        except Exception as e: raise HTTPException(400, f"Error processing leg {i+1}: {e}") from e
-    if not prepared_strategy_data: raise HTTPException(400, "No valid strategy legs provided.")
+                temp_ls = _safe_get_int(leg_input, 'lot_size')
+                if temp_ls is not None and temp_ls > 0: leg_lot_size = temp_ls
+                else: logger.warning(f"Ignoring invalid leg-specific lot size ({leg_input.lot_size}) for leg {i+1}, using default {default_lot_size}")
+
+            # Extract Implied Volatility (IV) - Critical for Greeks
+            # Use the expiry format required by extract_iv (YYYY-MM-DD)
+            iv = extract_iv(asset, strike, expiry_str, opt_type_req)
+            if iv is None or iv <= 0:
+                # IV is essential for Greeks. If missing, we can still calc payoff/tax, but maybe warn/fail?
+                # For now, let's add a placeholder and log a clear warning. Greeks will likely fail for this leg.
+                logger.warning(f"[{endpoint_name}] Missing or invalid IV (<=0) for leg {i+1}: {asset} {expiry_str} {strike} {opt_type_req}. Greeks may be inaccurate.")
+                # Decide: Use default IV, skip leg for greeks, or fail? Let's use 0 for now, Greeks func should handle it.
+                iv = 0.0 # Placeholder - Greeks calc should ideally skip legs with IV<=0
+
+            # Append fully prepared data for calculations
+            prepared_strategy_data.append({
+                "op_type": "c" if opt_type_req == "CE" else "p", # Use 'c'/'p' internally
+                "strike": strike,
+                "tr_type": tr_type_req, # 'b' or 's'
+                "op_pr": premium,
+                "lot": lots_abs,
+                "lot_size": leg_lot_size,
+                "iv": float(iv), # Store extracted/placeholder IV
+                "days_to_expiry": days_to_expiry,
+                "expiry_date_str": expiry_str, # Keep original string if needed
+            })
+        except (ValueError, KeyError, TypeError) as e:
+            logger.error(f"[{endpoint_name}] Invalid data provided for leg {i+1}: {e}. Input: {leg_input.dict()}")
+            prep_errors.append(f"Leg {i+1}: {e}")
+        except Exception as e:
+             logger.error(f"[{endpoint_name}] Unexpected error processing leg {i+1}: {e}", exc_info=True)
+             prep_errors.append(f"Leg {i+1}: Unexpected error")
+
+    if prep_errors: # If any legs failed preparation
+        raise HTTPException(status_code=400, detail=f"Invalid strategy leg data: {'; '.join(prep_errors)}")
+    if not prepared_strategy_data: # If input was empty or all legs failed
+        raise HTTPException(status_code=400, detail="No valid strategy legs provided after preparation.")
 
 
     # --- Step 3: Perform Calculations Concurrently ---
-    logger.debug(f"[{endpoint_name}] Starting concurrent calculations...")
+    logger.info(f"[{endpoint_name}] Starting concurrent calculations for {len(prepared_strategy_data)} legs...")
     start_calc_time = time.monotonic()
     results = {} # Dictionary to store results
 
     try:
-        # Run potentially blocking/CPU-bound sync functions in threads
-        # Use asyncio.to_thread if available (Python 3.9+)
+        # --- Run Calculations ---
+        # Metrics calculation needs to run first as chart relies on its output
+        logger.debug(f"[{endpoint_name}] Calculating metrics...")
+        metrics_result = await asyncio.to_thread(calculate_strategy_metrics, prepared_strategy_data, asset)
+        if metrics_result is None:
+             logger.error(f"[{endpoint_name}] Metrics calculation failed. Cannot generate chart accurately.")
+             # Decide whether to fail completely or proceed without metrics/chart adjustments
+             raise ValueError("Strategy metrics calculation failed, cannot proceed.")
+        results["metrics"] = metrics_result
+        logger.debug(f"[{endpoint_name}] Metrics calculated.")
+
+        # Now run chart, tax, and greeks concurrently
+        logger.debug(f"[{endpoint_name}] Starting concurrent chart, tax, greeks...")
         tasks = {
-            "chart": asyncio.to_thread(generate_payoff_chart_matplotlib, prepared_strategy_data, asset),
-            "metrics": asyncio.to_thread(calculate_strategy_metrics, prepared_strategy_data, asset),
+            # Pass metrics result to chart function
+            "chart": asyncio.to_thread(generate_payoff_chart_matplotlib, prepared_strategy_data, asset, metrics_result),
             "tax": asyncio.to_thread(calculate_option_taxes, prepared_strategy_data, asset),
             "greeks": asyncio.to_thread(calculate_option_greeks, prepared_strategy_data, asset)
         }
-        # If asyncio.to_thread is not available (Python < 3.9) use loop.run_in_executor:
-        # loop = asyncio.get_running_loop()
-        # executor = ThreadPoolExecutor() # Or reuse one if created elsewhere
-        # tasks = {
-        #     "chart": loop.run_in_executor(executor, generate_payoff_chart_matplotlib, prepared_strategy_data, asset),
-        #     "metrics": loop.run_in_executor(executor, calculate_strategy_metrics, prepared_strategy_data, asset),
-        #     "tax": loop.run_in_executor(executor, calculate_option_taxes, prepared_strategy_data, asset),
-        #     "greeks": loop.run_in_executor(executor, calculate_option_greeks, prepared_strategy_data, asset)
-        # }
 
+        # Await remaining tasks
+        # Use return_exceptions=True to get results even if one task fails (e.g., tax fails but chart/greeks succeed)
+        task_values = await asyncio.gather(*tasks.values(), return_exceptions=True)
 
-        # Await all tasks concurrently, allow exceptions to propagate
-        # Use return_exceptions=True if you want partial results even if one task fails
-        task_results = await asyncio.gather(*tasks.values(), return_exceptions=False)
+        # Assign results, checking for exceptions
+        results["chart"] = task_values[0] if not isinstance(task_values[0], Exception) else None
+        results["tax"] = task_values[1] if not isinstance(task_values[1], Exception) else None
+        results["greeks"] = task_values[2] if not isinstance(task_values[2], Exception) else [] # Default to empty list on error
 
-        # Assign results back to variables
-        results["chart"], results["metrics"], results["tax"], results["greeks"] = task_results
+        # Log any exceptions that occurred during gather
+        for i, name in enumerate(tasks.keys()):
+            if isinstance(task_values[i], Exception):
+                 logger.error(f"[{endpoint_name}] Error during concurrent calculation of '{name}': {task_values[i]}", exc_info=task_values[i])
 
-        # Check for critical failures (chart must succeed)
+        # Check for critical failures (chart generation)
         if results["chart"] is None:
-             logger.error(f"[{endpoint_name}] Chart generation failed within concurrent execution.")
-             raise ValueError("Payoff chart generation failed.")
-        if results["metrics"] is None:
-             logger.warning(f"[{endpoint_name}] Metrics calculation failed concurrently.")
-        if results["tax"] is None:
-             logger.warning(f"[{endpoint_name}] Tax calculation failed concurrently.")
-        if not results["greeks"]: # Check if empty list was returned
-             logger.warning(f"[{endpoint_name}] Greeks calculation returned empty list concurrently.")
+             logger.error(f"[{endpoint_name}] Payoff chart generation failed.")
+             # Allow response without chart, but include error? Or raise 500?
+             # Let's allow partial success for now, frontend can handle missing chart.
+             # raise ValueError("Payoff chart generation failed.") # Option to fail hard
+
+        # Log warnings for non-critical failures
+        if results["tax"] is None: logger.warning(f"[{endpoint_name}] Tax calculation failed or returned None.")
+        if not results["greeks"]: logger.warning(f"[{endpoint_name}] Greeks calculation failed or returned empty list.")
 
 
-    except Exception as e: # Catch errors from gather or the tasks themselves
-        logger.error(f"[{endpoint_name}] Error during concurrent calculation phase for {asset}: {e}", exc_info=True)
-        # Provide a more specific error if possible
-        error_detail = f"Calculation Error: {e}" if isinstance(e, ValueError) else f"Unexpected Server Error during calculation."
-        raise HTTPException(status_code=500, detail=error_detail)
+    except ValueError as calc_val_err: # Catch specific value errors like metrics failing
+         logger.error(f"[{endpoint_name}] Calculation prerequisite failed for {asset}: {calc_val_err}")
+         raise HTTPException(status_code=500, detail=f"Calculation Error: {calc_val_err}")
+    except Exception as e: # Catch errors from gather or other unexpected issues
+        logger.error(f"[{endpoint_name}] Error during calculation phase for {asset}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Unexpected Server Error during calculation.")
 
     calc_duration = time.monotonic() - start_calc_time
-    logger.info(f"[{endpoint_name}] Concurrent calculations finished in {calc_duration:.3f}s")
+    logger.info(f"[{endpoint_name}] Calculations finished in {calc_duration:.3f}s")
 
     # --- Step 4: Return Results ---
-    logger.info(f"[{endpoint_name}] Successfully processed payoff request for asset: {asset}")
+    success_status = results["chart"] is not None # Define success based on chart generation
+    logger.info(f"[{endpoint_name}] Successfully processed payoff request for asset: {asset}. Status: {'Success' if success_status else 'Partial Success (Chart Failed)'}")
     return {
-        "image_base64": results["chart"],
-        "success": True,
-        "metrics": results["metrics"], # Might be None
-        "charges": results["tax"],     # Might be None
-        "greeks": results["greeks"] or [] # Ensure it's a list
+        "image_base64": results["chart"], # Will be None if failed
+        "success": success_status,
+        "metrics": results.get("metrics"), # Metrics should exist if we got here
+        "charges": results.get("tax"),     # Might be None if tax failed
+        "greeks": results.get("greeks", []) # Greeks list, empty if failed
     }
 
 
-# --- LLM Stock Analysis Endpoint ---
+# --- LLM Stock Analysis Endpoint (FIXED 404/Data Handling) ---
 @app.post("/get_stock_analysis", tags=["Analysis & Payoff"])
 async def get_stock_analysis_endpoint(request: StockRequest):
-    asset = request.asset.upper()
+    """
+    Fetches stock data and news, generates an LLM analysis.
+    Handles missing data more gracefully and provides 404 only if essential data is unavailable.
+    """
+    asset = request.asset.strip().upper()
+    if not asset: raise HTTPException(status_code=400, detail="Asset name required.")
+
     analysis_cache_key = f"analysis_{asset}"
     cached_analysis = analysis_cache.get(analysis_cache_key)
     if cached_analysis:
         logger.info(f"Cache hit analysis: {asset}")
         return {"analysis": cached_analysis}
 
-    stock_symbol = "^NSEI" if asset == "NIFTY" else f"{asset}.NS"
-    stock_data = None # Initialize
-    latest_news = [] # Initialize
+    # Map asset to Yahoo symbol (handle common indices explicitly)
+    if asset == "NIFTY": stock_symbol = "^NSEI"
+    elif asset == "BANKNIFTY": stock_symbol = "^NSEBANK"
+    elif asset == "FINNIFTY": stock_symbol = "NIFTY_FIN_SERVICE.NS" # Verify this ticker
+    # Add other index mappings if needed
+    else: stock_symbol = f"{asset}.NS" # Assume equity
+
+    stock_data = None
+    latest_news = []
+
+    logger.info(f"Analysis request for {asset}, using symbol {stock_symbol}")
 
     try:
         # Fetch data concurrently
-        results = await asyncio.gather(
-            fetch_stock_data_async(stock_symbol),
-            fetch_latest_news_async(asset),
-            return_exceptions=True # Return exceptions instead of raising immediately
-        )
+        logger.debug(f"Fetching stock data and news concurrently for {asset} ({stock_symbol})")
+        tasks = {
+            "stock_data": fetch_stock_data_async(stock_symbol),
+            "news": fetch_latest_news_async(asset) # Use original asset name for news
+        }
+        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
 
-        # Check results from gather
-        if isinstance(results[0], Exception):
-            logger.error(f"fetch_stock_data_async failed for {stock_symbol}: {results[0]}", exc_info=results[0])
-            # Raise 404 specifically if stock data fetch failed
-            raise HTTPException(status_code=404, detail=f"Could not retrieve stock data for {stock_symbol}. It might be delisted or unavailable.")
+        # --- Process Stock Data Result ---
+        stock_data_result = results[0]
+        if isinstance(stock_data_result, Exception):
+            logger.error(f"Stock data fetch failed for {asset} ({stock_symbol}): {stock_data_result}", exc_info=stock_data_result)
+            # If stock data fetch itself errors out, raise 503 (Service Unavailable)
+            raise HTTPException(status_code=503, detail=f"Error retrieving stock data for {stock_symbol}: {type(stock_data_result).__name__}")
+        elif stock_data_result is None:
+            # fetch_stock_data_async returns None only if it couldn't even get a price.
+            logger.error(f"Essential stock data (e.g., price) not found for {asset} ({stock_symbol}) after fetch attempt.")
+            # This is the appropriate case for 404 Not Found.
+            raise HTTPException(status_code=404, detail=f"Essential stock data not found for: {stock_symbol}. Symbol might be invalid or delisted.")
         else:
-            stock_data = results[0] # Assign if successful
+            stock_data = stock_data_result # Assign successful data fetch
+            logger.info(f"Successfully fetched stock data for {asset} ({stock_symbol}).")
 
-        # Check stock_data again (belt and suspenders)
-        if not stock_data:
-             logger.error(f"Stock data is None/empty for {stock_symbol} after fetch attempt.")
-             raise HTTPException(status_code=404, detail=f"Stock data not found or incomplete for: {stock_symbol}")
-
-
-        if isinstance(results[1], Exception):
-             logger.warning(f"fetch_latest_news_async failed for {asset}: {results[1]}. Proceeding without news.")
-             latest_news = [{"headline": "Error fetching news.", "summary": "", "link": "#"}] # Placeholder news
+        # --- Process News Result ---
+        news_result = results[1]
+        if isinstance(news_result, Exception):
+             logger.warning(f"News fetch failed for {asset}: {news_result}. Proceeding without news.")
+             latest_news = [{"headline": "Error fetching news.", "summary": str(news_result), "link": "#"}]
+        elif not news_result: # Empty list returned (should have placeholder if failed)
+             logger.warning(f"News fetch returned empty list for {asset}. Using placeholder.")
+             latest_news = [{"headline": f"No recent news found for {asset}.", "summary": "", "link": "#"}]
         else:
-             latest_news = results[1]
+             latest_news = news_result
+             logger.info(f"Successfully fetched news for {asset}.")
 
     except HTTPException as http_err:
-         raise http_err # Re-raise our specific HTTP exceptions
+         # Re-raise the specific 404 or 503 from stock data check
+         raise http_err
     except Exception as e:
-        # Catch other errors during data fetching orchestration
-        logger.error(f"Error during concurrent data fetch for analysis ({asset}): {e}", exc_info=True)
+        # Catch other unexpected errors during data fetching orchestration
+        logger.error(f"Unexpected error during concurrent data fetch for analysis ({asset}): {e}", exc_info=True)
         raise HTTPException(status_code=503, detail=f"Server error during data fetching for analysis.")
 
-    # --- Proceed only if stock_data is valid ---
-    prompt = build_stock_analysis_prompt(asset, stock_data, latest_news)
+    # --- Generate Analysis using LLM ---
+    # Proceed only if stock_data is valid (checked above)
+    logger.debug(f"Building analysis prompt for {asset}...")
+    prompt = build_stock_analysis_prompt(asset, stock_data, latest_news) # Pass asset name and symbol
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash-latest")
+        # Ensure Gemini API was configured
+        if not GEMINI_API_KEY:
+             raise RuntimeError("Gemini API Key not configured.")
+
+        model = genai.GenerativeModel("gemini-1.5-flash-latest") # Or your preferred model
         logger.info(f"Generating Gemini analysis for {asset}...")
+        start_llm = time.monotonic()
+        # Use generate_content_async for non-blocking call
         response = await model.generate_content_async(prompt)
+        llm_duration = time.monotonic() - start_llm
+        logger.info(f"Gemini response received for {asset} in {llm_duration:.3f}s.")
 
-        if not response.text:
+        # Enhanced error checking for Gemini response
+        analysis_text = None
+        try:
+            analysis_text = response.text # Access text safely
+        except ValueError as resp_err:
+            # This can happen if the response is blocked due to safety settings etc.
+             logger.error(f"Gemini response error for {asset}: {resp_err}. Potentially blocked content.")
+             logger.error(f"Gemini Prompt Feedback: {response.prompt_feedback}")
+             raise ValueError(f"Analysis generation failed (response error/blocked). Feedback: {response.prompt_feedback}")
+
+        if not analysis_text:
              logger.error(f"Gemini response missing text for {asset}. Parts: {response.parts}, Feedback: {response.prompt_feedback}")
-             raise ValueError(f"Analysis generation failed (empty/blocked response). Feedback: {response.prompt_feedback}")
+             raise ValueError(f"Analysis generation failed (empty response). Feedback: {response.prompt_feedback}")
 
-        analysis_text = response.text;
-        analysis_cache[analysis_cache_key] = analysis_text
-        logger.info(f"Successfully generated analysis for {asset}")
+        analysis_cache[analysis_cache_key] = analysis_text # Cache successful analysis
+        logger.info(f"Successfully generated and cached analysis for {asset}")
         return {"analysis": analysis_text}
 
+    except (RuntimeError, ValueError) as gen_err: # Catch specific generation errors
+        logger.error(f"Analysis generation error for {asset}: {gen_err}")
+        raise HTTPException(status_code=503, detail=f"Analysis Generation Error: {gen_err}")
     except Exception as e:
-        logger.error(f"Gemini API or processing error for {asset}: {e}", exc_info=True)
-        raise HTTPException(status_code=503, detail=f"Analysis generation failed: {e}")
+        logger.error(f"Gemini API call or processing error for {asset}: {e}", exc_info=True)
+        # Check for specific API errors if the library provides them
+        # Example: if isinstance(e, google.api_core.exceptions.GoogleAPIError): ...
+        raise HTTPException(status_code=503, detail=f"Analysis generation failed due to API or processing error: {type(e).__name__}")
 
 
 # ===============================================================
 # Main Execution Block (Keep as is)
 # ===============================================================
 if __name__ == "__main__":
-    host = os.getenv("HOST", "localhost")
-    port = int(os.getenv("PORT", 8000))
-    reload = os.getenv("RELOAD", "false").lower() == "true" # Enable reload via env var if needed
+    host = os.getenv("HOST", "0.0.0.0") # Bind to 0.0.0.0 for external access (like Render)
+    port = int(os.getenv("PORT", 8000)) # Render typically sets PORT env var
+    reload = os.getenv("RELOAD", "false").lower() == "true"
 
-    logger.info(f"Starting Uvicorn server on http://{host}:{port} (Reload: {reload})")
+    # Set log level based on environment?
+    log_level = "debug" if reload else "info"
+
+    logger.info(f"Starting Uvicorn server on http://{host}:{port} (Reload: {reload}, LogLevel: {log_level})")
     uvicorn.run(
-        "app:app",
+        "app:app", # Point to the FastAPI app instance
         host=host,
         port=port,
-        reload=reload,
-        log_level="info"
+        reload=reload, # Enable auto-reload for local development if needed
+        log_level=log_level
+        # Consider adding reload_dirs=["."] if reload=True and you have other modules
     )
-
-
-
-
-
-
-
-
