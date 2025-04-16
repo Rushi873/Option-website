@@ -453,12 +453,13 @@ async function handleAssetChange() {
     setElementState(SELECTORS.expiryDropdown, 'loading');
     setElementState(SELECTORS.optionChainTableBody, 'loading');
     setElementState(SELECTORS.analysisResultContainer, 'loading');
+    // Ensure news container state is also set to loading
+    setElementState(SELECTORS.newsResultContainer, 'loading');
     setElementState(SELECTORS.spotPriceDisplay, 'loading', 'Spot Price: ...');
     resetResultsUI(); // Clear previous results on asset change
     setElementState(SELECTORS.globalErrorDisplay, 'hidden'); // Clear global error on new asset load
 
-    // --- Call Debug Endpoint (Optional but present in original logic) ---
-    // This tells the backend's background task which asset to focus on.
+    // --- Call Debug Endpoint ---
     try {
         await fetchAPI('/debug/set_selected_asset', {
              method: 'POST', body: JSON.stringify({ asset: asset })
@@ -466,7 +467,6 @@ async function handleAssetChange() {
         logger.warn(`Sent debug request to set backend selected_asset to ${asset}`);
     } catch (debugErr) {
         logger.error("Failed to send debug asset selection:", debugErr.message);
-        // Display temporary global error, doesn't block UI
         setElementState(SELECTORS.globalErrorDisplay, 'error', `Debug Sync Failed: ${debugErr.message}`);
         setTimeout(() => setElementState(SELECTORS.globalErrorDisplay, 'hidden'), 5000);
     }
@@ -486,7 +486,7 @@ async function handleAssetChange() {
         // Process results
         if (spotResult.status === 'rejected') {
             logger.error(`Error fetching spot price: ${spotResult.reason?.message || spotResult.reason}`);
-            // Spot price failure is problematic but maybe allow continuing
+            // Let fetchNiftyPrice handle its own error display
         }
         if (expiryResult.status === 'rejected') {
             logger.error(`Error fetching expiries: ${expiryResult.reason?.message || expiryResult.reason}`);
@@ -496,18 +496,18 @@ async function handleAssetChange() {
         }
         if (analysisResult.status === 'rejected') {
             logger.error(`Error fetching analysis: ${analysisResult.reason?.message || analysisResult.reason}`);
-            // Analysis failure is less critical, set error state for its container
-             setElementState(SELECTORS.analysisResultContainer, 'error', `Analysis Error: ${analysisResult.reason.message}`);
+            // Error display is handled within fetchAnalysis
         }
-        
         if (newsResult.status === 'rejected') {
             logger.error(`Error fetching news: ${newsResult.reason?.message || newsResult.reason}`);
+            // Error display is handled within fetchNews
+        } // ***** Closing brace was missing here - ADDED *****
 
         // If initial load was okay (no critical errors), start auto-refresh
         if (!hasCriticalError) {
             startAutoRefresh();
         } else {
-             setElementState(SELECTORS.globalErrorDisplay, 'error', `Failed to load essential data for ${asset}. Check console.`);
+             setElementState(SELECTORS.globalErrorDisplay, 'error', `Failed to load essential data (expiries) for ${asset}. Check console.`);
         }
 
     } catch (err) {
