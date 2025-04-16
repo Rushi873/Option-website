@@ -1824,13 +1824,22 @@ async def get_option_chain(asset: str = Query(...), expiry: str = Query(...)):
     API endpoint to fetch option chain data for a given asset and expiry
     from the database. Uses synchronous DB access with safe type conversion.
     """
-    logger.info(f"Request received for option chain: Asset={asset}, Expiry={expiry}")
+    endpoint_name = "/get_option_chain" # For logging context
+    logger.info(f"[{endpoint_name}] Request received: Asset={asset}, Expiry={expiry}")
+
+    # --- Validate Input ---
     try:
-        datetime.strptime(expiry, '%Y-%m-%d') # Validate format
+        # Validate expiry date format
+        datetime.strptime(expiry, '%Y-%m-%d')
     except ValueError:
+        logger.warning(f"[{endpoint_name}] Invalid expiry date format received: {expiry}")
         raise HTTPException(status_code=400, detail="Invalid expiry date format. Use YYYY-MM-DD.")
 
-    # SQL query remains the same
+    if not asset:
+        logger.warning(f"[{endpoint_name}] Missing asset name in request.")
+        raise HTTPException(status_code=400, detail="Asset name is required.")
+
+    # --- Database Interaction ---
     sql = """
         SELECT
             oc.strike_price, oc.option_type, oc.open_interest, oc.change_in_oi,
@@ -1844,80 +1853,120 @@ async def get_option_chain(asset: str = Query(...), expiry: str = Query(...)):
         """
     params = { "asset_name": asset, "expiry_date": expiry }
     rows = []
+    conn = None # Initialize connection variable
+
     try:
-        # --- Use SYNCHRONOUS DB Connection ---
-        logger.debug(f"/get_option_chain: Attempting DB connection for {asset}/{expiry}.")
-        with get_db_connection() as conn: # Use the synchronous context manager
-            if conn is None: raise ConnectionError("Failed to get DB connection for option chain.") # Check connection
-            logger.debug(f"/get_option_chain: Got DB connection. Current DB: '{getattr(conn, 'database', 'N/A')}'")
+        # Use SYNCHRONOUS DB Connection (ensure get_db_connection handles context)
+        logger.debug(f"[{endpoint_name}] Attempting DB connection for {asset}/{expiry}.")
+        with get_db_connection() as conn: # Uses the synchronous context manager from database.py
+            if conn is None:
+                # Log specific error if connection pool fails
+                logger.error(f"[{endpoint_name}] Failed to get DB connection from pool.")
+                raise ConnectionError("Failed to get DB connection for option chain.") # Raise specific error
+
+            logger.debug(f"[{endpoint_name}] Got DB connection. Current DB: '{getattr(conn, 'database', 'N/A')}'")
             with conn.cursor(dictionary=True) as cursor:
-                logger.debug(f"/get_option_chain: Executing SQL with params: {params}")
+                logger.debug(f"[{endpoint_name}] Executing SQL with params: {params}")
                 cursor.execute(sql, params) # SYNC execute
                 rows = cursor.fetchall() # SYNC fetchall
-                logger.info(f"/get_option_chain: Fetched {len(rows)} rows from DB for {asset}/{expiry}.")
+                logger.info(f"[{endpoint_name}] Fetched {len(rows)} rows from DB for {asset}/{expiry}.")
                 if len(rows) > 0:
-                    logger.debug(f"/get_option_chain: First row example: {rows[0]}") # Log first row
-                # No await needed here
+                    # Log only a few keys from the first row to keep logs concise
+                    sample_row_keys = list(rows[0].keys())[:5] # Get first 5 keys
+                    sample_row_preview = {k: rows[0].get(k) for k in sample_row_keys}
+                    logger.debug(f"[{endpoint_name}] First row example preview: {sample_row_preview}")
+                # No await needed for synchronous operations
 
-    except (mysql.connector.Error, ConnectionError) as db_err:
-        logger.error(f"Database error in /get_option_chain for {asset}/{expiry}: {db_err}", exc_info=True)
+    except (mysql.connector.Error, ConnectionError) as db_err: # Catch specific DB/Connection errors
+        logger.error(f"[{endpoint_name}] Database/Connection error for {asset}/{expiry}: {db_err}", exc_info=True)
         raise HTTPException(status_code=500, detail="Database error fetching option chain.")
-    except Exception as e:
-        logger.error(f"Unexpected error in /get_option_chain for {asset}/{expiry}: {e}", exc_info=True)
+    except Exception as e: # Catch any other unexpected errors
+        logger.error(f"[{endpoint_name}] Unexpected error fetching DB data for {asset}/{expiry}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error fetching option chain.")
+    # `with get_db_connection()` ensures connection is released/closed
 
-    # --- Process rows using Safe Getters ---
+    # --- Process Rows & Build Response ---
     if not rows:
-         logger.warning(f"No option chain data found in DB for asset '{asset}' and expiry '{expiry}'. Returning empty.")
-         return {"option_chain": {}} # Return empty structure
+         logger.warning(f"[{endpoint_name}] No option chain data found in DB for asset '{asset}' and expiry '{expiry}'. Returning empty structure.")
+         # Return the expected structure but with an empty inner object
+         return {"option_chain": {}}
 
+    # Use defaultdict for easier handling of call/put assignment
     option_chain = defaultdict(lambda: {"call": None, "put": None})
     processed_row_count = 0
+    skipped_row_count = 0
+
     for row in rows:
+        # Basic validation of the row structure
         if not isinstance(row, dict):
-             logger.warning(f"Skipping non-dictionary row: {row}")
+             logger.warning(f"[{endpoint_name}] Skipping processing non-dictionary row: {row}")
+             skipped_row_count += 1
              continue
 
         strike_raw = row.get("strike_price")
         opt_type = row.get("option_type")
 
+        # Validate and convert strike price
         safe_strike = None
         if strike_raw is not None:
-            try: safe_strike = float(strike_raw)
-            except (ValueError, TypeError): pass # Handled below
+            try:
+                safe_strike = float(strike_raw)
+            except (ValueError, TypeError):
+                # Log invalid strike and skip row
+                logger.warning(f"[{endpoint_name}] Skipping row with invalid strike price format: {strike_raw}")
+                skipped_row_count += 1
+                continue
 
+        # Validate essential fields
         if safe_strike is None or opt_type not in ("CE", "PE"):
-            logger.warning(f"Skipping row with missing/invalid strike or option type. Strike: {strike_raw}, Type: {opt_type}")
+            logger.warning(f"[{endpoint_name}] Skipping row with missing/invalid strike or option type. Strike Raw: {strike_raw}, Type: {opt_type}")
+            skipped_row_count += 1
             continue
 
-        # Use the safe helper functions for type conversion and NULL handling
+        # Use the safe helper functions for reliable type conversion and NULL handling
+        # These helpers should return None if conversion fails or DB value is NULL
         data_for_type = {
             "last_price": _safe_get_float(row, "last_price"),
             "open_interest": _safe_get_int(row, "open_interest"),
             "change_in_oi": _safe_get_int(row, "change_in_oi"),
             "implied_volatility": _safe_get_float(row, "implied_volatility"),
-            "volume": _safe_get_int(row, "total_traded_volume"), # Mapped from total_traded_volume
+            "volume": _safe_get_int(row, "total_traded_volume"), # Mapped from DB column name
             "bid_price": _safe_get_float(row, "bid_price"),
             "bid_qty": _safe_get_int(row, "bid_qty"),
             "ask_price": _safe_get_float(row, "ask_price"),
             "ask_qty": _safe_get_int(row, "ask_qty"),
         }
+        # Optional: Remove keys with None values if frontend prefers cleaner objects
+        # data_for_type = {k: v for k, v in data_for_type.items() if v is not None}
 
-        # Assign the processed data
-        if opt_type == "PE": option_chain[safe_strike]["put"] = data_for_type
-        elif opt_type == "CE": option_chain[safe_strike]["call"] = data_for_type
-        processed_row_count += 1
+        # Assign the processed data to the correct structure
+        if opt_type == "PE":
+            option_chain[safe_strike]["put"] = data_for_type
+        elif opt_type == "CE":
+            option_chain[safe_strike]["call"] = data_for_type
 
-    logger.info(f"/get_option_chain: Successfully processed {processed_row_count}/{len(rows)} fetched rows into chain structure.")
+        processed_row_count += 1 # Count successfully processed DB rows
 
-    # Add logging just before returning
-    if processed_row_count > 0:
-        log_sample_strikes = list(option_chain.keys())[:3]
-        logger.debug(f"/get_option_chain: Returning processed option_chain with {len(option_chain)} strikes. Sample strikes: {log_sample_strikes}. Example data for first sample strike ({log_sample_strikes[0]}): {option_chain.get(log_sample_strikes[0])}")
+    logger.info(f"[{endpoint_name}] Successfully processed {processed_row_count}/{len(rows)} fetched rows into chain structure (skipped: {skipped_row_count}).")
+
+    # --- Final Logging and Return ---
+    final_chain_dict = dict(option_chain) # Convert defaultdict to regular dict for JSON response
+
+    if not final_chain_dict and len(rows) > 0:
+         # This case means rows were fetched but ALL failed processing
+         logger.warning(f"[{endpoint_name}] Processed {len(rows)} rows but resulted in empty option_chain dict for {asset}/{expiry}.")
+         # Still return the empty structure
+         return {"option_chain": {}}
+    elif not final_chain_dict:
+        # This case means no rows were fetched initially
+         logger.debug(f"[{endpoint_name}] Returning empty option_chain dictionary (no rows fetched).")
+         return {"option_chain": {}}
     else:
-        logger.debug("/get_option_chain: Returning empty option_chain dictionary.")
-
-    return {"option_chain": dict(option_chain)}
+        # Log a sample before returning valid data
+        log_sample_strikes = list(final_chain_dict.keys())[:2] # Log first 2 strikes
+        sample_data_log = {k: final_chain_dict.get(k) for k in log_sample_strikes}
+        logger.debug(f"[{endpoint_name}] Returning processed option_chain with {len(final_chain_dict)} strikes. Sample data: {sample_data_log}")
+        return {"option_chain": final_chain_dict}
 
 
 @app.get("/get_spot_price", response_model=SpotPriceResponse, tags=["Data"])
@@ -2183,7 +2232,7 @@ async def get_payoff_chart_endpoint(request: PayoffRequest):
 @app.post("/get_stock_analysis", tags=["Analysis & Payoff"])
 async def get_stock_analysis_endpoint(request: StockRequest):
     """
-    Fetches stock data and news, generates an LLM analysis.
+    Fetches stock data and news, generates an LLM analysis.C
     Handles missing data more gracefully and provides 404 only if essential data is unavailable.
     """
     asset = request.asset.strip().upper()
