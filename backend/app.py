@@ -1793,44 +1793,50 @@ async def get_option_chain(asset: str = Query(...), expiry: str = Query(...)):
 
 @app.get("/get_spot_price", response_model=SpotPriceResponse, tags=["Data"])
 async def get_spot_price(asset: str = Query(...)):
-    """Gets the latest spot price, prioritizing recent DB update, then cache, then live fetch."""
-    logger.info(f"Received request for spot price: Asset={asset}")
+    """
+    Gets the spot price ONLY from the cached/live option chain data.
+    (Database check removed).
+    """
+    logger.info(f"Received request for spot price (Cache/Live Only): Asset={asset}")
     spot = None
     timestamp = None
-    source = "unknown"
+    source = "cache/live_fallback" # Source will always be this now
 
-    # 1. Try fetching recent price from DB (updated by background thread)
-    db_price_info = get_latest_spot_price_from_db(asset, max_age_minutes=2) # Check within last 2 mins
-    if db_price_info:
-        spot = db_price_info['spot_price']
-        timestamp = db_price_info['timestamp']
-        source = "database"
-        logger.info(f"Using spot price from DB for {asset}: {spot} (Timestamp: {timestamp})")
+    # 1. Fetch data using the cache/live function
+    logger.debug(f"Fetching spot price via get_cached_option for {asset}...")
+    option_cache_data = get_cached_option(asset) # This uses its own cache/live fallback logic
 
-    # 2. If DB fails or too old, try the API's option chain cache
-    if spot is None:
-        logger.debug(f"Spot price not found/recent in DB for {asset}, checking cache...")
-        option_cache_data = get_cached_option(asset) # This uses its own cache/live fallback
-        if option_cache_data and isinstance(option_cache_data.get("records"), dict):
-            spot_cache = _safe_get_float(option_cache_data["records"], "underlyingValue")
-            if spot_cache is not None:
-                spot = spot_cache
-                # Timestamp from cache might be less accurate, use fetch time if possible
-                # For simplicity, we won't track exact cache timestamp here
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S") # Approximate time
-                source = "cache/live_fallback"
-                logger.info(f"Using spot price from API Cache/Live Fallback for {asset}: {spot}")
+    # 2. Extract spot price from the returned data
+    if option_cache_data and isinstance(option_cache_data.get("records"), dict):
+        # Use the safe helper to extract and convert the value
+        spot = _safe_get_float(option_cache_data["records"], "underlyingValue")
+        if spot is not None:
+            # Use current time as timestamp since we don't have DB timestamp anymore
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S") # Approximate time
+            logger.info(f"Using spot price from Cache/Live Fallback for {asset}: {spot}")
+        else:
+            logger.warning(f"UnderlyingValue not found or invalid within cached data records for {asset}.")
+            source = "cache/live_fallback (value missing)"
+    else:
+        logger.warning(f"Failed to get valid option chain data from get_cached_option for {asset}.")
+        source = "cache/live_fallback (fetch failed)"
+
 
     # 3. Check if we got a valid price
     if spot is None:
-        logger.error(f"Failed to retrieve spot price for {asset} from DB, Cache, or Live fetch.")
-        raise HTTPException(status_code=404, detail=f"Spot price could not be determined for {asset}.")
+        logger.error(f"Failed to retrieve spot price for {asset} from Cache/Live fetch.")
+        # Keep returning 404 if the primary method fails
+        raise HTTPException(status_code=404, detail=f"Spot price could not be determined for {asset} via cache/live.")
 
+    # 4. Final validation of the retrieved price
     if not isinstance(spot, (int, float)) or spot <= 0:
-         logger.error(f"Retrieved invalid spot price type or value for {asset}: {spot}")
+         logger.error(f"Retrieved invalid spot price type or value for {asset}: {spot} (Type: {type(spot)})")
+         # Raise 500 for invalid data format from the source
          raise HTTPException(status_code=500, detail=f"Invalid spot price data retrieved for {asset}.")
 
+    # 5. Return the result
     logger.info(f"Returning spot price {spot} for {asset} (Source: {source})")
+    # Round the float before returning
     return {"spot_price": round(float(spot), 2), "timestamp": timestamp}
 
 
