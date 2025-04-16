@@ -430,7 +430,8 @@ app = FastAPI(
 # Make sure your Render deployment allows these origins
 ALLOWED_ORIGINS = [
     "http://localhost", "http://localhost:3000", "http://127.0.0.1:8000",
-    "https://option-strategy-website.onrender.com", # Ensure this matches your frontend URL exactly
+    "https://option-strategy-vaqz.onrender.com",
+    "https://option-strategy-website.onrender.com"
     # Add any other specific origins if needed
 ]
 logger.info(f"Configuring CORS for origins: {ALLOWED_ORIGINS}")
