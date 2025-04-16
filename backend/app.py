@@ -225,6 +225,7 @@ def fetch_and_update_single_asset_data(asset_name: str):
     """
     (Used by background thread)
     Fetches LIVE data directly from NSELive and updates the DATABASE for ONE asset.
+    Optimized for faster upserts and handles integer strike price conversion.
     DEPENDS ON: assets table having last_spot_price, last_spot_update_time columns.
     REMAINS SYNCHRONOUS for background thread compatibility.
     """
@@ -232,7 +233,7 @@ def fetch_and_update_single_asset_data(asset_name: str):
     func_name = "fetch_and_update_single_asset_data"
     logger.info(f"[{func_name}] Starting live fetch & DB update for: {asset_name}")
     start_time = datetime.now()
-    conn_obj = None # Initialize conn_obj for finally block
+    conn_obj = None # Initialize conn_obj for rollback handling
     option_source_data = None
 
     # --- Step 1: Directly Fetch Live Data ---
@@ -243,98 +244,117 @@ def fetch_and_update_single_asset_data(asset_name: str):
         asset_upper = asset_name.upper()
         logger.debug(f"[{func_name}] Calling NSELive directly for {asset_upper}...")
 
+        # Consider adding a timeout if NSELive library supports it? (Optional enhancement)
         if asset_upper in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]:
             option_source_data = n.index_option_chain(asset_upper)
         else:
             option_source_data = n.equities_option_chain(asset_upper)
 
-        if not option_source_data or not isinstance(option_source_data, dict):
-            logger.warning(f"[{func_name}] Received empty or invalid data directly from NSELive for {asset_name}.")
-            return # Exit if no data received
+        if not option_source_data or not isinstance(option_source_data, dict) or \
+           "records" not in option_source_data or "data" not in option_source_data["records"]:
+            logger.warning(f"[{func_name}] Received empty or invalid data structure from NSELive for {asset_name}.")
+            # Attempt spot price update even if chain data is bad/missing
+            # Get potential spot price from whatever data *was* received
+            live_spot_partial = _safe_get_float(option_source_data.get("records", {}), "underlyingValue") if isinstance(option_source_data, dict) else None
+            if live_spot_partial is not None:
+                logger.info(f"[{func_name}] Attempting spot price update only for {asset_name} due to missing chain data. Spot: {live_spot_partial}")
+                try:
+                    # Use a separate connection context for this specific update
+                    with get_db_connection() as spot_conn:
+                         if spot_conn is None: raise ConnectionError("Failed to get DB connection for spot update.")
+                         with spot_conn.cursor(dictionary=True) as spot_cursor:
+                              # Fetch asset_id first
+                              spot_cursor.execute("SELECT id FROM option_data.assets WHERE asset_name = %s", (asset_name,))
+                              result = spot_cursor.fetchone()
+                              if result:
+                                   asset_id = result["id"]
+                                   spot_cursor.execute(
+                                        "UPDATE option_data.assets SET last_spot_price = %s, last_spot_update_time = NOW() WHERE id = %s",
+                                        (live_spot_partial, asset_id)
+                                   )
+                                   spot_conn.commit()
+                                   logger.info(f"[{func_name}] Committed spot price update only ({live_spot_partial}) for asset ID {asset_id}")
+                              else: logger.error(f"[{func_name}] Asset '{asset_name}' not found in DB for spot update.")
+                except Exception as spot_upd_err:
+                     logger.error(f"[{func_name}] FAILED spot price only update for {asset_name}: {spot_upd_err}")
+            return # Exit function after attempting spot update
 
-        live_spot = option_source_data.get("records", {}).get("underlyingValue")
-        logger.info(f"[{func_name}] Successfully fetched live data for {asset_name} directly. Live Spot: {live_spot}")
+        # If we reach here, basic structure seems okay
+        option_data_list = option_source_data["records"]["data"]
+        live_spot = option_source_data.get("records", {}).get("underlyingValue") # Already checked records exists
+        logger.info(f"[{func_name}] Successfully fetched live data structure for {asset_name}. Live Spot: {live_spot}. Processing {len(option_data_list) if option_data_list else 0} data rows.")
 
     except RuntimeError as rte:
          logger.error(f"[{func_name}] Runtime Error during live fetch for {asset_name}: {rte}")
          return # Exit if client not ready
     except Exception as fetch_err:
-        logger.error(f"[{func_name}] Error during direct NSELive fetch for {asset_name}: {fetch_err}", exc_info=False)
+        logger.error(f"[{func_name}] Error during direct NSELive fetch for {asset_name}: {fetch_err}", exc_info=True) # Log full traceback
         return # Exit if fetch fails
 
     # --- Step 2: Process and Update Database ---
     try:
-        if "records" not in option_source_data or "data" not in option_source_data["records"]:
-            logger.error(f"[{func_name}] Invalid live data structure for {asset_name} after fetch.")
-            return
-        option_data_list = option_source_data["records"]["data"]
-        # Get spot price here for DB update
+        # Get spot price again safely for DB update (might be float)
         db_live_spot = _safe_get_float(option_source_data.get("records", {}), "underlyingValue")
 
-        # If list is empty, still try to update spot price
-        if not option_data_list:
-            logger.warning(f"[{func_name}] No option data found in live source for {asset_name}. Attempting spot price update only.")
-            # Fall through to DB connection block to update spot
-
-        # Database interaction (remains synchronous)
-        with get_db_connection() as conn: # Use the synchronous context manager
+        # Database interaction remains synchronous
+        with get_db_connection() as conn:
             if conn is None: raise ConnectionError("Failed to get DB connection.")
             conn_obj = conn # Assign conn to conn_obj for potential rollback
             with conn.cursor(dictionary=True) as cursor:
-                # Get asset_id (sync)
+                # Get asset_id
                 cursor.execute("SELECT id FROM option_data.assets WHERE asset_name = %s", (asset_name,))
                 result = cursor.fetchone()
                 if not result:
-                    logger.error(f"[{func_name}] Asset '{asset_name}' not found in DB.")
-                    return # Exit if asset not found
+                    logger.error(f"[{func_name}] Asset '{asset_name}' not found in DB. Aborting update.")
+                    return
                 asset_id = result["id"]
 
-                # *** Update Spot Price in Assets Table (Check Column Exists) ***
+                # --- Update Spot Price in Assets Table ---
                 if db_live_spot is not None:
                     try:
-                        # Ensure the columns last_spot_price and last_spot_update_time exist!
                         cursor.execute(
                             "UPDATE option_data.assets SET last_spot_price = %s, last_spot_update_time = NOW() WHERE id = %s",
                             (db_live_spot, asset_id)
                         )
                         if cursor.rowcount > 0:
                              logger.info(f"[{func_name}] Updated spot price ({db_live_spot}) in DB for asset ID {asset_id}")
-                        else:
-                             logger.warning(f"[{func_name}] Spot price update query affected 0 rows for asset ID {asset_id}.")
+                        # No warning if 0 rows affected, might be same price
                     except mysql.connector.Error as spot_upd_err:
-                         logger.error(f"[{func_name}] FAILED to update spot price in DB for {asset_name} (Check if columns exist): {spot_upd_err}")
-                         # Don't necessarily exit, maybe chain update can proceed
+                         # Log as warning, but continue processing chain data if possible
+                         logger.warning(f"[{func_name}] FAILED to update spot price in DB for {asset_name} (Check columns exist): {spot_upd_err}")
                 else:
                     logger.warning(f"[{func_name}] Could not extract spot price from live data for DB update ({asset_name}).")
 
-                # If no option data, commit spot price update and exit
+                # --- Process Option Chain Data (if available) ---
                 if not option_data_list:
-                    conn.commit()
+                    logger.warning(f"[{func_name}] No option data found in live source for {asset_name}. Only spot price updated (if successful).")
+                    conn.commit() # Commit the spot price update
                     logger.info(f"[{func_name}] Committed spot price update only for {asset_name}.")
                     return
 
-                # --- Process Expiries (Sync) ---
+                # --- Process Expiries ---
                 expiry_dates_formatted = set()
+                unique_expiry_parse_errors = set() # Track unique errors
                 for item in option_data_list:
                     raw_expiry = item.get("expiryDate")
                     if raw_expiry:
                         try:
                             expiry_dates_formatted.add(datetime.strptime(raw_expiry, "%d-%b-%Y").strftime("%Y-%m-%d"))
                         except (ValueError, TypeError):
-                             logger.debug(f"[{func_name}] Skipping invalid expiry format: {raw_expiry}")
-                             pass # Skip invalid formats
+                             if raw_expiry not in unique_expiry_parse_errors:
+                                 logger.warning(f"[{func_name}] Skipping invalid expiry format encountered: {raw_expiry}")
+                                 unique_expiry_parse_errors.add(raw_expiry)
+                             pass # Skip invalid formats silently after first log
 
-                # Delete Old Expiries (sync)
+                # Delete Old Expiries
                 today_str = date.today().strftime("%Y-%m-%d")
                 cursor.execute("DELETE FROM option_data.expiries WHERE asset_id = %s AND expiry_date < %s", (asset_id, today_str))
                 logger.debug(f"[{func_name}] Deleted expiries before {today_str} for asset ID {asset_id} (Affected: {cursor.rowcount}).")
 
-
-                # Upsert Current Expiries & Fetch IDs (sync)
+                # Upsert Current Expiries & Fetch IDs
                 expiry_id_map = {}
                 if expiry_dates_formatted:
                     ins_data = [(asset_id, e) for e in expiry_dates_formatted]
-                    # Use INSERT IGNORE or ON DUPLICATE KEY UPDATE depending on desired behavior for existing dates
                     upsert_expiry_sql = "INSERT INTO option_data.expiries (asset_id, expiry_date) VALUES (%s, %s) ON DUPLICATE KEY UPDATE expiry_date = VALUES(expiry_date)"
                     cursor.executemany(upsert_expiry_sql, ins_data)
                     logger.debug(f"[{func_name}] Upserted {len(ins_data)} expiries for asset ID {asset_id} (Affected: {cursor.rowcount}).")
@@ -343,42 +363,67 @@ def fetch_and_update_single_asset_data(asset_name: str):
                     placeholders = ', '.join(['%s'] * len(expiry_dates_formatted))
                     select_expiry_sql = f"SELECT id, expiry_date FROM option_data.expiries WHERE asset_id = %s AND expiry_date IN ({placeholders})"
                     cursor.execute(select_expiry_sql, (asset_id, *expiry_dates_formatted))
-                    for row in cursor.fetchall():
-                         # Ensure expiry_date is stringified correctly
+                    fetched_rows = cursor.fetchall()
+                    for row in fetched_rows:
                          expiry_key = row["expiry_date"].strftime("%Y-%m-%d") if isinstance(row["expiry_date"], date) else str(row["expiry_date"])
                          expiry_id_map[expiry_key] = row["id"]
-                    logger.debug(f"[{func_name}] Fetched {len(expiry_id_map)} expiry IDs for mapping.")
+                    logger.debug(f"[{func_name}] Fetched {len(expiry_id_map)} expiry IDs for mapping from {len(fetched_rows)} rows.")
+                else:
+                    logger.warning(f"[{func_name}] No valid expiry dates extracted from live data for {asset_name}.")
+                    # Decide if we should stop? If no expiries, can't process chain. Let's commit spot and exit.
+                    conn.commit()
+                    logger.info(f"[{func_name}] Committed spot price update and exiting due to no valid expiries found.")
+                    return
 
 
-                # Prepare Option Chain Data (sync)
+                # --- Prepare Option Chain Data ---
                 option_chain_data_to_upsert = []
-                skipped = 0
-                processed_options = 0 # Count individual CE/PE options processed
+                skipped_rows = 0
+                processed_options = 0
+                unique_processing_errors = defaultdict(int) # Count errors by type/message
+
                 for item in option_data_list:
+                    row_processed = False
                     try:
-                        # Safely extract strike and expiry
                         raw_strike = item.get('strikePrice')
                         raw_expiry = item.get('expiryDate')
                         if raw_strike is None or raw_expiry is None:
-                            skipped += 1; continue
+                            unique_processing_errors["Missing strike/expiry"] += 1
+                            skipped_rows += 1; continue
 
-                        strike = float(raw_strike) # Convert strike safely
+                        # --- *** HANDLE STRIKE PRICE AS INT *** ---
+                        strike_float = float(raw_strike)
+                        # Round to nearest int. Add warning if significant difference?
+                        strike_int = int(round(strike_float))
+                        if abs(strike_float - strike_int) > 0.01: # Log if it wasn't close to an integer
+                             logger.warning(f"[{func_name}] Strike price {strike_float} rounded to {strike_int} for DB insertion.")
+                        # Use strike_int for DB operations now
+                        # --- *********************************** ---
+
                         expiry_date_str = datetime.strptime(raw_expiry, "%d-%b-%Y").strftime("%Y-%m-%d")
                         expiry_id = expiry_id_map.get(expiry_date_str)
 
                         if expiry_id is None:
-                            logger.debug(f"[{func_name}] Skipping row for expiry {expiry_date_str} as ID not found in map.")
-                            skipped += 1; continue
+                             # This can happen if the expiry date was invalid earlier but still present in data
+                             if expiry_date_str not in unique_processing_errors: # Log only once per expiry
+                                logger.warning(f"[{func_name}] Skipping row: Expiry ID not found for date '{expiry_date_str}' (possibly invalid format earlier?). Strike: {strike_int}")
+                             unique_processing_errors[expiry_date_str] += 1
+                             skipped_rows += 1; continue
 
-                        # Process CE and PE safely
+                        # Process CE and PE
                         for opt_type in ["CE", "PE"]:
                             details = item.get(opt_type)
-                            if isinstance(details, dict):
-                                processed_options += 1 # Increment option count
-                                idf = details.get("identifier", f"{asset_name}_{expiry_date_str}_{strike}_{opt_type}") # Default identifier
-                                # Use safe getters for all numeric fields
+                            if isinstance(details, dict) and details: # Check if details dict is not empty
+                                processed_options += 1
+                                # Use a robust identifier generation
+                                idf = details.get("identifier")
+                                if not idf:
+                                     # Generate a fallback identifier if missing, ensure consistency
+                                     idf = f"{asset_name.upper()}_{expiry_date_str}_{strike_int}_{opt_type}"
+                                     # logger.debug(f"[{func_name}] Generated fallback identifier: {idf}")
+
                                 row_data = (
-                                    asset_id, expiry_id, strike, opt_type, idf,
+                                    asset_id, expiry_id, strike_int, opt_type, idf, # Use strike_int
                                     _safe_get_int(details, "openInterest", 0),
                                     _safe_get_int(details, "changeinOpenInterest", 0),
                                     _safe_get_int(details, "totalTradedVolume", 0),
@@ -392,53 +437,82 @@ def fetch_and_update_single_asset_data(asset_name: str):
                                     _safe_get_int(details, "totalSellQuantity", 0)
                                 )
                                 option_chain_data_to_upsert.append(row_data)
-                            else:
-                                # Log if CE/PE details are missing or not a dict
-                                logger.debug(f"[{func_name}] Missing or invalid details for {opt_type} at strike {strike}, expiry {expiry_date_str}.")
-                                # Don't increment skipped here unless you count missing CE/PE as skipped rows
+                                row_processed = True # Mark that at least one option (CE/PE) was processed for this strike/expiry row
+                            # else: # Log only if needed, can be noisy
+                                # logger.debug(f"[{func_name}] Missing or invalid details dict for {opt_type} at strike {strike_int}, expiry {expiry_date_str}.")
+
 
                     except (ValueError, TypeError, KeyError) as row_err:
-                        # Catch specific errors during row processing
-                        logger.warning(f"[{func_name}] Error processing live data row: {row_err}. Row snapshot: {item.get('strikePrice')}, {item.get('expiryDate')}")
-                        skipped += 1
+                         err_key = f"Row Processing Error: {type(row_err).__name__}"
+                         if unique_processing_errors[err_key] < 5: # Log first 5 occurrences
+                            logger.warning(f"[{func_name}] {err_key}: {row_err}. Row snapshot: Strike={item.get('strikePrice')}, Expiry={item.get('expiryDate')}")
+                         unique_processing_errors[err_key] += 1
+                         skipped_rows += 1
                     except Exception as general_row_err:
-                         # Catch unexpected errors
-                        logger.error(f"[{func_name}] Unexpected error processing live data row: {general_row_err}", exc_info=False)
-                        skipped += 1
+                         err_key = f"Unexpected Row Error: {type(general_row_err).__name__}"
+                         if unique_processing_errors[err_key] < 5:
+                             logger.error(f"[{func_name}] {err_key} processing live data row: {general_row_err}", exc_info=False)
+                         unique_processing_errors[err_key] += 1
+                         skipped_rows += 1
+                    # if not row_processed: # Increment skipped count if neither CE nor PE was processed for a valid strike/expiry row
+                    #     skipped_rows += 1 # This might double count if initial checks fail
 
-                logger.debug(f"[{func_name}] Prepared {len(option_chain_data_to_upsert)} option rows ({processed_options} options total) for {asset_name} DB upsert. Skipped {skipped} input rows.")
+                # Log summary of processing errors if any occurred
+                if unique_processing_errors:
+                     logger.warning(f"[{func_name}] Summary of data processing issues: {dict(unique_processing_errors)}")
 
-                # Upsert Option Chain Data (sync)
+                logger.debug(f"[{func_name}] Prepared {len(option_chain_data_to_upsert)} option rows ({processed_options} options total) for {asset_name} DB upsert. Skipped {skipped_rows} input rows/options.")
+
+                # --- Upsert Option Chain Data (Optimized) ---
                 if option_chain_data_to_upsert:
+                    # OPTIMIZED: Only update frequently changing data fields
                     upsert_chain_sql = """
                         INSERT INTO option_data.option_chain (
                             asset_id, expiry_id, strike_price, option_type, identifier,
                             open_interest, change_in_oi, total_traded_volume, implied_volatility,
                             last_price, bid_qty, bid_price, ask_qty, ask_price,
                             total_buy_qty, total_sell_qty
+                            -- last_updated handled by DB trigger
                         ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                         ON DUPLICATE KEY UPDATE
-                            identifier=VALUES(identifier), open_interest=VALUES(open_interest),
-                            change_in_oi=VALUES(change_in_oi), total_traded_volume=VALUES(total_traded_volume),
-                            implied_volatility=VALUES(implied_volatility), last_price=VALUES(last_price),
-                            bid_qty=VALUES(bid_qty), bid_price=VALUES(bid_price),
-                            ask_qty=VALUES(ask_qty), ask_price=VALUES(ask_price),
-                            total_buy_qty=VALUES(total_buy_qty), total_sell_qty=VALUES(total_sell_qty)
+                            -- Only update volatile data fields
+                            open_interest=VALUES(open_interest),
+                            change_in_oi=VALUES(change_in_oi),
+                            total_traded_volume=VALUES(total_traded_volume),
+                            implied_volatility=VALUES(implied_volatility),
+                            last_price=VALUES(last_price),
+                            bid_qty=VALUES(bid_qty),
+                            bid_price=VALUES(bid_price),
+                            ask_qty=VALUES(ask_qty),
+                            ask_price=VALUES(ask_price),
+                            total_buy_qty=VALUES(total_buy_qty),
+                            total_sell_qty=VALUES(total_sell_qty)
+                            -- No need to update identifier=VALUES(identifier) (unique key)
+                            -- No need to update last_updated=NOW() (done by DB)
                     """
-                    cursor.executemany(upsert_chain_sql, option_chain_data_to_upsert)
-                    logger.debug(f"[{func_name}] Upserted option chain for {asset_name} (Affected: {cursor.rowcount}).")
+                    try:
+                        start_upsert_time = time.monotonic()
+                        # Execute using executemany for efficiency
+                        cursor.executemany(upsert_chain_sql, option_chain_data_to_upsert)
+                        rows_affected = cursor.rowcount
+                        upsert_duration = time.monotonic() - start_upsert_time
+                        # rowcount for ON DUPLICATE KEY UPDATE: 1 for each insert, 2 for each update
+                        logger.info(f"[{func_name}] Upserted {len(option_chain_data_to_upsert)} rows into option_chain for {asset_name}. DB Rows Affected: {rows_affected}. Duration: {upsert_duration:.3f}s")
+                    except mysql.connector.Error as upsert_err:
+                         logger.error(f"[{func_name}] FAILED during option_chain upsert for {asset_name}: {upsert_err}", exc_info=True)
+                         # Raise the error to trigger rollback
+                         raise upsert_err
                 else:
-                     logger.info(f"[{func_name}] No valid option chain data prepared for upsert for {asset_name}.")
+                     logger.info(f"[{func_name}] No valid option chain data prepared for DB upsert for {asset_name}.")
 
-                # Commit (sync)
+                # --- Commit Transaction ---
                 conn.commit()
-                logger.info(f"[{func_name}] Successfully committed DB update for {asset_name}.")
+                logger.info(f"[{func_name}] Successfully committed DB updates for {asset_name}.")
 
-    # Error handling for DB part
+    # --- Error Handling for DB/Processing Phase ---
     except (mysql.connector.Error, ConnectionError) as db_err:
-        logger.error(f"[{func_name}] DB/Connection error during update for {asset_name}: {db_err}")
+        logger.error(f"[{func_name}] DB/Connection error during update phase for {asset_name}: {db_err}", exc_info=True)
         try:
-            # Check if conn_obj was assigned and is connected before rollback
             if conn_obj and conn_obj.is_connected():
                  conn_obj.rollback()
                  logger.info(f"[{func_name}] Rollback attempted due to DB error.")
@@ -447,16 +521,15 @@ def fetch_and_update_single_asset_data(asset_name: str):
     except Exception as e:
         logger.error(f"[{func_name}] Unexpected error during DB update phase for {asset_name}: {e}", exc_info=True)
         try:
-             # Check if conn_obj was assigned and is connected before rollback
             if conn_obj and conn_obj.is_connected():
                  conn_obj.rollback()
                  logger.info(f"[{func_name}] Rollback attempted due to unexpected error.")
         except Exception as rb_err:
             logger.error(f"[{func_name}] Rollback failed: {rb_err}")
-    # No finally block needed as `with get_db_connection()` handles closing
+    # `with get_db_connection()` ensures connection is released/closed
 
     duration = datetime.now() - start_time
-    logger.info(f"[{func_name}] Finished task for asset: {asset_name}. Duration: {duration}")
+    logger.info(f"[{func_name}] Finished task for asset: {asset_name}. Total Duration: {duration}")
 
 
 def live_update_runner():
@@ -1367,9 +1440,12 @@ async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
         return cached
 
     logger.info(f"Fetching stock data for: {stock_symbol}")
+    # ----- DEBUG LOG -----
+    logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Starting fetch.")
+
     info = None
     h1d, h5d, h50d, h200d = None, None, None, None
-    ticker_obj = None # ***** ADDED: Variable for ticker *****
+    ticker_obj = None # Variable for ticker
 
     try:
         loop = asyncio.get_running_loop()
@@ -1377,36 +1453,36 @@ async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
         try:
              # Run synchronous yf.Ticker in executor
              ticker_obj = await loop.run_in_executor(None, yf.Ticker, stock_symbol)
-             # ***** CHANGE: Check if Ticker object itself is valid *****
-             # A common failure mode is getting a basic object with no real data if symbol is bad
-             # We'll check later if we can get *any* price info. If not, ticker is likely invalid.
-             if not ticker_obj: # Basic check
+             if not ticker_obj:
+                 logger.error(f"[{stock_symbol}] fetch_stock_data_async: yf.Ticker returned None or invalid object.")
                  raise ValueError("yf.Ticker returned None or invalid object")
-             logger.debug(f"yf.Ticker object created for {stock_symbol}")
+             logger.debug(f"[{stock_symbol}] fetch_stock_data_async: yf.Ticker object CREATED successfully.")
         except Exception as ticker_err:
-             logger.error(f"Failed to create or validate yf.Ticker object for {stock_symbol}: {ticker_err}", exc_info=False)
-             return None # CRITICAL FAILURE: Cannot proceed without a valid ticker
+             logger.error(f"[{stock_symbol}] fetch_stock_data_async: Failed to create yf.Ticker object: {ticker_err}", exc_info=False)
+             return None
 
         # --- Step 2: Fetch info (best effort) ---
         try:
-            logger.debug(f"Attempting to fetch info for {stock_symbol}")
-            # Run synchronous .info access in executor
+            logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Attempting to fetch ticker.info...")
             info = await loop.run_in_executor(None, getattr, ticker_obj, 'info')
+
             if not info:
-                 logger.warning(f"Received empty 'info' dictionary for {stock_symbol}. Will rely on history.")
+                 logger.debug(f"[{stock_symbol}] fetch_stock_data_async: ticker.info dictionary is EMPTY.")
             else:
-                 logger.debug(f"Successfully fetched 'info' dictionary for {stock_symbol}.")
+                 logger.debug(f"[{stock_symbol}] fetch_stock_data_async: ticker.info fetched. Type: {type(info)}. Keys: {list(info.keys()) if isinstance(info, dict) else 'Not a dict'}")
+                 if isinstance(info, dict):
+                     price_fields_in_info = {k: info.get(k) for k in ["currentPrice", "regularMarketPrice", "bid", "ask", "previousClose", "open"]} # Added 'open' just in case
+                     logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Price-related fields in ticker.info: {price_fields_in_info}")
         except json.JSONDecodeError as json_err:
-             # This often indicates an invalid symbol or delisted stock. Consider this critical.
-             logger.error(f"JSONDecodeError fetching info for {stock_symbol}: {json_err}. Symbol likely invalid or delisted.", exc_info=False)
-             return None # CRITICAL FAILURE: Invalid symbol indicated by info fetch failure
+             logger.error(f"[{stock_symbol}] fetch_stock_data_async: JSONDecodeError fetching info: {json_err}. Symbol likely invalid or delisted.", exc_info=False)
+             return None
         except Exception as info_err:
-             logger.warning(f"Non-critical error fetching 'info' for {stock_symbol}: {info_err}", exc_info=False)
-             info = {} # Ensure info is an empty dict if fetch fails, not None
+             logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Non-critical error fetching 'info': {info_err}", exc_info=False)
+             info = {} # Ensure info is an empty dict if fetch fails
 
         # --- Step 3: Fetch history concurrently (best effort) ---
         try:
-            logger.debug(f"Attempting history fetch for {stock_symbol}")
+            logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Attempting history fetches...")
             tasks = [
                 loop.run_in_executor(None, ticker_obj.history, {"period":"1d", "interval":"1d"}),
                 loop.run_in_executor(None, ticker_obj.history, {"period":"5d", "interval":"1d"}),
@@ -1414,64 +1490,130 @@ async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
                 loop.run_in_executor(None, ticker_obj.history, {"period":"200d", "interval":"1d"})
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
+
             h1d = results[0] if not isinstance(results[0], Exception) and not results[0].empty else None
             h5d = results[1] if not isinstance(results[1], Exception) and not results[1].empty else None
             h50d = results[2] if not isinstance(results[2], Exception) and not results[2].empty else None
             h200d = results[3] if not isinstance(results[3], Exception) and not results[3].empty else None
-            if any(isinstance(r, Exception) for r in results):
-                logger.warning(f"One or more history fetches failed for {stock_symbol}.")
-            if h1d is None:
-                logger.warning(f"Failed to fetch even 1d history for {stock_symbol}.")
+
+            logger.debug(f"[{stock_symbol}] fetch_stock_data_async: History fetch results - 1d: {'OK' if h1d is not None else 'Fail/Empty'}, 5d: {'OK' if h5d is not None else 'Fail/Empty'}, 50d: {'OK' if h50d is not None else 'Fail/Empty'}, 200d: {'OK' if h200d is not None else 'Fail/Empty'}")
+            if h1d is not None and 'Close' in h1d.columns:
+                logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Latest Close from 1d history: {h1d['Close'].iloc[-1]}")
         except Exception as hist_err:
-             logger.warning(f"Unexpected error during history fetch for {stock_symbol}: {hist_err}", exc_info=False)
+             logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Unexpected error during history fetch: {hist_err}", exc_info=False)
 
         # --- Step 4: Determine Price (CRITICAL) ---
+        # Refined logic based on check_yf.py output for ^NSEI
         cp = None
-        # Prioritize various fields from 'info'
-        if isinstance(info, dict): # Ensure info is a dict before accessing
-            cp = info.get("currentPrice") or info.get("regularMarketPrice") or \
-                 info.get("bid") or info.get("ask") or \
-                 info.get("previousClose") # Add previous close as fallback
+        price_source = "None"
 
-        # Fallback to history if 'info' price missing
-        if cp is None:
-             if h1d is not None and 'Close' in h1d.columns:
-                 cp = h1d["Close"].iloc[-1]
-                 logger.debug(f"Using 1d history close price for {stock_symbol}: {cp}")
-             elif h5d is not None and 'Close' in h5d.columns:
-                 cp = h5d["Close"].iloc[-1]
-                 logger.debug(f"Using 5d history close price for {stock_symbol}: {cp}")
+        if isinstance(info, dict) and info: # Check if info is a non-empty dictionary
+            logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Attempting price extraction from info dict...")
+            # Check fields in preferred order
+            if info.get("regularMarketPrice") is not None: # Check this BEFORE currentPrice for indices
+                cp = info.get("regularMarketPrice")
+                price_source = "info.regularMarketPrice"
+            elif info.get("currentPrice") is not None:
+                cp = info.get("currentPrice")
+                price_source = "info.currentPrice"
+            elif info.get("bid") is not None and info.get("bid") > 0: # Ignore bid/ask if 0
+                 cp = info.get("bid")
+                 price_source = "info.bid"
+            elif info.get("ask") is not None and info.get("ask") > 0:
+                 cp = info.get("ask")
+                 price_source = "info.ask"
+            elif info.get("open") is not None: # Try 'open' as another fallback
+                 cp = info.get("open")
+                 price_source = "info.open"
+            elif info.get("previousClose") is not None:
+                cp = info.get("previousClose")
+                price_source = "info.previousClose"
 
-        # ***** CHANGE: If NO price found after all attempts, consider it critical failure *****
+            logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Price from info: {cp} (Source: {price_source})")
+        else:
+             logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Skipping price extraction from info (info is not a dict or is empty).")
+
+        # Fallback to history if price not found in info
         if cp is None:
-             logger.error(f"CRITICAL: Could not determine any current/previous price for {stock_symbol} from info or history. Symbol might be invalid or data unavailable.")
+             logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Price not found in info, attempting fallback to history...")
+             if h1d is not None and 'Close' in h1d.columns and not h1d.empty:
+                 try:
+                     cp = h1d["Close"].iloc[-1]
+                     # Basic validation: ensure it's likely a number
+                     if isinstance(cp, (int, float, np.number)) and np.isfinite(cp):
+                        price_source = "history.1d.Close"
+                        logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Using 1d history close price: {cp}")
+                     else:
+                         logger.warning(f"[{stock_symbol}] fetch_stock_data_async: 1d history Close value is invalid: {cp}. Resetting cp.")
+                         cp = None # Reset cp if value is not valid
+                 except Exception as hist_ex:
+                     logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Error accessing 1d history Close: {hist_ex}")
+                     cp = None # Error accessing data
+
+             elif h5d is not None and 'Close' in h5d.columns and not h5d.empty: # Further fallback to 5d
+                  try:
+                     cp = h5d["Close"].iloc[-1]
+                     if isinstance(cp, (int, float, np.number)) and np.isfinite(cp):
+                        price_source = "history.5d.Close"
+                        logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Using 5d history close price: {cp}")
+                     else:
+                         logger.warning(f"[{stock_symbol}] fetch_stock_data_async: 5d history Close value is invalid: {cp}. Resetting cp.")
+                         cp = None
+                  except Exception as hist_ex:
+                     logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Error accessing 5d history Close: {hist_ex}")
+                     cp = None
+
+             if cp is None: # Check if fallback failed
+                 logger.debug(f"[{stock_symbol}] fetch_stock_data_async: History fallback also failed to find a valid price.")
+
+        # Final check: If NO price found after all attempts
+        if cp is None:
+             logger.error(f"[{stock_symbol}] fetch_stock_data_async: CRITICAL - Could not determine valid price from info OR history. Returning None.")
              return None # CRITICAL FAILURE: Can't proceed without price
+        # Validate the type of the found price before proceeding
+        elif not isinstance(cp, (int, float, np.number)) or not np.isfinite(cp):
+            logger.error(f"[{stock_symbol}] fetch_stock_data_async: CRITICAL - Determined price is not a valid finite number: {cp} (Type: {type(cp)}). Returning None.")
+            return None
+
+        # ----- INFO LOG -----
+        logger.info(f"[{stock_symbol}] fetch_stock_data_async: Successfully determined price: {cp} (Source: {price_source})")
 
         # --- Step 5: Get other fields (handle missing gracefully) ---
-        # Ensure info is a dict before using .get()
+        # (Keep Step 5 and 6 as they were in the previous debug version)
+        logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Extracting other fields...")
         safe_info = info if isinstance(info, dict) else {}
         vol = safe_info.get("volume")
-        if vol is None and h1d is not None and 'Volume' in h1d.columns:
-             vol = h1d["Volume"].iloc[-1]
+        if vol is None and h1d is not None and 'Volume' in h1d.columns and not h1d.empty:
+             try: # Add try-except for safety
+                 vol = h1d["Volume"].iloc[-1]
+                 logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Used 1d history volume: {vol}")
+             except Exception as vol_ex:
+                 logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Error accessing 1d history Volume: {vol_ex}")
+                 vol = None
 
-        # Calculate MAs only if history is valid
-        ma50 = h50d["Close"].mean() if h50d is not None and 'Close' in h50d.columns else None
-        ma200 = h200d["Close"].mean() if h200d is not None and 'Close' in h200d.columns else None
+        ma50 = None
+        if h50d is not None and 'Close' in h50d.columns:
+             try: ma50 = h50d["Close"].mean()
+             except Exception as ma_ex: logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Error calculating MA50: {ma_ex}")
+        ma200 = None
+        if h200d is not None and 'Close' in h200d.columns:
+             try: ma200 = h200d["Close"].mean()
+             except Exception as ma_ex: logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Error calculating MA200: {ma_ex}")
+        logger.debug(f"[{stock_symbol}] fetch_stock_data_async: MA50: {ma50}, MA200: {ma200}")
 
-        # Fundamental data - use None if missing
         mc = safe_info.get("marketCap")
         pe = safe_info.get("trailingPE")
         eps = safe_info.get("trailingEps")
         sec = safe_info.get("sector")
         ind = safe_info.get("industry")
+        logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Fundamentals - MC: {mc}, P/E: {pe}, EPS: {eps}, Sector: {sec}, Industry: {ind}")
 
         # --- Step 6: Construct final data dictionary ---
-        # Include fields even if None, let the prompt builder handle N/A formatting
         data = {
-            "current_price": cp, # Should always have a value if we reach here
-            "volume": vol,
-            "moving_avg_50": ma50,
-            "moving_avg_200": ma200,
+            "current_price": float(cp), # Convert numpy types to float for JSON compatibility
+            "volume": int(vol) if vol is not None and np.isfinite(vol) else None, # Convert to int if possible
+            "moving_avg_50": float(ma50) if ma50 is not None and np.isfinite(ma50) else None,
+            "moving_avg_200": float(ma200) if ma200 is not None and np.isfinite(ma200) else None,
             "market_cap": mc,
             "pe_ratio": pe,
             "eps": eps,
@@ -1480,12 +1622,11 @@ async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
         }
 
         stock_data_cache[cache_key] = data
-        logger.info(f"Successfully processed stock data for {stock_symbol}. Price: {cp}")
-        return data # RETURN THE DICTIONARY, even with missing non-critical fields
+        logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Successfully processed data. Returning dict: {data}")
+        return data
 
     except Exception as e:
-        # Catch any other unexpected errors during the overall process
-        logger.error(f"Unexpected error in fetch_stock_data_async for {stock_symbol}: {e}", exc_info=True)
+        logger.error(f"[{stock_symbol}] fetch_stock_data_async: UNEXPECTED error during overall process: {e}", exc_info=True)
         return None
 
 # ===============================================================
