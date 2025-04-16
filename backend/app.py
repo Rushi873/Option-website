@@ -392,7 +392,7 @@ app = FastAPI(
 # --- CORS Middleware ---
 ALLOWED_ORIGINS = [
     "http://localhost", "http://localhost:3000", "http://127.0.0.1:8000", # Added 127.0.0.1
-    "https://option-strategy-vaqz.onrender.com", "https://option-strategy.onrender.com"
+    "https://option-strategy-vaqz.onrender.com", "https://option-strategy-website.onrender.com"
 ]
 logger.info(f"Configuring CORS for origins: {ALLOWED_ORIGINS}")
 app.add_middleware( CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
