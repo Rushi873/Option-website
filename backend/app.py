@@ -139,8 +139,8 @@ BROKERAGE_FLAT_PER_ORDER = 20
 DEFAULT_INTEREST_RATE_PCT = 6.59 # Example, check current rates
 
 # --- Payoff Calculation Constants ---
-PAYOFF_LOWER_BOUND_FACTOR = 0.80 # Adjusted factors for potentially better range
-PAYOFF_UPPER_BOUND_FACTOR = 1.20
+PAYOFF_LOWER_FACTOR = 0.80 # Adjusted factors for potentially better range
+PAYOFF_UPPER_FACTOR = 1.20
 PAYOFF_POINTS = 200 # Increased points for smoother curve
 BREAKEVEN_CLUSTER_GAP_PCT = 0.01
 
@@ -1065,95 +1065,81 @@ def calculate_option_taxes(strategy_data: List[Dict[str, Any]],  spot_price: flo
     logger.debug(f"[{func_name}] Returning result: {result}")
     return result
 
-def generate_payoff_chart_matplotlib( # <<< Function name retained
+def generate_payoff_chart_matplotlib(
     strategy_data: List[Dict[str, Any]],
     asset: str,
     spot_price: float, # Argument provided by endpoint
-    strategy_metrics: Optional[Dict[str, Any]]
-) -> Optional[str]: # <<< Return type is now string (JSON string)
+    strategy_metrics: Optional[Dict[str, Any]],
+    # Corrected signature with commas and defaults using global constants
+    payoff_points: int = PAYOFF_POINTS,
+    lower_factor: float = PAYOFF_LOWER_FACTOR,
+    upper_factor: float = PAYOFF_UPPER_FACTOR
+) -> Optional[str]: # Returns JSON String
     """
-    Generates an interactive Plotly payoff chart data structure.
-    Calculates and displays standard deviation lines if possible.
-    Returns the chart's figure definition as a JSON STRING, or None on failure.
-    Optionally saves a standalone HTML file for local viewing.
-
-    NOTE: Function name is 'generate_payoff_chart_matplotlib' for compatibility,
-          but the implementation uses Plotly and returns JSON.
+    Generates Plotly chart JSON. Uses arguments for payoff calculation constants.
     """
-    func_name = "generate_payoff_chart_matplotlib_JSON" # Log actual goal
+    func_name = "generate_payoff_chart_matplotlib_JSON"
     logger.info(f"[{func_name}] Generating Plotly chart JSON for {len(strategy_data)} leg(s), asset: {asset}, using Spot: {spot_price}")
     logger.debug(f"[{func_name}] Input strategy_data: {strategy_data}")
-    logger.debug(f"[{func_name}] Input strategy_metrics: {strategy_metrics}")
+    # Removed internal spot price fetching as spot_price is now an argument
     start_time = time.monotonic()
     output_filename_standalone = f"{asset}_payoff_chart_plotly_standalone_{func_name}.html"
-
-    fig = None # Initialize
+    fig = None
 
     try:
         # --- Validate Spot Price ---
         if spot_price is None or not isinstance(spot_price, (int, float)) or spot_price <= 0:
-            logger.error(f"[{func_name}] Received invalid spot_price ({spot_price}) as argument.")
-            raise ValueError(f"Invalid spot price ({spot_price}) for chart generation")
+            raise ValueError(f"Invalid spot_price ({spot_price}) argument for chart generation")
 
         # --- Get Default Lot Size ---
-        default_lot_size = None
-        try:
-            default_lot_size = get_lot_size(asset)
-            if default_lot_size is None or not isinstance(default_lot_size, int) or default_lot_size <= 0:
-                raise ValueError(f"Invalid default lot size ({default_lot_size})")
-            logger.debug(f"[{func_name}] Using default lot size: {default_lot_size}")
-        except ValueError as lot_err:
-             logger.error(f"[{func_name}] Failed default lot size fetch for {asset}: {lot_err}")
-             return None # Chart needs lot size
-
+        default_lot_size = get_lot_size(asset) # Assuming get_lot_size is defined
+        if default_lot_size is None or not isinstance(default_lot_size, int) or default_lot_size <= 0:
+            raise ValueError(f"Invalid default lot size ({default_lot_size}) for asset {asset}")
+        logger.debug(f"[{func_name}] Using default lot size: {default_lot_size}")
         spot_price = float(spot_price) # Ensure float
 
         # --- Calculate Standard Deviation Move ---
         one_std_dev_move = None
-        # ... (Standard Deviation calculation logic remains the same) ...
         if strategy_data:
             try:
                 first_leg = strategy_data[0]
                 iv_raw = first_leg.get('iv')
                 dte_raw = first_leg.get('days_to_expiry')
-                iv_used = _safe_get_float({'iv': iv_raw}, 'iv')
-                dte_used = _safe_get_int({'dte': dte_raw}, 'dte')
+                iv_used = _safe_get_float({'iv': iv_raw}, 'iv') # Assuming _safe_get_float handles None
+                dte_used = _safe_get_int({'dte': dte_raw}, 'dte') # Assuming _safe_get_int handles None
                 if iv_used is not None and dte_used is not None and iv_used > 0 and spot_price > 0:
                     calc_dte = max(dte_used, 1)
                     iv_decimal = iv_used / 100.0
                     time_fraction = calc_dte / 365.0
                     one_std_dev_move = spot_price * iv_decimal * math.sqrt(time_fraction)
-                    logger.debug(f"[{func_name}] Calculated 1 StDev move: {one_std_dev_move:.2f} (using IV={iv_used}%, DTE={calc_dte})")
+                    logger.debug(f"[{func_name}] Calculated 1 StDev move: {one_std_dev_move:.2f} (IV={iv_used}%, DTE={calc_dte})")
                 else: logger.warning(f"[{func_name}] Cannot calculate StDev move: IV={iv_used}, DTE={dte_used}, Spot={spot_price}")
             except Exception as sd_calc_err: logger.error(f"[{func_name}] Error calculating SD move: {sd_calc_err}", exc_info=True)
         else: logger.warning(f"[{func_name}] Cannot calculate StDev move: strategy_data empty.")
 
-
-        # --- 2. Calculate Payoff Data ---
+        # --- Calculate Payoff Data ---
         logger.debug(f"[{func_name}] Calculating payoff data...")
-        # ... (Bounds calculation logic remains the same) ...
-        sd_factor = 2.5
+        sd_factor = 2.5 # Standard deviations for range if IV available
         if one_std_dev_move and one_std_dev_move > 0:
              chart_min = spot_price - sd_factor * one_std_dev_move
              chart_max = spot_price + sd_factor * one_std_dev_move
         else:
-             # Need to ensure these constants are defined globally or passed
-             # Assuming PAYOFF_LOWER_BOUND_FACTOR = 0.8, PAYOFF_UPPER_BOUND_FACTOR = 1.2, PAYOFF_POINTS = 300
-             PAYOFF_LOWER_BOUND_FACTOR = 0.8 # Example
-             PAYOFF_UPPER_BOUND_FACTOR = 1.2 # Example
-             PAYOFF_POINTS = 300             # Example
-             chart_min = spot_price * PAYOFF_LOWER_BOUND_FACTOR
-             chart_max = spot_price * PAYOFF_UPPER_BOUND_FACTOR
+             # Use arguments passed to the function
+             chart_min = spot_price * lower_factor
+             chart_max = spot_price * upper_factor
         lower_bound = max(chart_min, 0.1)
         upper_bound = max(chart_max, lower_bound + 1)
-        price_range = np.linspace(lower_bound, upper_bound, PAYOFF_POINTS)
+
+        # Use argument payoff_points
+        price_range = np.linspace(lower_bound, upper_bound, payoff_points)
         total_payoff = np.zeros_like(price_range)
         processed_legs_count = 0
-        # ... (Loop through strategy_data to calculate total_payoff remains the same) ...
+
+        # Loop through strategy legs
         for i, leg in enumerate(strategy_data):
             leg_desc = f"Leg {i+1}"
             try:
-                # Use safe extraction for all leg parameters
+                # Use safe extraction
                 tr_type = str(leg.get('tr_type', '')).lower()
                 op_type = str(leg.get('op_type', '')).lower()
                 strike = _safe_get_float(leg, 'strike')
@@ -1163,7 +1149,7 @@ def generate_payoff_chart_matplotlib( # <<< Function name retained
                 temp_ls = _safe_get_int({'ls': raw_ls}, 'ls')
                 leg_lot_size = temp_ls if temp_ls is not None and temp_ls > 0 else default_lot_size
 
-                # Validate parameters after safe extraction
+                # Validate
                 error_msg = None
                 if tr_type not in ('b','s'): error_msg = f"invalid tr_type ('{tr_type}')"
                 elif op_type not in ('c','p'): error_msg = f"invalid op_type ('{op_type}')"
@@ -1173,6 +1159,7 @@ def generate_payoff_chart_matplotlib( # <<< Function name retained
                 elif not isinstance(leg_lot_size, int) or leg_lot_size <= 0: error_msg = f"invalid final lot_size ({leg_lot_size})"
                 if error_msg: raise ValueError(f"Error in {leg_desc} for chart: {error_msg}")
 
+                # Calculate payoff component
                 quantity = lots * leg_lot_size
                 leg_prem_tot = premium * quantity
                 intrinsic_value = np.maximum(price_range - strike, 0) if op_type == 'c' else np.maximum(strike - price_range, 0)
@@ -1181,103 +1168,65 @@ def generate_payoff_chart_matplotlib( # <<< Function name retained
                 processed_legs_count += 1
             except (KeyError, ValueError, TypeError) as e:
                  logger.error(f"[{func_name}] Error processing {leg_desc} data for chart: {e}. Leg Data: {leg}", exc_info=False)
-                 raise ValueError(f"Error in {leg_desc} for chart: {e}") from e
+                 raise ValueError(f"Error in {leg_desc} for chart: {e}") from e # Re-raise to stop chart generation
 
         if processed_legs_count == 0:
             logger.warning(f"[{func_name}] No valid legs processed for chart: {asset}.")
             return None
         logger.debug(f"[{func_name}] Payoff calculation complete.")
 
-        # --- 3. Create Plotly Figure ---
+        # --- Create Plotly Figure ---
         logger.debug(f"[{func_name}] Creating Plotly figure...")
         fig = go.Figure()
 
-        # --- 4. Add Payoff Trace ---
-        # ... (fig.add_trace logic remains the same) ...
-        fig.add_trace(go.Scatter(
-            x=price_range, y=total_payoff, mode='lines', name='Payoff',
-            line=dict(color='mediumblue', width=2.5), hoverinfo='x+y'
-        ))
-
-        # --- 5. Add Shading ---
-        # ... (Profit/Loss shading logic remains the same) ...
-        profit_color = 'rgba(144, 238, 144, 0.4)'
-        loss_color = 'rgba(255, 153, 153, 0.4)'
-        x_fill = np.concatenate([price_range, price_range[::-1]])
-        payoff_for_profit_fill = np.maximum(total_payoff, 0)
-        y_profit_fill = np.concatenate([np.zeros_like(price_range), payoff_for_profit_fill[::-1]])
-        fig.add_trace(go.Scatter(x=x_fill, y=y_profit_fill, fill='toself', mode='none', fillcolor=profit_color, hoverinfo='skip'))
-        payoff_for_loss_fill = np.minimum(total_payoff, 0)
-        y_loss_fill = np.concatenate([payoff_for_loss_fill, np.zeros_like(price_range)[::-1]])
-        fig.add_trace(go.Scatter(x=x_fill, y=y_loss_fill, fill='toself', mode='none', fillcolor=loss_color, hoverinfo='skip'))
-
-        # --- 6. Add Reference Lines & Annotations ---
-        # ... (Reference lines logic remains the same) ...
-        fig.add_hline(y=0, line=dict(color='rgba(0, 0, 0, 0.7)', width=1.0, dash='solid'))
-        fig.add_vline(x=spot_price, line=dict(color='dimgrey', width=1.5, dash='dash'))
-        fig.add_annotation(x=spot_price, y=1, yref="paper", text=f"Spot {spot_price:.2f}", showarrow=False, yshift=10, font=dict(color='dimgrey', size=11, family="Arial"), bgcolor="rgba(255,255,255,0.6)")
+        # --- Add Traces, Shading, Lines, Annotations, Layout ---
+        # (No changes needed in this plotting logic - uses local variables like price_range, total_payoff, spot_price, etc.)
+        fig.add_trace(go.Scatter(x=price_range, y=total_payoff, mode='lines', name='Payoff', line=dict(color='mediumblue', width=2.5), hoverinfo='x+y'))
+        profit_color = 'rgba(144, 238, 144, 0.4)'; loss_color = 'rgba(255, 153, 153, 0.4)'; x_fill = np.concatenate([price_range, price_range[::-1]]); payoff_for_profit_fill = np.maximum(total_payoff, 0); y_profit_fill = np.concatenate([np.zeros_like(price_range), payoff_for_profit_fill[::-1]]); fig.add_trace(go.Scatter(x=x_fill, y=y_profit_fill, fill='toself', mode='none', fillcolor=profit_color, hoverinfo='skip')); payoff_for_loss_fill = np.minimum(total_payoff, 0); y_loss_fill = np.concatenate([payoff_for_loss_fill, np.zeros_like(price_range)[::-1]]); fig.add_trace(go.Scatter(x=x_fill, y=y_loss_fill, fill='toself', mode='none', fillcolor=loss_color, hoverinfo='skip'));
+        fig.add_hline(y=0, line=dict(color='rgba(0, 0, 0, 0.7)', width=1.0, dash='solid')); fig.add_vline(x=spot_price, line=dict(color='dimgrey', width=1.5, dash='dash')); fig.add_annotation(x=spot_price, y=1, yref="paper", text=f"Spot {spot_price:.2f}", showarrow=False, yshift=10, font=dict(color='dimgrey', size=11, family="Arial"), bgcolor="rgba(255,255,255,0.6)");
         if one_std_dev_move is not None and one_std_dev_move > 0:
-            levels = [-2, -1, 1, 2]
-            sig_color = 'rgba(100, 100, 100, 0.8)'
+            levels = [-2, -1, 1, 2]; sig_color = 'rgba(100, 100, 100, 0.8)';
             for level in levels:
-                sd_price = spot_price + level * one_std_dev_move
-                if lower_bound < sd_price < upper_bound:
-                    label = f"{level:+}σ"
-                    fig.add_vline(x=sd_price, line=dict(color=sig_color, width=1, dash='dot'))
-                    fig.add_annotation(x=sd_price, y=1, yref="paper", text=label, showarrow=False, yshift=10, font=dict(color=sig_color, size=10, family="Arial"), bgcolor="rgba(255,255,255,0.6)")
-            logger.debug(f"[{func_name}] Added standard deviation lines.")
+                sd_price = spot_price + level * one_std_dev_move;
+                if lower_bound < sd_price < upper_bound: label = f"{level:+}σ"; fig.add_vline(x=sd_price, line=dict(color=sig_color, width=1, dash='dot')); fig.add_annotation(x=sd_price, y=1, yref="paper", text=label, showarrow=False, yshift=10, font=dict(color=sig_color, size=10, family="Arial"), bgcolor="rgba(255,255,255,0.6)");
+            logger.debug(f"[{func_name}] Added standard deviation lines.");
+        fig.update_layout(title=dict(text=f"{asset} Strategy Payoff", font=dict(size=16, family="Arial, sans-serif"), x=0.5), xaxis_title="Underlying Price at Expiry", yaxis_title="Profit / Loss (₹)", hovermode="x unified", showlegend=False, template='plotly_white', xaxis=dict(gridcolor='rgba(220, 220, 220, 0.7)', zeroline=False), yaxis=dict(gridcolor='rgba(220, 220, 220, 0.7)', zeroline=False, tickprefix="₹"), margin=dict(l=60, r=40, t=80, b=60), font=dict(family="Arial, sans-serif", size=11));
 
-        # --- 7. Update Layout ---
-        # ... (Layout update logic remains the same) ...
-        fig.update_layout(
-            title=dict(text=f"{asset} Strategy Payoff", font=dict(size=16, family="Arial, sans-serif"), x=0.5),
-            xaxis_title="Underlying Price at Expiry", yaxis_title="Profit / Loss (₹)",
-            hovermode="x unified", showlegend=False, template='plotly_white',
-            xaxis=dict(gridcolor='rgba(220, 220, 220, 0.7)', zeroline=False),
-            yaxis=dict(gridcolor='rgba(220, 220, 220, 0.7)', zeroline=False, tickprefix="₹"),
-            margin=dict(l=60, r=40, t=80, b=60), font=dict(family="Arial, sans-serif", size=11)
-        )
-
-        # --- 8. Generate JSON Output --- ### MODIFIED SECTION ###
+        # --- Generate JSON Output ---
         logger.debug(f"[{func_name}] Generating Plotly Figure JSON...")
         figure_json_string = None
         try:
-            # Use plotly.io.to_json to get the figure spec as a JSON string
             figure_json_string = pio.to_json(fig, pretty=False)
             logger.debug(f"[{func_name}] Plotly JSON generation successful.")
         except Exception as json_err:
              logger.error(f"[{func_name}] Failed to serialize Plotly figure to JSON: {json_err}", exc_info=True)
-             return None # Return None if JSON serialization fails
+             return None
 
-        # --- Optionally Save Standalone HTML File for Debugging --- ### KEPT FOR DEBUGGING ###
+        # --- Optionally Save Standalone HTML File ---
         try:
              if os.path.exists(output_filename_standalone):
                   try: os.remove(output_filename_standalone)
-                  except OSError as rm_err: logger.warning(f"[{func_name}] Could not remove existing standalone file '{output_filename_standalone}': {rm_err}")
+                  except OSError as rm_err: logger.warning(f"[{func_name}] Could not remove standalone file: {rm_err}")
              fig.write_html(output_filename_standalone, include_plotlyjs='cdn', full_html=True)
-             logger.info(f"[{func_name}] Also saved standalone Plotly chart HTML to {output_filename_standalone}")
+             logger.info(f"[{func_name}] Also saved standalone chart HTML to {output_filename_standalone}")
         except Exception as write_err:
-             logger.error(f"[{func_name}] Error saving standalone HTML file '{output_filename_standalone}': {write_err}", exc_info=True)
-        # --- End Optional Save ---
+             logger.error(f"[{func_name}] Error saving standalone HTML file: {write_err}", exc_info=True)
 
         duration = time.monotonic() - start_time
         logger.info(f"[{func_name}] Plotly JSON generation finished in {duration:.3f}s.")
-        # Return the JSON string
-        return figure_json_string
+        return figure_json_string # Return JSON string
 
-    except ValueError as val_err:
+    except ValueError as val_err: # Catch validation errors (spot, lot size, leg data)
         logger.error(f"[{func_name}] Value Error during Plotly JSON generation for {asset}: {val_err}", exc_info=False)
-        return None # Signal failure
-    except ImportError as imp_err:
-         logger.critical(f"[{func_name}] Failed to import Plotly or Numpy. Ensure they are installed. Error: {imp_err}", exc_info=False)
+        return None
+    except ImportError as imp_err: # Catch missing libraries
+         logger.critical(f"[{func_name}] Import Error (Plotly/Numpy): {imp_err}", exc_info=False)
          return None
-    except Exception as e:
+    except Exception as e: # Catch any other unexpected errors
         logger.error(f"[{func_name}] Unexpected error generating Plotly JSON for {asset}: {e}", exc_info=True)
-        return None # Signal failure
+        return None
     finally:
-         # No fig.close() needed for Plotly objects unless using Matplotlib backend
-         pass
-
+         pass 
 
 # ===============================================================
 # 3. Calculate Strategy Metrics (Updated with new.py logic)
