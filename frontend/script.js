@@ -905,6 +905,11 @@ async function fetchOptionChain(scrollToATM = false, isRefresh = false) {
                 { class: 'put oi', key: 'open_interest', format: val => formatNumber(val, 0, '-') },
                 { class: 'put clickable price', type: 'PE', key: 'last_price', format: val => formatNumber(val, 2, '-') },
             ];
+            
+            if (strikeIndex < 2 || strike === atmStrike) {
+                console.log(`[STRIKE LOOP ${strike}] Derived call object:`, JSON.stringify(call)); // Add stringify
+                console.log(`[STRIKE LOOP ${strike}] Derived put object:`, JSON.stringify(put));   // Add stringify
+            }
 
             // ----- Process Columns for the Row -----
             columns.forEach(col => {
@@ -923,6 +928,7 @@ async function fetchOptionChain(scrollToATM = false, isRefresh = false) {
                     } else { // Must be put
                         // Directly access the 'put' object defined in the outer scope
                         currentValue = (typeof put === 'object' && put !== null) ? put[col.key] : undefined;
+
                     }
                     // *************************************************
 
