@@ -1320,9 +1320,9 @@ def calculate_option_greeks(
     interest_rate_pct: float = DEFAULT_INTEREST_RATE_PCT
 ) -> List[Dict[str, Any]]:
     """
-    Calculates per-share option Greeks (scaled by 100) for each leg
-    using the mibian Black-Scholes model. Requires 'iv' and 'days_to_expiry'
-    in strategy_data for each leg.
+    Calculates per-share option Greeks for each leg using the mibian
+    Black-Scholes model. Requires 'iv' and 'days_to_expiry' in strategy_data
+    for each leg. Skips legs where calculation fails.
     """
     func_name = "calculate_option_greeks"
     logger.info(f"[{func_name}] Calculating PER-SHARE Greeks for {len(strategy_data)} legs, asset: {asset}, rate: {interest_rate_pct}%")
@@ -1332,9 +1332,11 @@ def calculate_option_greeks(
     # --- Check if mibian is available ---
     if mibian is None:
         logger.error(f"[{func_name}] Mibian library not found. Cannot calculate Greeks.")
-        return [] # Return empty list if library missing
+        # Return empty list but don't raise error, allows endpoint to potentially continue
+        return []
 
     # --- 1. Fetch Spot Price ---
+    spot_price: float | None = None
     try:
         logger.debug(f"[{func_name}] Fetching spot price...")
         spot_price_info = get_latest_spot_price_from_db(asset)
@@ -1348,12 +1350,14 @@ def calculate_option_greeks(
             logger.debug(f"[{func_name}] Using spot price from Cache/Live {spot_price}")
 
         if spot_price is None or not isinstance(spot_price, (int, float)) or spot_price <= 0:
-            raise ValueError(f"Spot price missing/invalid ({spot_price}) for greeks calculation")
+            # Log error but return empty list instead of raising - let endpoint decide failure
+            logger.error(f"[{func_name}] Spot price missing/invalid ({spot_price}) for greeks calculation. Cannot proceed.")
+            return []
         spot_price = float(spot_price)
         logger.debug(f"[{func_name}] Using spot price {spot_price} for asset {asset}")
     except Exception as spot_err:
         logger.error(f"[{func_name}] Error fetching spot price for {asset}: {spot_err}", exc_info=True)
-        return [] # Return empty list if spot price fails
+        return [] # Return empty list if spot price fails catastrophically
 
     # --- 2. Process Each Leg ---
     logger.debug(f"[{func_name}] Processing legs for Greeks...")
@@ -1363,73 +1367,92 @@ def calculate_option_greeks(
             logger.debug(f"[{func_name}] Processing {leg_desc}: {leg_data}")
             # --- Validate and Extract Leg Data Safely ---
             if not isinstance(leg_data, dict):
-                raise ValueError(f"{leg_desc} data is not a dictionary.")
+                logger.warning(f"[{func_name}] Skipping {leg_desc}: data is not a dictionary.")
+                continue
 
             strike_price = _safe_get_float(leg_data, 'strike')
-            days_to_expiry = _safe_get_int(leg_data, 'days_to_expiry') # Expected from prep step
-            implied_vol_pct = _safe_get_float(leg_data, 'iv') # Expected from prep step
-            option_type_flag = str(leg_data.get('op_type', '')).lower() # 'c' or 'p'
-            transaction_type = str(leg_data.get('tr_type', '')).lower() # 'b' or 's'
-            # Get lots/size for potential later use if calculating portfolio greeks
-            lots = _safe_get_int(leg_data, 'lot')
-            lot_size = _safe_get_int(leg_data, 'lot_size')
+            days_to_expiry = _safe_get_int(leg_data, 'days_to_expiry')
+            implied_vol_pct = _safe_get_float(leg_data, 'iv')
+            option_type_flag = str(leg_data.get('op_type', '')).lower()
+            transaction_type = str(leg_data.get('tr_type', '')).lower()
+            lots = _safe_get_int(leg_data, 'lot') # Keep for context log
+            lot_size = _safe_get_int(leg_data, 'lot_size') # Keep for context log
 
-            # --- Debug: Log extracted values ---
             logger.debug(f"[{func_name}] {leg_desc} Extracted: K={strike_price}, DTE={days_to_expiry}, IV={implied_vol_pct}%, Type={option_type_flag}, Tr={transaction_type}, Lots={lots}, Size={lot_size}")
-            # --- End Debug ---
 
             # --- Input Validation ---
             error_msg = None
             if strike_price is None or strike_price <= 0: error_msg="Missing/invalid 'strike'"
-            elif days_to_expiry is None or days_to_expiry < 0: error_msg="Missing/invalid 'days_to_expiry'"
-            # Allow IV=0 (placeholder from prep step), but mibian might fail - log warning instead of error here
+            elif days_to_expiry is None or days_to_expiry < 0: error_msg="Missing/invalid 'days_to_expiry' (< 0)" # Allow 0 explicitly
+            # Check IV *before* the DTE=0 adjustment check
             elif implied_vol_pct is None: error_msg="Missing 'iv'"
+            elif implied_vol_pct <= 0:
+                 # Log warning and skip if IV is non-positive, calculation likely invalid
+                 logger.warning(f"[{func_name}] Skipping {leg_desc} due to non-positive IV ({implied_vol_pct}). Data: {leg_data}")
+                 continue
             elif option_type_flag not in ['c', 'p']: error_msg="Invalid 'op_type'"
             elif transaction_type not in ['b', 's']: error_msg="Invalid 'tr_type'"
-            elif lots is None or lot_size is None: error_msg="Missing 'lot' or 'lot_size'" # Need for context even if not used in calc here
+            # Lots/LotSize presence check (optional here, could be done upstream)
+            elif lots is None or lot_size is None: error_msg="Missing 'lot' or 'lot_size' in input data"
 
             if error_msg:
                  logger.warning(f"[{func_name}] Skipping {leg_desc} due to invalid input: {error_msg}. Data: {leg_data}")
                  continue # Skip this leg
 
-            if implied_vol_pct <= 0:
-                 logger.warning(f"[{func_name}] Skipping {leg_desc} due to non-positive IV ({implied_vol_pct}). Data: {leg_data}")
-                 continue # Skip leg if IV is zero or negative
 
-
-            # Mibian calculation (handle near-zero DTE carefully)
+            # --- Mibian Calculation ---
+            # Handle DTE=0: Mibian might fail even with floor. Log and skip if DTE is exactly 0.
+            # Alternatively, keep the floor approach but improve the exception handling below.
+            # Let's try keeping the floor but ensuring failures don't raise ValueError upwards.
+            if days_to_expiry == 0:
+                logger.warning(f"[{func_name}] {leg_desc} DTE is 0. Using small floor (0.0001) for Mibian. Results may be unreliable or calculation might fail.")
             mibian_dte = max(days_to_expiry, 0.0001) # Use small positive floor for DTE
+
             mibian_inputs = [spot_price, strike_price, interest_rate_pct, mibian_dte]
-            volatility_input = implied_vol_pct
-            logger.debug(f"[{func_name}] {leg_desc} Mibian Inputs: {mibian_inputs}, Volatility: {volatility_input}")
+            volatility_input = implied_vol_pct # Already checked > 0
+            logger.debug(f"[{func_name}] {leg_desc} Mibian Inputs: S={spot_price}, K={strike_price}, R={interest_rate_pct}, T={mibian_dte}, IV={volatility_input}")
+
+            # Initialize greeks to NaN or None to indicate failure if needed
+            delta, gamma, theta, vega, rho = np.nan, np.nan, np.nan, np.nan, np.nan
 
             try:
-                # Use specific model based on type for clarity
-                bs_model = mibian.BS(mibian_inputs, volatility=volatility_input) # Calculate BS model once
+                # Calculate BS model once
+                bs_model = mibian.BS(mibian_inputs, volatility=volatility_input)
                 logger.debug(f"[{func_name}] {leg_desc} Mibian model calculated.")
 
+                # Extract Greeks based on type
                 if option_type_flag == 'c':
                     delta = bs_model.callDelta
                     theta = bs_model.callTheta
                     rho = bs_model.callRho
-                    logger.debug(f"[{func_name}] {leg_desc} Call Greeks (Raw): D={delta:.4f}, T={theta:.4f}, R={rho:.4f}")
                 else: # Put
                     delta = bs_model.putDelta
                     theta = bs_model.putTheta
                     rho = bs_model.putRho
-                    logger.debug(f"[{func_name}] {leg_desc} Put Greeks (Raw): D={delta:.4f}, T={theta:.4f}, R={rho:.4f}")
 
-                # Gamma and Vega are the same for calls and puts
+                # Gamma and Vega are the same
                 gamma = bs_model.gamma
                 vega = bs_model.vega
-                logger.debug(f"[{func_name}] {leg_desc} Common Greeks (Raw): G={gamma:.4f}, V={vega:.4f}")
+                logger.debug(f"[{func_name}] {leg_desc} Raw Greeks: D={delta:.4f}, G={gamma:.4f}, T={theta:.4f}, V={vega:.4f}, R={rho:.4f}")
 
             except OverflowError as math_err:
-                 logger.warning(f"[{func_name}] Mibian math error for {leg_desc} (asset {asset}, K={strike_price}, DTE={mibian_dte}, IV={iv}): {math_err}. Skipping greeks for this leg.")
+                 # Log warning and continue (skip leg's greeks)
+                 logger.warning(f"[{func_name}] Mibian math error (Overflow) for {leg_desc} (asset {asset}, K={strike_price}, DTE={mibian_dte}, IV={volatility_input}): {math_err}. Skipping greeks for this leg.")
                  continue # Skip this leg
-            except Exception as mibian_err: # Catch other mibian errors
-                 logger.error(f"[{func_name}] Mibian calculation error for {leg_desc}: {mibian_err}", exc_info=True)
-                 raise ValueError(f"Mibian calculation error") from mibian_err # Re-raise as ValueError
+            except Exception as mibian_err:
+                 # **** MODIFICATION HERE ****
+                 # Log error but DO NOT re-raise ValueError. Instead, just continue to the next leg.
+                 # The NaNs assigned earlier will indicate failure for this leg if needed downstream,
+                 # but for now, we just won't append it to the results.
+                 logger.error(f"[{func_name}] Mibian calculation error for {leg_desc} (asset {asset}, K={strike_price}, DTE={mibian_dte}, IV={volatility_input}): {mibian_err}. Skipping greeks for this leg.", exc_info=True)
+                 continue # Skip this leg
+
+            # --- Check for non-finite results immediately after calculation ---
+            # This check helps catch issues from mibian directly (like NaN or inf)
+            raw_greeks_tuple = (delta, gamma, theta, vega, rho)
+            if any(not np.isfinite(v) for v in raw_greeks_tuple):
+                 logger.warning(f"[{func_name}] Skipping {leg_desc} for {asset} due to non-finite raw Greek result. Raw Greeks: {raw_greeks_tuple}")
+                 continue # Skip this leg
 
             # --- Adjust Sign for Short Positions ---
             sign_multiplier = -1.0 if transaction_type == 's' else 1.0
@@ -1441,38 +1464,43 @@ def calculate_option_greeks(
             rho *= sign_multiplier
             logger.debug(f"[{func_name}] {leg_desc} Greeks (After Sign Adjustment): D={delta:.4f}, G={gamma:.4f}, T={theta:.4f}, V={vega:.4f}, R={rho:.4f}")
 
-
-            # --- Store PER-SHARE Greeks (Unscaled) ---
+            # --- Store PER-SHARE Greeks (Rounded) ---
+            # Round *after* sign adjustment
             calculated_greeks = {
                 'delta': round(delta, 4), 'gamma': round(gamma, 4), 'theta': round(theta, 4),
                 'vega': round(vega, 4), 'rho': round(rho, 4)
             }
 
-            # Check for non-finite values AFTER calculations and sign adjustment
+            # Final check for non-finite values after rounding/sign adjustment (less likely but belt-and-suspenders)
             if any(not np.isfinite(v) for v in calculated_greeks.values()):
-                logger.warning(f"[{func_name}] Skipping {leg_desc} for {asset} due to non-finite Greek result after sign adjustment. Greeks: {calculated_greeks}")
+                logger.warning(f"[{func_name}] Skipping {leg_desc} for {asset} due to non-finite Greek result *after* sign adjustment/rounding. Greeks: {calculated_greeks}")
                 continue # Skip this leg
 
             # Append results for this leg
             input_data_log = { # Log key inputs for debugging
                  'strike': strike_price, 'dte': days_to_expiry, 'iv': implied_vol_pct,
                  'op_type': option_type_flag, 'tr_type': transaction_type,
-                 'spot_used': spot_price, 'rate_used': interest_rate_pct
+                 'spot_used': spot_price, 'rate_used': interest_rate_pct,
+                 'mibian_dte_used': mibian_dte # Log the potentially adjusted DTE
             }
-            leg_result = { 'leg_index': i, 'input_data': input_data_log, 'calculated_greeks_per_share': calculated_greeks }
+            leg_result = {
+                'leg_index': i,
+                'input_data': input_data_log,
+                'calculated_greeks_per_share': calculated_greeks
+            }
             greeks_result_list.append(leg_result)
             logger.debug(f"[{func_name}] {leg_desc} Greek result appended: {leg_result}")
 
         except (ValueError, KeyError, TypeError) as validation_err:
-            # Log expected validation errors as warnings
-            logger.warning(f"[{func_name}] Skipping Greek calculation for {leg_desc} due to invalid input: {validation_err}. Leg data snapshot: strike={leg_data.get('strike')}, dte={leg_data.get('days_to_expiry')}, iv={leg_data.get('iv')}")
+            # Log expected validation errors as warnings and continue
+            logger.warning(f"[{func_name}] Skipping Greek calculation for {leg_desc} due to validation/type error: {validation_err}. Leg data snapshot: strike={leg_data.get('strike')}, dte={leg_data.get('days_to_expiry')}, iv={leg_data.get('iv')}")
             continue # Skip to the next leg
         except Exception as e:
-            # Log unexpected errors more severely
+            # Log unexpected errors more severely and continue
             logger.error(f"[{func_name}] Unexpected error calculating Greeks for {leg_desc}: {e}. Leg data: {leg_data}", exc_info=True)
             continue # Skip to the next leg
 
-    logger.info(f"[{func_name}] Finished calculating PER-SHARE Greeks for {len(greeks_result_list)} valid legs.")
+    logger.info(f"[{func_name}] Finished calculating PER-SHARE Greeks for {len(greeks_result_list)} legs (out of {len(strategy_data)} initially).")
     logger.debug(f"[{func_name}] Returning greeks list: {greeks_result_list}")
     return greeks_result_list
 
