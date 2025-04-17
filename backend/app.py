@@ -39,7 +39,7 @@ import feedparser
 # --- Calculation & Plotting ---
 import numpy as np
 import pandas as pd
-import ploty.graph_objects as go
+import plotly.graph_objects as go
 
 import math
 import mibian
