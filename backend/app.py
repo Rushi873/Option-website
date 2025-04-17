@@ -2818,7 +2818,6 @@ async def get_payoff_chart_endpoint(request: PayoffRequest):
     logger.info(f"[{func_name}] Starting Step 1: Fetch Spot Price...")
     spot_price = None
     try:
-        # Assumes get_spot_price handles its own internal retries/errors appropriately
         spot_response = await get_spot_price(asset)
         spot_price = spot_response.get('spot_price')
         if spot_price is None:
@@ -2827,39 +2826,33 @@ async def get_payoff_chart_endpoint(request: PayoffRequest):
         if spot_price <= 0:
             raise ValueError(f"Invalid spot price value received: {spot_price}")
         logger.info(f"[{func_name}] Spot price fetched successfully: {spot_price}")
-
-    except HTTPException as http_err: # Handle errors specifically raised by get_spot_price
+    except HTTPException as http_err:
         logger.error(f"[{func_name}] HTTP error during spot price fetch: {http_err.detail}")
         raise http_err
-    except (ValueError, TypeError) as val_err: # Handle validation errors after fetching
+    except (ValueError, TypeError) as val_err:
         logger.error(f"[{func_name}] Prerequisite spot price validation failed: {val_err}")
         raise HTTPException(status_code=404, detail=f"Invalid or unavailable spot price data for {asset}: {val_err}")
-    except Exception as e: # Catch-all for unexpected errors during fetch
+    except Exception as e:
         logger.error(f"[{func_name}] Unexpected error fetching spot price: {e}", exc_info=True)
         raise HTTPException(status_code=503, detail=f"Server error fetching initial market data for {asset}")
 
-    # --- Step 2: Prepare Strategy Data (Sync - involves fetching IV/DTE/LotSize per leg) ---
-    # This step is crucial and assumes `prepare_strategy_data` is robust.
+    # --- Step 2: Prepare Strategy Data (Sync) ---
     logger.info(f"[{func_name}] Starting Step 2: Prepare Strategy Data...")
     prepared_strategy_data = None
     try:
         strategy_input_dicts = [leg.dict() for leg in strategy_input]
-        # Pass spot_price if needed by preparation function (e.g., for ATM IV selection)
         prepared_strategy_data = prepare_strategy_data(strategy_input_dicts, asset, spot_price)
-
-        if not prepared_strategy_data: # Check if preparation returned empty list or None
+        if not prepared_strategy_data:
             logger.error(f"[{func_name}] No valid strategy legs remaining after preparation for asset {asset}.")
-            # Raise 400 Bad Request if preparation fails validation fundamentally
             raise HTTPException(status_code=400, detail="Invalid, incomplete, or inconsistent strategy leg data provided. Check input and market data availability.")
         logger.info(f"[{func_name}] Strategy data prepared successfully for {len(prepared_strategy_data)} legs.")
-
-    except HTTPException as http_err: # Re-raise if prepare_strategy_data raises specific HTTP errors
+    except HTTPException as http_err:
         raise http_err
-    except Exception as prep_err: # Catch unexpected errors during preparation
+    except Exception as prep_err:
          logger.error(f"[{func_name}] Error during strategy data preparation: {prep_err}", exc_info=True)
          raise HTTPException(status_code=500, detail=f"Server error preparing strategy data: {prep_err}")
 
-    # --- Step 3: Perform Calculations Concurrently (Using updated functions) ---
+    # --- Step 3: Perform Calculations Concurrently ---
     logger.info(f"[{func_name}] Starting Step 3: Concurrent Calculations...")
     start_calc_time = time.monotonic()
     results = {}
@@ -2869,28 +2862,46 @@ async def get_payoff_chart_endpoint(request: PayoffRequest):
         # --- Run Metrics Calculation First (Fundamental) ---
         logger.debug(f"[{func_name}] Calculating strategy metrics...")
         metrics_result = await asyncio.to_thread(
-            calculate_strategy_metrics, prepared_strategy_data, asset
+            calculate_strategy_metrics,
+            prepared_strategy_data,
+            spot_price,  # <-- CORRECTED ARGUMENT ORDER
+            asset
         )
         if metrics_result is None:
              logger.error(f"[{func_name}] Core strategy metrics calculation failed (returned None). Unable to proceed.")
-             # Raise 500 as this is considered a critical failure for the endpoint's purpose
              raise HTTPException(status_code=500, detail="Core strategy metrics calculation failed. Check leg data validity and server logs.")
         results["metrics"] = metrics_result
         logger.debug(f"[{func_name}] Metrics calculation successful.")
 
-        # --- Run Chart, Tax, Greeks Concurrently (Non-critical if they fail individually) ---
+        # --- Run Chart, Tax, Greeks Concurrently ---
         logger.debug(f"[{func_name}] Calculating Chart, Tax, and Greeks concurrently...")
         tasks = {
-            "chart": asyncio.to_thread(generate_payoff_chart_matplotlib, prepared_strategy_data, asset, spot_price, metrics_result),
-            "tax": asyncio.to_thread(calculate_option_taxes, prepared_strategy_data, spot_price, asset),
-            "greeks": asyncio.to_thread(calculate_option_greeks, prepared_strategy_data, spot_price, asset) # Pass default rate or specific one if needed
+            "chart": asyncio.to_thread( # Correct
+                generate_payoff_chart_matplotlib,
+                prepared_strategy_data,
+                asset,
+                spot_price,
+                metrics_result
+            ),
+            "tax": asyncio.to_thread( # Correct
+                calculate_option_taxes,
+                prepared_strategy_data,
+                spot_price,
+                asset
+            ),
+            "greeks": asyncio.to_thread( # CORRECTED ARGUMENT ORDER
+                calculate_option_greeks,
+                prepared_strategy_data,
+                asset,
+                spot_price
+            )
         }
-        # Gather results, allowing individual tasks to fail without stopping others
+        # Gather results
         task_values = await asyncio.gather(*tasks.values(), return_exceptions=True)
 
-        # --- Process results, checking for exceptions or None/[] returns ---
+        # --- Process results ---
         results_map = list(tasks.keys()) # ["chart", "tax", "greeks"]
-        results["chart_html"] = None # Default values
+        results["chart_html"] = None
         results["tax"] = None
         results["greeks"] = []
 
@@ -2899,27 +2910,18 @@ async def get_payoff_chart_endpoint(request: PayoffRequest):
             task_result = task_values[i]
             if isinstance(task_result, Exception):
                 failed_tasks.append(task_name)
-                logger.error(f"[{func_name}] Exception during concurrent calculation of '{task_name}': {type(task_result).__name__}: {task_result}", exc_info=False) # Log exception info if desired: exc_info=task_result
-                # Keep default result (None or []) on exception
+                logger.error(f"[{func_name}] Exception during concurrent calculation of '{task_name}': {type(task_result).__name__}: {task_result}", exc_info=False)
             else:
-                # Assign successful results (which might still be None or [] depending on the function)
-                if task_name == "chart":
-                    results["chart_html"] = task_result # Expects HTML string or None
-                elif task_name == "tax":
-                    results["tax"] = task_result # Expects dict or None
-                elif task_name == "greeks":
-                    # Function returns list (possibly empty), default to [] if it somehow returned None (defensive)
-                    results["greeks"] = task_result if isinstance(task_result, list) else []
+                if task_name == "chart": results["chart_html"] = task_result
+                elif task_name == "tax": results["tax"] = task_result
+                elif task_name == "greeks": results["greeks"] = task_result if isinstance(task_result, list) else []
 
         if failed_tasks:
              logger.warning(f"[{func_name}] One or more non-critical calculations failed: {', '.join(failed_tasks)}. Results may be partial.")
-             # Partial failure is acceptable for Chart/Tax/Greeks; proceed with available data
 
     except HTTPException as http_err:
-        # Re-raise specific HTTP exceptions (e.g., from metrics calc failure)
         raise http_err
     except Exception as e:
-        # Catch unexpected errors during the calculation coordination phase
         logger.error(f"[{func_name}] Unexpected error during calculation phase: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Unexpected Server Error during strategy analysis.")
 
@@ -2927,37 +2929,26 @@ async def get_payoff_chart_endpoint(request: PayoffRequest):
     logger.info(f"[{func_name}] Calculations finished in {calc_duration:.3f}s")
 
     # --- Step 4: Return Results ---
-    # Base overall success on metrics calculation completion
     success_status = results["metrics"] is not None
     chart_generated = results.get("chart_html") is not None
     tax_calculated = results.get("tax") is not None
-    greeks_calculated = len(results.get("greeks", [])) > 0 # Check if any greeks were actually calculated
+    greeks_calculated = len(results.get("greeks", [])) > 0
 
-    # Construct a user-friendly message based on results
     message = "Analysis complete."
-    if not success_status:
-        message = "Core analysis failed." # Should be caught by HTTPException above, but defensive
-    elif failed_tasks:
-        message = f"Analysis complete, but failed to calculate: {', '.join(failed_tasks)}."
-    elif not chart_generated or not tax_calculated or not greeks_calculated:
-         missing_parts = []
-         if not chart_generated: missing_parts.append("chart")
-         if not tax_calculated: missing_parts.append("taxes")
-         if not greeks_calculated: missing_parts.append("greeks")
-         if missing_parts:
-              message = f"Analysis complete, but some parts are unavailable ({', '.join(missing_parts)})."
+    if not success_status: message = "Core analysis failed."
+    elif failed_tasks: message = f"Analysis complete, but failed to calculate: {', '.join(failed_tasks)}."
+    else:
+        missing_parts = []
+        if not chart_generated: missing_parts.append("chart")
+        if not tax_calculated: missing_parts.append("taxes")
+        if not greeks_calculated: missing_parts.append("greeks")
+        if missing_parts: message = f"Analysis complete, but some parts are unavailable ({', '.join(missing_parts)})."
 
-
-    # Structure the final response clearly
     final_response = {
-        "success": success_status,
-        "message": message,
-        "metrics": results.get("metrics"),           # Contains metrics object or None (if failed)
-        "charges": results.get("tax"),               # Contains tax object or None
-        "greeks": results.get("greeks", []),         # Contains list of greeks per leg (possibly empty)
-        "chart_html_content": results.get("chart_html") # Contains Plotly HTML string or None
+        "success": success_status, "message": message,
+        "metrics": results.get("metrics"), "charges": results.get("tax"),
+        "greeks": results.get("greeks", []), "chart_html_content": results.get("chart_html")
     }
-
     logger.info(f"[{func_name}] Returning response. Success: {success_status}, Chart: {chart_generated}, Tax: {tax_calculated}, Greeks: {greeks_calculated}")
     return final_response
 
