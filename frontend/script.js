@@ -1347,72 +1347,41 @@ async function fetchPayoffChart() {
     const updateButton = document.querySelector(SELECTORS.updateChartButton);
 
     // --- Input Validation ---
-    if (!asset) {
-        alert("Please select an asset.");
-        return;
-    }
-    if (strategyPositions.length === 0) {
-        resetResultsUI(); // Clear UI if no positions
-        alert("Please add positions to the strategy first.");
-        return;
-    }
-    if (!chartContainer) {
-        logger.error("Payoff chart container element not found in the DOM.");
-        return;
-    }
+    if (!asset) { alert("Please select an asset."); return; }
+    if (strategyPositions.length === 0) { resetResultsUI(); alert("Please add positions first."); return; }
+    if (!chartContainer) { logger.error("Payoff chart container element not found."); return; }
 
     // --- Set Loading States ---
     logger.info("Initiating payoff chart fetch and calculations...");
-    setElementState(SELECTORS.payoffChartContainer, 'loading', 'Generating results...');
+    setElementState(SELECTORS.payoffChartContainer, 'loading', 'Generating chart data...'); // Update message
     setElementState(SELECTORS.taxInfoContainer, 'loading', 'Calculating...');
     setElementState(SELECTORS.greeksTable, 'loading', 'Calculating...');
-    setElementState(SELECTORS.costBreakdownContainer, 'hidden'); // Hide cost breakdown during load
-
-    // Reset metrics to loading state
+    setElementState(SELECTORS.costBreakdownContainer, 'hidden');
     displayMetric("...", SELECTORS.maxProfitDisplay);
     displayMetric("...", SELECTORS.maxLossDisplay);
     displayMetric("...", SELECTORS.breakevenDisplay);
     displayMetric("...", SELECTORS.rewardToRiskDisplay);
     displayMetric("...", SELECTORS.netPremiumDisplay);
-
     if (updateButton) updateButton.disabled = true;
 
     // --- Prepare Request Data ---
     let dataIsValid = true;
     const requestStrategy = strategyPositions.map((pos, index) => {
-        // Recalculate DTE relative to today before sending
         const currentDTE = calculateDaysToExpiry(pos.expiry_date);
-        if (currentDTE === null) {
-            logger.error(`Invalid expiry date found for leg ${index + 1} during final validation.`);
-            dataIsValid = false;
-        }
-        // Ensure IV is present (double check)
-        if (pos.iv === null || pos.iv === undefined) {
-            logger.warn(`Missing IV for leg ${index + 1} (${pos.option_type} ${pos.strike_price}). Greeks might be inaccurate or missing.`);
-            // Backend might handle null IV, proceed for now
-        }
-
-        // Ensure required fields are strings where expected by Pydantic model/backend
+        if (currentDTE === null) { logger.error(`Invalid expiry date leg ${index + 1}.`); dataIsValid = false; }
+        if (pos.iv === null || pos.iv === undefined) { logger.warn(`Missing IV leg ${index + 1}.`); }
         return {
-            option_type: pos.option_type,       // 'CE' or 'PE'
-            strike_price: String(pos.strike_price), // Send as string
-            tr_type: pos.lots >= 0 ? "b" : "s", // Determine buy/sell from sign
-            option_price: String(pos.last_price),   // Send as string (premium per share)
-            expiry_date: pos.expiry_date,         // YYYY-MM-DD string
-            lots: String(Math.abs(pos.lots)),   // Send absolute lots as string
-            lot_size: null,                     // Backend determines default if null
-            // Include IV and DTE for Greeks/other calculations
-            iv: pos.iv,                         // Send stored IV (can be null)
-            days_to_expiry: currentDTE,         // Send current DTE (can be null if expiry invalid)
+            option_type: pos.option_type, strike_price: String(pos.strike_price),
+            tr_type: pos.lots >= 0 ? "b" : "s", option_price: String(pos.last_price),
+            expiry_date: pos.expiry_date, lots: String(Math.abs(pos.lots)),
+            lot_size: null, iv: pos.iv, days_to_expiry: currentDTE,
         };
     });
 
     if (!dataIsValid) {
-        alert("Invalid expiry date found in one or more legs. Cannot calculate.");
-        setElementState(SELECTORS.payoffChartContainer, 'error', 'Invalid expiry date found.');
-        // Reset other loading states too if desired
-        setElementState(SELECTORS.taxInfoContainer, 'error', 'Input Error');
-        setElementState(SELECTORS.greeksTable, 'error', 'Input Error');
+        alert("Invalid expiry date found. Cannot calculate.");
+        setElementState(SELECTORS.payoffChartContainer, 'error', 'Invalid expiry date.');
+        // Reset other states if desired
         if (updateButton) updateButton.disabled = false;
         return;
     }
@@ -1423,127 +1392,159 @@ async function fetchPayoffChart() {
     // --- Fetch API and Handle Response ---
     try {
         const data = await fetchAPI('/get_payoff_chart', {
-            method: 'POST',
-            body: JSON.stringify(requestData)
+            method: 'POST', body: JSON.stringify(requestData)
         });
         logger.debug("Received response from /get_payoff_chart:", data);
 
-        // --- Render Plotly Chart HTML ---
-        // !! Changed from image_base64 to chart_html_content !!
-        if (data && data.chart_html_content) {
-            chartContainer.innerHTML = ""; // Clear loading/placeholder first
-            // Directly inject the HTML string received from the backend
-            chartContainer.innerHTML = data.chart_html_content;
-            setElementState(SELECTORS.payoffChartContainer, 'content');
-            logger.info("Successfully injected Plotly chart HTML.");
+        // --- Render Plotly Chart from JSON --- ### MODIFIED SECTION ###
+        // Check for the new key 'chart_figure_json' (or whatever you name it in the endpoint response)
+        if (data && data.chart_figure_json) {
+            chartContainer.innerHTML = ""; // Clear placeholder/previous chart/error
 
-            // Since Plotly might render slightly after injection, ensure container is visible
-             chartContainer.style.display = '';
+            try {
+                // Check if Plotly library is loaded (essential!)
+                if (typeof Plotly === 'undefined') {
+                    logger.error("Plotly.js library is not loaded. Cannot render chart.");
+                    setElementState(SELECTORS.payoffChartContainer, 'error', 'Plotly library failed to load. Check network or script tags.');
+                    // No return here, proceed to show other results if available
+                } else {
+                    // Parse the JSON string from the backend
+                    const figure = JSON.parse(data.chart_figure_json);
 
-            // Optional: Re-run Plotly layout if needed (usually not necessary if responsive)
-            // Example: const chartDiv = chartContainer.querySelector('.plotly-graph-div');
-            // if (chartDiv && Plotly) { Plotly.Plots.resize(chartDiv); }
+                    // Configuration options for the plot
+                    const plotConfig = {
+                        responsive: true,      // Make chart responsive to container size
+                        displaylogo: false,    // Hide the Plotly logo
+                        modeBarButtonsToRemove: ['sendDataToCloud', 'lasso2d', 'select2d'] // Remove less useful buttons
+                    };
 
-        } else {
-            // Handle case where backend succeeded overall but chart generation failed or content is missing
-            logger.error("Payoff chart HTML content missing in response or data is null.");
-            setElementState(SELECTORS.payoffChartContainer, 'error', 'Chart generation failed or HTML missing.');
+                    // Use Plotly.react or Plotly.newPlot to render the chart
+                    // Plotly.react is generally better for updates if the container might already have a chart
+                    // Target the chartContainer directly using its ID
+                    await Plotly.react(chartContainer.id, figure.data, figure.layout, plotConfig);
+
+                    setElementState(SELECTORS.payoffChartContainer, 'content'); // Set state AFTER successful rendering
+                    logger.info("Successfully rendered Plotly chart from JSON.");
+                    chartContainer.style.display = ''; // Ensure container is visible
+
+                 } // End if Plotly defined
+
+            } catch (e) {
+                logger.error("Error parsing Plotly JSON or rendering chart:", e);
+                setElementState(SELECTORS.payoffChartContainer, 'error', 'Failed to parse or render chart data.');
+                // Optionally display raw JSON for debugging:
+                // const pre = document.createElement('pre');
+                // pre.textContent = JSON.stringify(JSON.parse(data.chart_figure_json), null, 2);
+                // chartContainer.appendChild(pre);
+            }
+
+        } else if (data && data.success) { // Backend succeeded but chart is missing
+             logger.error("Payoff chart JSON data missing in successful response.");
+             setElementState(SELECTORS.payoffChartContainer, 'error', 'Chart data generation failed on backend.');
+        } else if (!data?.success) { // Backend indicated failure overall
+             logger.error("Backend analysis failed, chart not generated.");
+             // Keep the loading/error state from the initial setup or set specific error
+             setElementState(SELECTORS.payoffChartContainer, 'error', data?.message || 'Backend analysis failed.');
+        } else { // data is null or unexpected structure
+             logger.error("Received null or invalid data structure from backend.");
+             setElementState(SELECTORS.payoffChartContainer, 'error', 'Invalid response from server.');
         }
+
 
         // --- Display Metrics, Breakdown, Taxes, Greeks ---
-        // (This part remains largely the same as it depends on the structure of metrics, charges, greeks)
-
-        // Metrics (handle potential null/undefined data safely)
-        const metricsData = data?.metrics?.metrics; // Access nested metrics
+        // (This part remains the same as before)
+        const metricsData = data?.metrics?.metrics;
         if (metricsData) {
-            displayMetric(metricsData.max_profit, SELECTORS.maxProfitDisplay, "", "", 2, true);
-            displayMetric(metricsData.max_loss, SELECTORS.maxLossDisplay, "", "", 2, true);
-            // Format breakevens nicely
+            // Ensure displayMetric handles strings like "∞", "-∞", "Loss"
+            displayMetric(metricsData.max_profit, SELECTORS.maxProfitDisplay);
+            displayMetric(metricsData.max_loss, SELECTORS.maxLossDisplay);
             const breakevens = Array.isArray(metricsData.breakeven_points) && metricsData.breakeven_points.length > 0
                 ? metricsData.breakeven_points.map(p => formatCurrency(p, 2, 'N/A', '₹')).join(', ')
-                : (metricsData.max_loss === 0 && metricsData.max_profit > 0 ? "Profitable Everywhere" : "None"); // Handle edge cases like sold puts
-            displayMetric(breakevens, SELECTORS.breakevenDisplay); // Display formatted string
-            // Format RR ratio (handles Infinity/-Infinity from backend if needed, or calculates here)
+                : (metricsData.max_loss === "0.00" && metricsData.max_profit !== "0.00" && metricsData.max_profit !== "Loss" ? "Always Profitable/BE" : "None");
+            displayMetric(breakevens, SELECTORS.breakevenDisplay);
             displayMetric(metricsData.reward_to_risk_ratio, SELECTORS.rewardToRiskDisplay);
-            // Determine prefix for Net Premium based on sign
-            const netPremiumValue = metricsData.net_premium;
+            const netPremiumValue = metricsData.net_premium; // This is a number
             const netPremiumPrefix = (typeof netPremiumValue === 'number' && netPremiumValue >= 0) ? "Net Credit: " : "Net Debit: ";
-            displayMetric(Math.abs(netPremiumValue), SELECTORS.netPremiumDisplay, netPremiumPrefix, "", 2, true); // Display absolute value with prefix
-        } else {
-            logger.warn("Metrics data missing or invalid in response.");
-            displayMetric("N/A", SELECTORS.maxProfitDisplay);
-            displayMetric("N/A", SELECTORS.maxLossDisplay);
-            displayMetric("N/A", SELECTORS.breakevenDisplay);
-            displayMetric("N/A", SELECTORS.rewardToRiskDisplay);
-            displayMetric("N/A", SELECTORS.netPremiumDisplay);
-        }
+            displayMetric(Math.abs(netPremiumValue), SELECTORS.netPremiumDisplay, netPremiumPrefix, "", 2, true);
+        } else if (data?.success) { // Only show N/A if backend succeeded but metrics are missing
+            logger.warn("Metrics data missing in successful response.");
+            displayMetric("N/A", SELECTORS.maxProfitDisplay); // Set N/A for missing metrics
+            // ... set N/A for others ...
+        } // If !data.success, error state is handled in catch block
 
-        // Cost Breakdown (Premium focus - assuming structure from metrics response)
+        // Cost Breakdown
         const breakdownList = document.querySelector(SELECTORS.costBreakdownList);
         const breakdownContainer = document.querySelector(SELECTORS.costBreakdownContainer);
         const costBreakdownData = data?.metrics?.cost_breakdown_per_leg;
         if (breakdownList && breakdownContainer && Array.isArray(costBreakdownData) && costBreakdownData.length > 0) {
-            breakdownList.innerHTML = ""; // Clear previous
+           // ... (render breakdown logic - no change needed) ...
+            breakdownList.innerHTML = "";
             costBreakdownData.forEach(item => {
                 const li = document.createElement("li");
                 const absPremium = Math.abs(item.total_premium);
-                // Use effect ('Paid'/'Received') which should be calculated by backend metric function
                 const premiumEffect = item.effect === 'Paid' ? `Paid ${formatCurrency(absPremium)}` : `Received ${formatCurrency(absPremium)}`;
-                // Construct descriptive text
                 li.textContent = `${item.action} ${item.lots} Lot(s) [${item.quantity} Qty] ${item.type} ${item.strike} @ ${formatCurrency(item.premium_per_share)} (${premiumEffect} Total)`;
                 breakdownList.appendChild(li);
             });
-            setElementState(SELECTORS.costBreakdownContainer, 'content'); // Use state to make visible
-            breakdownContainer.style.display = ""; // Ensure visible
-            breakdownContainer.open = false; // Default closed state for details summary
+            setElementState(SELECTORS.costBreakdownContainer, 'content');
+            breakdownContainer.style.display = "";
+            breakdownContainer.open = false;
         } else if (breakdownContainer) {
-            logger.info("No cost breakdown data available or element not found.");
-            setElementState(SELECTORS.costBreakdownContainer, 'hidden'); // Hide if no data
+           setElementState(SELECTORS.costBreakdownContainer, 'hidden');
         }
 
-        // Taxes/Charges (handle potential null/undefined data)
+        // Taxes/Charges
         const taxContainer = document.querySelector(SELECTORS.taxInfoContainer);
         if (taxContainer) {
             if (data?.charges) {
-                // Assuming renderTaxTable function exists and handles the 'charges' object structure
-                renderTaxTable(taxContainer, data.charges);
+                renderTaxTable(taxContainer, data.charges); // Assumes renderTaxTable exists
                 setElementState(SELECTORS.taxInfoContainer, 'content');
-            } else {
-                logger.warn("Charges data missing or null in response.");
-                // Provide a clear message if data is missing
-                taxContainer.innerHTML = "<p class='text-muted'>Charge calculation data unavailable.</p>";
-                setElementState(SELECTORS.taxInfoContainer, 'content'); // Set content state even for placeholder message
+            } else if (data?.success) { // Only show unavailable if calculation missing in successful response
+                taxContainer.innerHTML = "<p class='text-muted'>Charge data unavailable.</p>";
+                setElementState(SELECTORS.taxInfoContainer, 'content');
             }
-        } else {
-            logger.error("Tax info container element not found.");
-        }
+        } else { logger.error("Tax info container element not found."); }
 
-        // Greeks (handle potential null/undefined data)
+        // Greeks
         const greeksTable = document.querySelector(SELECTORS.greeksTable);
         if (greeksTable) {
-            // Pass the greeks list (which could be null/undefined/empty array) directly
-            // Assuming renderGreeksTable handles these cases gracefully
-            renderGreeksTable(greeksTable, data?.greeks);
-            setElementState(SELECTORS.greeksTable, 'content'); // Set content state after rendering
-        } else {
-            logger.error("Greeks table element not found.");
+            renderGreeksTable(greeksTable, data?.greeks); // Assumes renderGreeksTable handles null/empty list
+            setElementState(SELECTORS.greeksTable, 'content');
+        } else { logger.error("Greeks table element not found."); }
+
+        // Display Backend Status Message (Optional Enhancement)
+        const messageContainer = document.querySelector(SELECTORS.statusMessageContainer); // Add this selector if desired
+        if (messageContainer) {
+            if (data?.message) {
+                messageContainer.textContent = data.message;
+                messageContainer.className = data.success ? 'status-message success' : 'status-message warning'; // Example classes
+            } else { messageContainer.textContent = ''; }
         }
+
 
     } catch (error) {
         logger.error("Error fetching or displaying payoff results:", error);
-        // Set error states for all results areas for clarity
+        // Set error states for all results areas
         setElementState(SELECTORS.payoffChartContainer, 'error', `Calculation Error: ${error.message || 'Unknown error'}`);
+        // Set metrics to Error
         displayMetric("Error", SELECTORS.maxProfitDisplay);
         displayMetric("Error", SELECTORS.maxLossDisplay);
         displayMetric("Error", SELECTORS.breakevenDisplay);
         displayMetric("Error", SELECTORS.rewardToRiskDisplay);
         displayMetric("Error", SELECTORS.netPremiumDisplay);
+        // Set other sections to Error
         setElementState(SELECTORS.taxInfoContainer, 'error', 'Calculation Failed');
         setElementState(SELECTORS.greeksTable, 'error', 'Calculation Failed');
-        setElementState(SELECTORS.costBreakdownContainer, 'hidden'); // Hide breakdown on error
+        setElementState(SELECTORS.costBreakdownContainer, 'hidden');
+        // Display error message (Optional Enhancement)
+         const messageContainer = document.querySelector(SELECTORS.statusMessageContainer);
+         if (messageContainer) {
+              messageContainer.textContent = `Error: ${error.message || 'Unknown API error'}`;
+              messageContainer.className = 'status-message error';
+         }
 
     } finally {
-        // Always re-enable the button regardless of success or failure
+        // Always re-enable the button
         if (updateButton) updateButton.disabled = false;
         logger.info("Payoff chart fetch and display process finished.");
     }
