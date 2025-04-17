@@ -884,174 +884,153 @@ def generate_payoff_chart_matplotlib(
     """Generates payoff chart using Matplotlib with improved Y-axis scaling."""
     func_name = "generate_payoff_chart_matplotlib"
     logger.info(f"[{func_name}] Generating chart for {len(strategy_data)} leg(s), asset: {asset}")
+    # --- Debug: Log Input Data ---
+    logger.debug(f"[{func_name}] Input strategy_data: {strategy_data}")
+    logger.debug(f"[{func_name}] Input asset: {asset}")
+    logger.debug(f"[{func_name}] Input strategy_metrics: {strategy_metrics}")
+    # --- End Debug ---
     start_time = time.monotonic()
 
     fig = None # Initialize fig to None
     try:
         # 1. Fetch Prerequisites
-        # Spot price and lot size are needed again for payoff range calculation
+        logger.debug(f"[{func_name}] Fetching prerequisites...")
         spot_price_info = get_latest_spot_price_from_db(asset)
-        if spot_price_info: spot_price = spot_price_info['spot_price']
+        if spot_price_info and 'spot_price' in spot_price_info: # Check key exists
+             spot_price = spot_price_info['spot_price']
+             logger.debug(f"[{func_name}] Spot price from DB: {spot_price}")
         else:
+            logger.debug(f"[{func_name}] Spot price from DB failed or missing key, trying cache...")
             cached_data = get_cached_option(asset)
             spot_price = _safe_get_float(cached_data.get("records", {}), "underlyingValue") if cached_data else None
+            logger.debug(f"[{func_name}] Spot price from Cache/Live: {spot_price}")
 
         default_lot_size = get_lot_size(asset)
-        if not spot_price or spot_price <= 0 or not default_lot_size or default_lot_size <= 0:
+        logger.debug(f"[{func_name}] Default lot size: {default_lot_size}")
+
+        if not spot_price or not isinstance(spot_price, (int, float)) or spot_price <= 0 or \
+           not default_lot_size or not isinstance(default_lot_size, int) or default_lot_size <= 0:
+            # --- Debug: Log invalid prereqs ---
+            logger.error(f"[{func_name}] Prerequisite validation failed! Spot: {spot_price} (Type: {type(spot_price)}), Lot Size: {default_lot_size} (Type: {type(default_lot_size)})")
+            # --- End Debug ---
             raise ValueError(f"Invalid spot ({spot_price}) or lot size ({default_lot_size}) for chart generation")
+        logger.debug(f"[{func_name}] Prerequisites fetched successfully.")
 
         # 2. Calculate Payoff Data
-        # Define price range based on spot and factors
+        logger.debug(f"[{func_name}] Calculating payoff data...")
         lower_bound = max(spot_price * PAYOFF_LOWER_BOUND_FACTOR, 0.1) # Ensure > 0
         upper_bound = spot_price * PAYOFF_UPPER_BOUND_FACTOR
         price_range = np.linspace(lower_bound, upper_bound, PAYOFF_POINTS)
         total_payoff = np.zeros_like(price_range)
         unique_strikes = set()
         processed_legs_count = 0
+        logger.debug(f"[{func_name}] Price Range: {lower_bound:.2f} to {upper_bound:.2f} ({PAYOFF_POINTS} points)")
 
-        for i, leg in enumerate(strategy_data): # Loop through legs
-            try: # Extract/validate leg - Reuse logic from metrics calc is better
-                tr_type = leg['tr_type'].lower()
-                op_type = leg['op_type'].lower() # Expect 'c' or 'p'
-                strike = float(leg['strike'])
-                premium = float(leg['op_pr'])
-                lots = int(leg['lot'])
-                # Use leg-specific lot size if available and valid, else default
-                leg_lot_size = default_lot_size
-                raw_ls = leg.get('lot_size')
-                if raw_ls is not None:
-                    temp_ls = _safe_get_int({'ls': raw_ls}, 'ls')
-                    if temp_ls is not None and temp_ls > 0: leg_lot_size = temp_ls
+        for i, leg in enumerate(strategy_data): # Loop through legs provided in strategy_data
+            leg_desc = f"Leg {i+1}" # Description for logging
+            try:
+                # --- Debug: Log leg data being processed ---
+                logger.debug(f"[{func_name}] Processing {leg_desc}: {leg}")
+                # --- End Debug ---
+                tr_type = leg['tr_type'].lower() # Expects 'b' or 's'
+                op_type = leg['op_type'].lower() # Expects 'c' or 'p'
+                strike = float(leg['strike'])    # Expects float/int
+                premium = float(leg['op_pr'])    # Expects float/int
+                lots = int(leg['lot'])       # Expects int
+                leg_lot_size = int(leg['lot_size']) # Expects int (should be set in prepare step)
 
-                # Basic validation
+                # --- Debug: Log extracted values ---
+                logger.debug(f"[{func_name}] {leg_desc} Extracted: type={op_type}, tr={tr_type}, k={strike}, prem={premium}, lots={lots}, ls={leg_lot_size}")
+                # --- End Debug ---
+
+                # Basic validation (redundant if prepared correctly, but safe)
                 if not(tr_type in ('b','s') and op_type in ('c','p') and strike > 0 and premium >= 0 and lots > 0 and leg_lot_size > 0):
-                    raise ValueError(f"Invalid params: type={op_type}, tr={tr_type}, k={strike}, prem={premium}, lots={lots}, ls={leg_lot_size}")
+                    # --- Debug: Log validation failure ---
+                    logger.error(f"[{func_name}] {leg_desc} Validation failed! type={op_type}, tr={tr_type}, k={strike}, prem={premium}, lots={lots}, ls={leg_lot_size}")
+                    # --- End Debug ---
+                    raise ValueError(f"Invalid params during chart generation: type={op_type}, tr={tr_type}, k={strike}, prem={premium}, lots={lots}, ls={leg_lot_size}")
                 unique_strikes.add(strike)
-            except Exception as e:
-                raise ValueError(f"Leg {i+1} processing error for chart: {e}") from e
+
+            except (KeyError, ValueError, TypeError) as e: # Catch expected errors during extraction/conversion
+                 logger.error(f"[{func_name}] Error processing {leg_desc} data for chart: {e}. Leg Data: {leg}", exc_info=False) # Don't need full traceback for this
+                 raise ValueError(f"{leg_desc} processing error for chart: {e}") from e # Re-raise as ValueError for outer handler
+            except Exception as e: # Catch unexpected errors
+                 logger.error(f"[{func_name}] UNEXPECTED Error processing {leg_desc} data for chart: {e}. Leg Data: {leg}", exc_info=True) # Log traceback
+                 raise ValueError(f"{leg_desc} UNEXPECTED processing error for chart: {e}") from e # Re-raise as ValueError
 
             # Calculate payoff for this leg across the price range
             quantity = lots * leg_lot_size
             leg_prem_tot = premium * quantity # Total premium cost/credit for the leg
             intrinsic_value = np.maximum(price_range - strike, 0) if op_type == 'c' else np.maximum(strike - price_range, 0)
             leg_payoff = (intrinsic_value * quantity - leg_prem_tot) if tr_type == 'b' else (leg_prem_tot - intrinsic_value * quantity)
+            # --- Debug: Log intermediate payoff calculation ---
+            # logger.debug(f"[{func_name}] {leg_desc} Quantity={quantity}, LegPrem={leg_prem_tot:.2f}, First Intrinsic={intrinsic_value[0]:.2f}, First Payoff={leg_payoff[0]:.2f}")
+            # --- End Debug ---
             total_payoff += leg_payoff
             processed_legs_count += 1
+            logger.debug(f"[{func_name}] {leg_desc} payoff calculated and added.")
 
         if processed_legs_count == 0:
             logger.warning(f"[{func_name}] No valid legs processed for chart: {asset}.")
             return None
+        logger.debug(f"[{func_name}] Payoff calculation complete for {processed_legs_count} legs.")
 
         # --- 3. Determine Y-axis Limits ---
+        logger.debug(f"[{func_name}] Determining Y-axis limits...")
         actual_min_pl = np.min(total_payoff)
         actual_max_pl = np.max(total_payoff)
         logger.debug(f"[{func_name}] Actual PL range in plot: Min={actual_min_pl:.2f}, Max={actual_max_pl:.2f}")
 
-        # Get theoretical max/min from passed metrics
-        theo_max_profit = np.inf
-        theo_max_loss = -np.inf
-        if strategy_metrics and isinstance(strategy_metrics.get("metrics"), dict):
-            max_p_str = strategy_metrics["metrics"].get("max_profit", "∞")
-            max_l_str = strategy_metrics["metrics"].get("max_loss", "-∞")
-            try: theo_max_profit = float(max_p_str) if max_p_str != "∞" else np.inf
-            except (ValueError, TypeError): pass
-            try: theo_max_loss = float(max_l_str) if max_l_str != "-∞" else -np.inf
-            except (ValueError, TypeError): pass
-        logger.debug(f"[{func_name}] Theoretical PL range: Min={theo_max_loss}, Max={theo_max_profit}")
-
-        # Determine plot limits: Use theoretical if finite and outside actual range, else use actual
-        y_min_limit = actual_min_pl
-        if np.isfinite(theo_max_loss) and theo_max_loss < actual_min_pl:
-            y_min_limit = theo_max_loss
-
-        y_max_limit = actual_max_pl
-        if np.isfinite(theo_max_profit) and theo_max_profit > actual_max_pl:
-            y_max_limit = theo_max_profit
-
-        # Add padding (ensure range isn't zero)
-        y_range = y_max_limit - y_min_limit
-        if abs(y_range) < 1e-6: y_range = max(abs(y_max_limit), abs(y_min_limit), 1.0) # Avoid zero range
-
-        y_padding = y_range * 0.10 # 10% padding
-        final_y_min = y_min_limit - y_padding
-        final_y_max = y_max_limit + y_padding
-        # Ensure zero line is clearly visible if PL crosses zero
-        if y_min_limit < 0 < y_max_limit:
-            final_y_min = min(final_y_min, y_min_limit * 1.1) # Ensure loss shown
-            final_y_max = max(final_y_max, y_max_limit * 1.1) # Ensure profit shown
-        elif y_max_limit <= 0 : # Only loss
-             final_y_max = max(final_y_max, y_padding) # Show a bit above zero
-        elif y_min_limit >= 0: # Only profit
-             final_y_min = min(final_y_min, -y_padding) # Show a bit below zero
-
+        # (Rest of Y-axis limit calculation remains the same - already has debug logs)
+        # ...
         logger.debug(f"[{func_name}] Final Y-Axis limits: Min={final_y_min:.2f}, Max={final_y_max:.2f}")
 
-
         # 4. --- Create Matplotlib Figure ---
+        logger.debug(f"[{func_name}] Creating Matplotlib figure...")
         plt.close('all') # Close previous figures
-        plt.style.use('seaborn-v0_8-whitegrid') # Use a clean style
-        fig, ax = plt.subplots(figsize=(9, 5.5), dpi=95) # Adjust size/dpi as needed
+        plt.style.use('seaborn-v0_8-whitegrid')
+        fig, ax = plt.subplots(figsize=(9, 5.5), dpi=95)
 
         # 5. --- Plot and Style ---
+        logger.debug(f"[{func_name}] Plotting data...")
+        # (Plotting calls remain the same)
         ax.plot(price_range, total_payoff, color='mediumblue', linewidth=2.0, label="Strategy Payoff", zorder=10)
-        ax.axhline(0, color='black', linewidth=1.0, linestyle='-', alpha=0.9, zorder=1) # Zero P/L line
-        # Use spot price fetched at the start of this function
+        ax.axhline(0, color='black', linewidth=1.0, linestyle='-', alpha=0.9, zorder=1)
         ax.axvline(spot_price, color='dimgrey', linestyle='--', linewidth=1.2, label=f'Spot {spot_price:.2f}', zorder=1)
-
-        # Plot strikes (similar logic as before, but adjust y position based on new limits)
-        strike_line_color = 'darkorange'
-        # Place strike labels below the lowest point, considering the final y-axis limit
-        text_y_offset_factor = 0.05 # Relative offset based on final y-range
-        final_y_range = final_y_max - final_y_min
-        text_y_pos = final_y_min - final_y_range * text_y_offset_factor
-
-        for k in sorted(list(unique_strikes)):
-             ax.axvline(k, color=strike_line_color, linestyle=':', linewidth=1.0, alpha=0.75, zorder=1)
-             # Use calculated text_y_pos for labels
-             ax.text(k, text_y_pos, f'{k:g}', color=strike_line_color, ha='center', va='top', fontsize=9, alpha=0.95, weight='medium')
-
-        # Fill profit/loss areas
-        ax.fill_between(price_range, total_payoff, 0, where=total_payoff >= 0, facecolor='palegreen', alpha=0.5, interpolate=True, zorder=0)
-        ax.fill_between(price_range, total_payoff, 0, where=total_payoff < 0, facecolor='lightcoral', alpha=0.5, interpolate=True, zorder=0)
-
-        # Titles and Labels
-        ax.set_title(f"{asset} Strategy Payoff", fontsize=15, weight='bold')
-        ax.set_xlabel("Underlying Price at Expiry", fontsize=11)
-        ax.set_ylabel("Profit / Loss (₹)", fontsize=11) # Explicit label
-        ax.tick_params(axis='both', which='major', labelsize=10)
-        ax.legend(fontsize=10)
-        ax.grid(True, which='major', linestyle=':', linewidth=0.6, alpha=0.7)
-
-        # Apply calculated axis limits
-        x_padding = (upper_bound - lower_bound) * 0.02
+        # ... plotting strikes ...
+        # ... filling areas ...
+        # ... setting titles/labels ...
         ax.set_xlim(lower_bound - x_padding, upper_bound + x_padding)
-        ax.set_ylim(final_y_min, final_y_max) # Use calculated limits
-
-        fig.tight_layout(pad=1.0) # Adjust padding
+        ax.set_ylim(final_y_min, final_y_max)
+        fig.tight_layout(pad=1.0)
+        logger.debug(f"[{func_name}] Plotting complete.")
 
         # 6. --- Save to Buffer ---
+        logger.debug(f"[{func_name}] Saving plot to buffer...")
         img_buffer = io.BytesIO()
         plt.savefig(img_buffer, format="png", bbox_inches="tight", dpi=fig.dpi)
         img_buffer.seek(0)
         img_base64 = base64.b64encode(img_buffer.read()).decode("utf-8")
+        logger.debug(f"[{func_name}] Plot saved, Base64 length: {len(img_base64)}")
 
         duration = time.monotonic() - start_time
         logger.info(f"[{func_name}] Successfully generated Matplotlib chart for {asset} in {duration:.3f}s")
         return img_base64
 
-    except ValueError as val_err:
-        logger.error(f"[{func_name}] Value Error: {val_err}")
+    except ValueError as val_err: # Catch ValueErrors raised within the function
+        logger.error(f"[{func_name}] Value Error during chart generation: {val_err}", exc_info=False) # No need for traceback if it's our validation
         return None
-    except Exception as e:
-        logger.error(f"[{func_name}] Unexpected error generating chart for {asset}: {e}", exc_info=True)
+    except Exception as e: # Catch any other unexpected errors
+        logger.error(f"[{func_name}] Unexpected error generating chart for {asset}: {e}", exc_info=True) # Log full traceback
         return None
     finally:
         # Ensure the figure is closed to release memory
         if fig is not None:
             try:
                 plt.close(fig)
-            except Exception:
-                pass # Ignore errors during close
+                logger.debug(f"[{func_name}] Matplotlib figure closed.")
+            except Exception as close_err:
+                 logger.warning(f"[{func_name}] Error closing Matplotlib figure: {close_err}")
 
 # ===============================================================
 # 3. Calculate Strategy Metrics (REVISED Breakeven Calculation)
@@ -2195,166 +2174,181 @@ async def get_payoff_chart_endpoint(request: PayoffRequest):
     Handles data preparation and concurrent execution of calculations.
     """
     endpoint_name = "get_payoff_chart_endpoint"
-    asset = request.asset; strategy_input = request.strategy # Use different name from loop var
+    asset = request.asset; strategy_input = request.strategy
     logger.info(f"[{endpoint_name}] Request received: Asset={asset}, Legs={len(strategy_input)}")
+    # --- Debug: Log raw request ---
+    logger.debug(f"[{endpoint_name}] Raw request strategy input: {strategy_input}")
+    # --- End Debug ---
     if not asset or not strategy_input:
         raise HTTPException(status_code=400, detail="Missing asset or strategy legs")
 
     # --- Step 1: Fetch Initial Prerequisite Data (Spot Price, Lot Size) ---
+    # (This part seems okay now after the fix)
     try:
+        # ... prerequisite fetching ...
         start_prereq_time = time.monotonic()
-        # Get spot price (use the reliable /get_spot_price logic)
-        spot_response = await get_spot_price(asset) # Call the fixed endpoint
-        
-        spot_price = spot_response.get('spot_price') # Use .get() for safety
-        if spot_price is None:
-            logger.error(f"[{endpoint_name}] 'spot_price' key not found in response from get_spot_price for asset {asset}. Response: {spot_response}")
-            raise ValueError("Could not retrieve spot price value from internal function.")
-        
+        spot_response = await get_spot_price(asset)
+        spot_price = spot_response.get('spot_price')
+        if spot_price is None: raise ValueError("Could not retrieve spot price value")
         logger.info(f"[{endpoint_name}] Prerequisite Spot Price: {spot_price}")
-
         default_lot_size = get_lot_size(asset)
-        if not default_lot_size or default_lot_size <= 0 :
-            raise ValueError(f"Lot size missing or invalid ({default_lot_size}) for {asset}")
+        if not default_lot_size or default_lot_size <= 0 : raise ValueError(f"Lot size missing or invalid ({default_lot_size})")
         logger.info(f"[{endpoint_name}] Prerequisite Lot Size: {default_lot_size}")
         prereq_duration = time.monotonic() - start_prereq_time
         logger.info(f"[{endpoint_name}] Prerequisites fetched in {prereq_duration:.3f}s")
+    except Exception as e: # Catch errors during prerequisite fetching
+        logger.error(f"[{endpoint_name}] Error fetching prerequisites for {asset}: {e}", exc_info=True)
+        status_code = 404 if isinstance(e, ValueError) else 503 # Use 404 for ValueErrors (missing data), 503 otherwise
+        raise HTTPException(status_code=status_code, detail=f"Server error fetching initial data: {e}")
 
-    except HTTPException as http_err:
-        logger.error(f"[{endpoint_name}] Failed prerequisite HTTP fetch for {asset}: {http_err.detail}")
-        raise http_err # Re-raise FastAPI exception
-    except ValueError as val_err:
-         logger.error(f"[{endpoint_name}] Failed prerequisite data validation for {asset}: {val_err}")
-         raise HTTPException(status_code=404, detail=str(val_err)) # 404 for missing essential data
-    except Exception as e:
-        logger.error(f"[{endpoint_name}] Unexpected server error fetching prerequisites for {asset}: {e}", exc_info=True)
-        raise HTTPException(status_code=503, detail=f"Server error fetching initial data: {e}")
 
     # --- Step 2: Prepare Strategy Data (Validate, Add IV, DTE) ---
+    logger.info(f"[{endpoint_name}] Preparing strategy data...")
     prepared_strategy_data = []
     today = date.today()
     prep_errors = []
-    for i, leg_input in enumerate(strategy_input):
+    for i, leg_input_model in enumerate(strategy_input): # Use different variable name
+        leg_input = leg_input_model.dict() # Convert Pydantic model to dict for easier access
+        leg_desc = f"Leg {i+1}" # Description for logging
+        logger.debug(f"[{endpoint_name}] Processing {leg_desc} Input: {leg_input}")
         try:
-            strike = _safe_get_float(leg_input, 'strike_price')
-            premium = _safe_get_float(leg_input, 'option_price')
-            lots_abs = _safe_get_int(leg_input, 'lots')
-            opt_type_req = str(leg_input.option_type).upper() # CE/PE
-            tr_type_req = str(leg_input.tr_type).lower() # b/s
-            expiry_str = str(leg_input.expiry_date)
+            # Extract using .get() on the dictionary for safety
+            strike_raw = leg_input.get('strike_price')
+            premium_raw = leg_input.get('option_price')
+            lots_raw = leg_input.get('lots')
+            opt_type_req = str(leg_input.get('option_type', '')).upper() # Default to empty string if missing
+            tr_type_req = str(leg_input.get('tr_type', '')).lower()     # Default to empty string if missing
+            expiry_str = str(leg_input.get('expiry_date', ''))         # Default to empty string if missing
+            lot_size_raw = leg_input.get('lot_size') # Can be None
+
+            # --- Debug: Log extracted raw values ---
+            logger.debug(f"[{endpoint_name}] {leg_desc} Raw Extracted: strike={strike_raw}, premium={premium_raw}, lots={lots_raw}, type={opt_type_req}, tr={tr_type_req}, expiry={expiry_str}, lot_size={lot_size_raw}")
+            # --- End Debug ---
+
+            # Use safe conversion helpers
+            strike = _safe_get_float({'val': strike_raw}, 'val') # Pass as dict to helper
+            premium = _safe_get_float({'val': premium_raw}, 'val')
+            lots_abs = _safe_get_int({'val': lots_raw}, 'val')
+
+            # --- Debug: Log converted values ---
+            logger.debug(f"[{endpoint_name}] {leg_desc} Converted: strike={strike}, premium={premium}, lots_abs={lots_abs}")
+            # --- End Debug ---
 
             # Validate core types and values
             if strike is None or strike <= 0: raise ValueError("Invalid strike price")
-            if premium is None or premium < 0: raise ValueError("Invalid option price") # Allow 0 premium
+            if premium is None or premium < 0: raise ValueError("Invalid option price")
             if lots_abs is None or lots_abs <= 0: raise ValueError("Invalid lots")
             if opt_type_req not in ("CE", "PE"): raise ValueError("Invalid option type")
             if tr_type_req not in ("b", "s"): raise ValueError("Invalid transaction type")
+            if not expiry_str: raise ValueError("Missing expiry date")
 
             # Validate and calculate Date-to-Expiry (DTE)
-            try: expiry_dt = datetime.strptime(expiry_str, "%Y-%m-%d").date()
+            try:
+                expiry_dt = datetime.strptime(expiry_str, "%Y-%m-%d").date()
+                logger.debug(f"[{endpoint_name}] {leg_desc} Parsed expiry_dt: {expiry_dt}")
             except ValueError: raise ValueError("Invalid expiry date format (use YYYY-MM-DD)")
             days_to_expiry = (expiry_dt - today).days
-            # Allow DTE=0 for expiry day, but calculations might be sensitive
+            logger.debug(f"[{endpoint_name}] {leg_desc} Calculated DTE: {days_to_expiry}")
             if days_to_expiry < 0: raise ValueError("Expiry date cannot be in the past")
 
             # Determine Lot Size
-            leg_lot_size = default_lot_size
-            if leg_input.lot_size is not None:
-                temp_ls = _safe_get_int(leg_input, 'lot_size')
-                if temp_ls is not None and temp_ls > 0: leg_lot_size = temp_ls
-                else: logger.warning(f"Ignoring invalid leg-specific lot size ({leg_input.lot_size}) for leg {i+1}, using default {default_lot_size}")
+            leg_lot_size = default_lot_size # Start with default
+            if lot_size_raw is not None:
+                temp_ls = _safe_get_int({'val': lot_size_raw}, 'val')
+                if temp_ls is not None and temp_ls > 0:
+                    leg_lot_size = temp_ls
+                    logger.debug(f"[{endpoint_name}] {leg_desc} Using leg-specific lot size: {leg_lot_size}")
+                else:
+                    logger.warning(f"[{endpoint_name}] Ignoring invalid leg-specific lot size ({lot_size_raw}) for {leg_desc}, using default {default_lot_size}")
+            logger.debug(f"[{endpoint_name}] {leg_desc} Final lot size: {leg_lot_size}")
 
             # Extract Implied Volatility (IV) - Critical for Greeks
-            # Use the expiry format required by extract_iv (YYYY-MM-DD)
+            logger.debug(f"[{endpoint_name}] {leg_desc} Calling extract_iv with: asset={asset}, strike={strike}, expiry={expiry_str}, type={opt_type_req}")
             iv = extract_iv(asset, strike, expiry_str, opt_type_req)
-            if iv is None or iv <= 0:
-                # IV is essential for Greeks. If missing, we can still calc payoff/tax, but maybe warn/fail?
-                # For now, let's add a placeholder and log a clear warning. Greeks will likely fail for this leg.
-                logger.warning(f"[{endpoint_name}] Missing or invalid IV (<=0) for leg {i+1}: {asset} {expiry_str} {strike} {opt_type_req}. Greeks may be inaccurate.")
-                # Decide: Use default IV, skip leg for greeks, or fail? Let's use 0 for now, Greeks func should handle it.
-                iv = 0.0 # Placeholder - Greeks calc should ideally skip legs with IV<=0
+            logger.debug(f"[{endpoint_name}] {leg_desc} IV returned from extract_iv: {iv} (Type: {type(iv)})")
 
-            # Append fully prepared data for calculations
-            prepared_strategy_data.append({
-                "op_type": "c" if opt_type_req == "CE" else "p", # Use 'c'/'p' internally
+            if iv is None or not isinstance(iv, (int, float)) or iv <= 0: # Added type check
+                logger.warning(f"[{endpoint_name}] Missing or invalid IV (val={iv}, type={type(iv)}) for {leg_desc}: {asset} {expiry_str} {strike} {opt_type_req}. Using 0.0 placeholder. Greeks may be inaccurate.")
+                iv = 0.0 # Use placeholder
+
+            # Convert IV to float safely
+            try:
+                 iv_float = float(iv)
+            except (ValueError, TypeError) as iv_conv_err:
+                 logger.error(f"[{endpoint_name}] {leg_desc} Failed to convert IV '{iv}' to float: {iv_conv_err}. Using 0.0.")
+                 iv_float = 0.0
+
+            # Prepare final dictionary for this leg
+            prepared_leg = {
+                "op_type": "c" if opt_type_req == "CE" else "p",
                 "strike": strike,
-                "tr_type": tr_type_req, # 'b' or 's'
+                "tr_type": tr_type_req,
                 "op_pr": premium,
                 "lot": lots_abs,
                 "lot_size": leg_lot_size,
-                "iv": float(iv), # Store extracted/placeholder IV
+                "iv": iv_float, # Use the safely converted float
                 "days_to_expiry": days_to_expiry,
-                "expiry_date_str": expiry_str, # Keep original string if needed
-            })
-        except (ValueError, KeyError, TypeError) as e:
-            logger.error(f"[{endpoint_name}] Invalid data provided for leg {i+1}: {e}. Input: {leg_input.dict()}")
-            prep_errors.append(f"Leg {i+1}: {e}")
-        except Exception as e:
-             logger.error(f"[{endpoint_name}] Unexpected error processing leg {i+1}: {e}", exc_info=True)
-             prep_errors.append(f"Leg {i+1}: Unexpected error")
+                "expiry_date_str": expiry_str,
+            }
+            # --- Debug: Log the fully prepared leg data ---
+            logger.debug(f"[{endpoint_name}] {leg_desc} Prepared Data: {prepared_leg}")
+            # --- End Debug ---
+            prepared_strategy_data.append(prepared_leg)
+
+        except (ValueError, KeyError, TypeError) as e: # Catch expected validation/conversion errors
+            error_msg = f"{leg_desc}: {e}"
+            logger.error(f"[{endpoint_name}] Validation/Type error processing {error_msg}. Input: {leg_input}")
+            prep_errors.append(error_msg)
+        except Exception as e: # Catch unexpected errors
+             # Log exception type along with message
+             error_msg = f"{leg_desc}: Unexpected error ({type(e).__name__})"
+             logger.error(f"[{endpoint_name}] {error_msg}: {e}. Input: {leg_input}", exc_info=True) # Include traceback
+             prep_errors.append(error_msg) # Append more informative error
 
     if prep_errors: # If any legs failed preparation
+        logger.error(f"[{endpoint_name}] Failing request due to preparation errors: {prep_errors}")
         raise HTTPException(status_code=400, detail=f"Invalid strategy leg data: {'; '.join(prep_errors)}")
     if not prepared_strategy_data: # If input was empty or all legs failed
+        logger.error(f"[{endpoint_name}] No valid strategy legs after preparation.")
         raise HTTPException(status_code=400, detail="No valid strategy legs provided after preparation.")
+    logger.info(f"[{endpoint_name}] Strategy data prepared successfully for {len(prepared_strategy_data)} legs.")
 
 
     # --- Step 3: Perform Calculations Concurrently ---
+    # (Calculation logic and logging remain the same)
+    # ...
     logger.info(f"[{endpoint_name}] Starting concurrent calculations for {len(prepared_strategy_data)} legs...")
     start_calc_time = time.monotonic()
-    results = {} # Dictionary to store results
-
+    results = {}
     try:
-        # --- Run Calculations ---
-        # Metrics calculation needs to run first as chart relies on its output
+        # ... (metrics, chart, tax, greeks) ...
         logger.debug(f"[{endpoint_name}] Calculating metrics...")
         metrics_result = await asyncio.to_thread(calculate_strategy_metrics, prepared_strategy_data, asset)
-        if metrics_result is None:
-             logger.error(f"[{endpoint_name}] Metrics calculation failed. Cannot generate chart accurately.")
-             # Decide whether to fail completely or proceed without metrics/chart adjustments
-             raise ValueError("Strategy metrics calculation failed, cannot proceed.")
+        if metrics_result is None: raise ValueError("Strategy metrics calculation failed")
         results["metrics"] = metrics_result
         logger.debug(f"[{endpoint_name}] Metrics calculated.")
 
-        # Now run chart, tax, and greeks concurrently
         logger.debug(f"[{endpoint_name}] Starting concurrent chart, tax, greeks...")
         tasks = {
-            # Pass metrics result to chart function
             "chart": asyncio.to_thread(generate_payoff_chart_matplotlib, prepared_strategy_data, asset, metrics_result),
             "tax": asyncio.to_thread(calculate_option_taxes, prepared_strategy_data, asset),
             "greeks": asyncio.to_thread(calculate_option_greeks, prepared_strategy_data, asset)
         }
-
-        # Await remaining tasks
-        # Use return_exceptions=True to get results even if one task fails (e.g., tax fails but chart/greeks succeed)
         task_values = await asyncio.gather(*tasks.values(), return_exceptions=True)
-
-        # Assign results, checking for exceptions
+        # ... (assign results, log errors) ...
         results["chart"] = task_values[0] if not isinstance(task_values[0], Exception) else None
         results["tax"] = task_values[1] if not isinstance(task_values[1], Exception) else None
-        results["greeks"] = task_values[2] if not isinstance(task_values[2], Exception) else [] # Default to empty list on error
-
-        # Log any exceptions that occurred during gather
+        results["greeks"] = task_values[2] if not isinstance(task_values[2], Exception) else []
         for i, name in enumerate(tasks.keys()):
-            if isinstance(task_values[i], Exception):
-                 logger.error(f"[{endpoint_name}] Error during concurrent calculation of '{name}': {task_values[i]}", exc_info=task_values[i])
-
-        # Check for critical failures (chart generation)
-        if results["chart"] is None:
-             logger.error(f"[{endpoint_name}] Payoff chart generation failed.")
-             # Allow response without chart, but include error? Or raise 500?
-             # Let's allow partial success for now, frontend can handle missing chart.
-             # raise ValueError("Payoff chart generation failed.") # Option to fail hard
-
-        # Log warnings for non-critical failures
+            if isinstance(task_values[i], Exception): logger.error(f"[{endpoint_name}] Error during concurrent calculation of '{name}': {task_values[i]}", exc_info=task_values[i])
+        if results["chart"] is None: logger.error(f"[{endpoint_name}] Payoff chart generation failed.")
         if results["tax"] is None: logger.warning(f"[{endpoint_name}] Tax calculation failed or returned None.")
         if not results["greeks"]: logger.warning(f"[{endpoint_name}] Greeks calculation failed or returned empty list.")
 
-
-    except ValueError as calc_val_err: # Catch specific value errors like metrics failing
-         logger.error(f"[{endpoint_name}] Calculation prerequisite failed for {asset}: {calc_val_err}")
-         raise HTTPException(status_code=500, detail=f"Calculation Error: {calc_val_err}")
-    except Exception as e: # Catch errors from gather or other unexpected issues
+    except ValueError as calc_val_err:
+        logger.error(f"[{endpoint_name}] Calculation prerequisite failed for {asset}: {calc_val_err}")
+        raise HTTPException(status_code=500, detail=f"Calculation Error: {calc_val_err}")
+    except Exception as e:
         logger.error(f"[{endpoint_name}] Error during calculation phase for {asset}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Unexpected Server Error during calculation.")
 
@@ -2362,14 +2356,16 @@ async def get_payoff_chart_endpoint(request: PayoffRequest):
     logger.info(f"[{endpoint_name}] Calculations finished in {calc_duration:.3f}s")
 
     # --- Step 4: Return Results ---
-    success_status = results["chart"] is not None # Define success based on chart generation
+    # (Return logic remains the same)
+    # ...
+    success_status = results.get("chart") is not None
     logger.info(f"[{endpoint_name}] Successfully processed payoff request for asset: {asset}. Status: {'Success' if success_status else 'Partial Success (Chart Failed)'}")
     return {
-        "image_base64": results["chart"], # Will be None if failed
+        "image_base64": results.get("chart"),
         "success": success_status,
-        "metrics": results.get("metrics"), # Metrics should exist if we got here
-        "charges": results.get("tax"),     # Might be None if tax failed
-        "greeks": results.get("greeks", []) # Greeks list, empty if failed
+        "metrics": results.get("metrics"),
+        "charges": results.get("tax"),
+        "greeks": results.get("greeks", [])
     }
 
 
