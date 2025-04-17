@@ -2205,7 +2205,12 @@ async def get_payoff_chart_endpoint(request: PayoffRequest):
         start_prereq_time = time.monotonic()
         # Get spot price (use the reliable /get_spot_price logic)
         spot_response = await get_spot_price(asset) # Call the fixed endpoint
-        spot_price = spot_response.spot_price
+        
+        spot_price = spot_response.get('spot_price') # Use .get() for safety
+        if spot_price is None:
+            logger.error(f"[{endpoint_name}] 'spot_price' key not found in response from get_spot_price for asset {asset}. Response: {spot_response}")
+            raise ValueError("Could not retrieve spot price value from internal function.")
+        
         logger.info(f"[{endpoint_name}] Prerequisite Spot Price: {spot_price}")
 
         default_lot_size = get_lot_size(asset)
