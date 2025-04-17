@@ -698,7 +698,7 @@ def prepare_strategy_data(
                 "op_pr": option_price,        # float (premium per share)
                 "lot": lots,                  # int
                 "lot_size": final_lot_size,   # int (validated)
-                "iv": iv_float,               # float (validated IV, can be 0.0)
+                "iv": 1e-6 if iv_extracted == 0 else iv_extracted,               # float (validated IV, can be 0.0)
                 "days_to_expiry": days_to_expiry, # int (can be 0)
                 # Optional: Keep original info for deeper debugging if needed
                 # "original_input": leg_input

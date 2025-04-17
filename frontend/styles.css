@@ -210,8 +210,15 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
 /* ===============================================================
    Payoff Chart & Results Sections
    =============================================================== */
-.chart-container { width: 100%; min-height: 380px; background-color: #fdfdff; display: flex; align-items: center; justify-content: center; border-radius: var(--card-radius); border: 1px solid var(--border-color); padding: 10px; position: relative; overflow: hidden; }
-.payoff-chart-image { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
+#payoff-chart-container { /* Or your actual selector */
+    min-height: 450px; /* Ensure it has some height */
+    width: 100%;      /* Or a fixed width */
+    border: 1px solid red; /* TEMPORARY: Add a border to see the container */
+    display: block !important; /* Override potential hiding styles */
+    visibility: visible !important;
+    opacity: 1 !important;
+}
+
 
 /* Result Sections (Metrics, Tax, Greeks, AI wrappers) */
 .results-section { background-color: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--card-radius); padding: 20px 25px; box-shadow: none; }
