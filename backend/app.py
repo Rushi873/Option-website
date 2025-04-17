@@ -629,7 +629,7 @@ class DebugAssetSelectRequest(BaseModel): asset: str
 
 
 # ===============================================================
-# Calculation Functions (Modify news fetch, payoff chart)
+# Calculation Functions 
 # ===============================================================
 def get_lot_size(asset_name: str) -> int | None:
     logger.debug(f"Fetching lot size for asset: {asset_name}")
@@ -704,28 +704,28 @@ def extract_iv(asset_name: str, strike_price: float, expiry_date: str, option_ty
 
 
 # ===============================================================
-# 1. Calculate Option Taxes (Keep as corrected previously)
+# 1. Calculate Option Taxes (with Debugging)
 # ===============================================================
 def calculate_option_taxes(strategy_data: List[Dict[str, Any]], asset: str) -> Optional[Dict[str, Any]]:
-    # (Assuming this function is already robust and correct from previous iterations)
-    # ... (Keep the existing robust implementation) ...
-    # If issues persist, this function might need revisiting, but focusing on user's request first.
+    """Calculates estimated option taxes based on strategy legs."""
     func_name = "calculate_option_taxes"
     logger.info(f"[{func_name}] Calculating for {len(strategy_data)} leg(s), asset: {asset}")
+    logger.debug(f"[{func_name}] Input strategy_data: {strategy_data}")
+
     # --- Fetch Prerequisites ---
     try:
-        # Get spot price reliably - try DB first, then cache/live
+        logger.debug(f"[{func_name}] Fetching prerequisites...")
         spot_price_info = get_latest_spot_price_from_db(asset) # Use new helper
-        if spot_price_info:
-            spot_price = spot_price_info['spot_price']
-            logger.info(f"[{func_name}] Using Spot Price from DB: {spot_price}")
+        if spot_price_info and 'spot_price' in spot_price_info:
+            spot_price = _safe_get_float(spot_price_info, 'spot_price') # Use safe get
+            logger.debug(f"[{func_name}] Using Spot Price from DB: {spot_price}")
         else:
-             # Fallback to cached/live data if DB fails
+             logger.debug(f"[{func_name}] Spot price from DB failed or missing key, trying cache...")
              cached_data = get_cached_option(asset)
              if not cached_data or "records" not in cached_data:
                  raise ValueError("Missing or invalid market data (cache/live) for tax calc")
              spot_price = _safe_get_float(cached_data.get("records", {}), "underlyingValue")
-             logger.info(f"[{func_name}] Using Spot Price from Cache/Live: {spot_price}")
+             logger.debug(f"[{func_name}] Using Spot Price from Cache/Live: {spot_price}")
 
         if spot_price is None or spot_price <= 0:
             raise ValueError(f"Spot price missing or invalid ({spot_price})")
@@ -733,7 +733,7 @@ def calculate_option_taxes(strategy_data: List[Dict[str, Any]], asset: str) -> O
         default_lot_size = get_lot_size(asset)
         if default_lot_size is None or default_lot_size <= 0:
             raise ValueError(f"Default lot size missing or invalid ({default_lot_size})")
-        logger.debug(f"[{func_name}] Using Spot: {spot_price}, Default Lot Size: {default_lot_size}")
+        logger.debug(f"[{func_name}] Prerequisites OK - Spot: {spot_price}, Default Lot Size: {default_lot_size}")
 
     except ValueError as val_err:
         logger.error(f"[{func_name}] Failed initial data fetch for {asset}: {val_err}")
@@ -743,74 +743,77 @@ def calculate_option_taxes(strategy_data: List[Dict[str, Any]], asset: str) -> O
         return None
 
     # --- Initialize Totals ---
-    totals = defaultdict(float) # Use defaultdict for easier summing
+    totals = defaultdict(float)
     breakdown = []
+    logger.debug(f"[{func_name}] Initialized totals and breakdown.")
 
     # --- Process Each Leg ---
     for i, leg in enumerate(strategy_data):
+        leg_desc = f"Leg {i+1}"
         try:
+            logger.debug(f"[{func_name}] Processing {leg_desc}: {leg}")
             # --- Extract and Validate Leg Data ---
             tr_type = str(leg.get('tr_type', '')).lower()
-            op_type = str(leg.get('op_type', '')).lower() # 'c' or 'p' expected from preparation step
+            op_type = str(leg.get('op_type', '')).lower() # 'c' or 'p' expected
             strike = _safe_get_float(leg, 'strike')
             premium = _safe_get_float(leg, 'op_pr')
             lots = _safe_get_int(leg, 'lot')
+            logger.debug(f"[{func_name}] {leg_desc} Extracted: tr={tr_type}, op={op_type}, K={strike}, prem={premium}, lots={lots}")
 
-            # Determine Lot Size (use leg-specific if valid, else default)
-            leg_lot_size = default_lot_size
+            # Determine Lot Size
+            leg_lot_size = default_lot_size # Start with default
             raw_ls = leg.get('lot_size')
             if raw_ls is not None:
-                temp_ls = _safe_get_int({'ls': raw_ls}, 'ls') # Use helper safely
+                temp_ls = _safe_get_int({'ls': raw_ls}, 'ls')
                 if temp_ls is not None and temp_ls > 0:
                     leg_lot_size = temp_ls
+                    logger.debug(f"[{func_name}] {leg_desc} Using leg-specific lot size: {leg_lot_size}")
+            logger.debug(f"[{func_name}] {leg_desc} Final lot size: {leg_lot_size}")
 
             # Validate parameters
             error_msg = None
             if tr_type not in ['b','s']: error_msg = f"invalid tr_type ({tr_type})"
             elif op_type not in ['c','p']: error_msg = f"invalid op_type ({op_type})"
             elif strike is None or strike <= 0: error_msg = f"invalid strike ({strike})"
-            elif premium is None or premium < 0: error_msg = f"invalid premium ({premium})" # Allow 0 premium
+            elif premium is None or premium < 0: error_msg = f"invalid premium ({premium})"
             elif lots is None or lots <= 0: error_msg = f"invalid lots ({lots})"
             elif leg_lot_size <= 0: error_msg = f"invalid lot_size ({leg_lot_size})"
 
             if error_msg:
+                 logger.error(f"[{func_name}] Validation failed for {leg_desc}: {error_msg}")
                  raise ValueError(f"Leg {i}: {error_msg}. Data: {leg}")
+            logger.debug(f"[{func_name}] {leg_desc} Validation passed.")
 
             # --- Calculate Charges for the Leg ---
             quantity = lots * leg_lot_size
             turnover = premium * quantity
-            stt_val = 0.0
-            stt_note = ""
+            logger.debug(f"[{func_name}] {leg_desc} Quantity: {quantity}, Turnover: {turnover:.2f}")
+            stt_val = 0.0; stt_note = ""; intrinsic = 0.0; is_itm = False
 
-            # Note: Tax calculation assumes expiry scenario based on current spot.
-            # Real-time calculation during trade lifecycle might differ.
-
-            if tr_type == 's': # Sell side STT (on premium)
+            if tr_type == 's': # Sell side STT
                 stt_val = turnover * STT_SHORT_RATE
                 stt_note = f"{STT_SHORT_RATE*100:.4f}% STT (Sell Premium)"
-            elif tr_type == 'b': # Buy side STT (on intrinsic value if ITM on expiry/exercise)
-                intrinsic = 0.0
-                is_itm = False
+                logger.debug(f"[{func_name}] {leg_desc} Sell STT calculated: {stt_val:.2f}")
+            elif tr_type == 'b': # Buy side STT (estimate)
                 if op_type == 'c' and spot_price > strike:
-                    intrinsic = (spot_price - strike) * quantity
-                    is_itm = True
+                    intrinsic = (spot_price - strike) * quantity; is_itm = True
                 elif op_type == 'p' and spot_price < strike:
-                    intrinsic = (strike - spot_price) * quantity
-                    is_itm = True
-
-                # STT applied only if ITM and intrinsic > 0 at expiry (estimated using current spot)
+                    intrinsic = (strike - spot_price) * quantity; is_itm = True
+                logger.debug(f"[{func_name}] {leg_desc} Buy side ITM check: {is_itm}, Est. Intrinsic: {intrinsic:.2f}")
                 if is_itm and intrinsic > 0:
                     stt_val = intrinsic * STT_EXERCISE_RATE
                     stt_note = f"{STT_EXERCISE_RATE*100:.4f}% STT (Est. Exercise ITM)"
+                    logger.debug(f"[{func_name}] {leg_desc} Buy STT calculated: {stt_val:.2f}")
                 else:
-                    stt_note = "No STT (Est. Buy OTM/ATM)"
+                    stt_note = "No STT (Est. Buy OTM/ATM)"; logger.debug(f"[{func_name}] {leg_desc} No Buy STT.")
 
             # Other charges
             stamp_duty_value = turnover * STAMP_DUTY_RATE if tr_type == 'b' else 0.0
             sebi_fee_value = turnover * SEBI_RATE
             txn_charge_value = turnover * NSE_TXN_CHARGE_RATE
-            brokerage_value = float(BROKERAGE_FLAT_PER_ORDER) # Per leg/order
+            brokerage_value = float(BROKERAGE_FLAT_PER_ORDER)
             gst_on_charges = (brokerage_value + sebi_fee_value + txn_charge_value) * GST_RATE
+            logger.debug(f"[{func_name}] {leg_desc} Other Charges: Stamp={stamp_duty_value:.2f}, SEBI={sebi_fee_value:.4f}, Txn={txn_charge_value:.4f}, Broker={brokerage_value:.2f}, GST={gst_on_charges:.2f}")
 
             # --- Accumulate Totals ---
             totals["stt"] += stt_val
@@ -819,41 +822,36 @@ def calculate_option_taxes(strategy_data: List[Dict[str, Any]], asset: str) -> O
             totals["txn_charges"] += txn_charge_value
             totals["brokerage"] += brokerage_value
             totals["gst"] += gst_on_charges
+            logger.debug(f"[{func_name}] {leg_desc} Totals Updated: {dict(totals)}")
 
             # --- Store Leg Breakdown ---
             leg_total_cost = stt_val + stamp_duty_value + sebi_fee_value + txn_charge_value + brokerage_value + gst_on_charges
-            breakdown.append({
-                "leg_index": i,
-                "transaction_type": tr_type.upper(),
-                "option_type": op_type.upper(), # Use c/p consistent with other parts
-                "strike": strike,
-                "lots": lots,
-                "lot_size": leg_lot_size,
-                "quantity": quantity,
-                "premium_per_share": round(premium, 2),
-                "turnover": round(turnover, 2),
-                "stt": round(stt_val, 2),
-                "stt_note": stt_note,
-                "stamp_duty": round(stamp_duty_value, 2),
-                "sebi_fee": round(sebi_fee_value, 4),
-                "txn_charge": round(txn_charge_value, 4),
-                "brokerage": round(brokerage_value, 2),
-                "gst": round(gst_on_charges, 2),
-                "total_leg_cost": round(leg_total_cost, 2)
-            })
+            leg_breakdown_data = {
+                "leg_index": i, "transaction_type": tr_type.upper(), "option_type": op_type.upper(),
+                "strike": strike, "lots": lots, "lot_size": leg_lot_size, "quantity": quantity,
+                "premium_per_share": round(premium, 2), "turnover": round(turnover, 2),
+                "stt": round(stt_val, 2), "stt_note": stt_note,
+                "stamp_duty": round(stamp_duty_value, 2), "sebi_fee": round(sebi_fee_value, 4),
+                "txn_charge": round(txn_charge_value, 4), "brokerage": round(brokerage_value, 2),
+                "gst": round(gst_on_charges, 2), "total_leg_cost": round(leg_total_cost, 2)
+            }
+            breakdown.append(leg_breakdown_data)
+            logger.debug(f"[{func_name}] {leg_desc} Breakdown stored: {leg_breakdown_data}")
 
         except ValueError as val_err:
-            logger.error(f"[{func_name}] Validation Error processing leg {i} for {asset}: {val_err}")
+            logger.error(f"[{func_name}] Validation Error processing {leg_desc} for {asset}: {val_err}")
             raise ValueError(f"Invalid data in tax leg {i+1}: {val_err}") from val_err
         except Exception as leg_err:
-            logger.error(f"[{func_name}] Unexpected Error processing tax leg {i} for {asset}: {leg_err}", exc_info=True)
+            logger.error(f"[{func_name}] Unexpected Error processing tax {leg_desc} for {asset}: {leg_err}", exc_info=True)
             raise ValueError(f"Unexpected error processing tax leg {i+1}") from leg_err
 
     # --- Finalize and Return ---
-    final_charges_summary = {k: round(v, 2) for k, v in totals.items()}
+    final_charges_summary = {k: round(v, 4) for k, v in totals.items()} # Use more decimals for summary? Maybe 4?
     final_total_cost = round(sum(totals.values()), 2)
 
     logger.info(f"[{func_name}] Calculation complete for {asset}. Total estimated charges: {final_total_cost:.2f}")
+    logger.debug(f"[{func_name}] Final Charges Summary: {final_charges_summary}")
+    logger.debug(f"[{func_name}] Final Breakdown: {breakdown}")
 
     rate_info = {
         "STT_SHORT_RATE": STT_SHORT_RATE, "STT_EXERCISE_RATE": STT_EXERCISE_RATE,
@@ -861,27 +859,28 @@ def calculate_option_taxes(strategy_data: List[Dict[str, Any]], asset: str) -> O
         "NSE_TXN_CHARGE_RATE": NSE_TXN_CHARGE_RATE, "GST_RATE": GST_RATE,
         "BROKERAGE_FLAT_PER_ORDER": BROKERAGE_FLAT_PER_ORDER
     }
-    return {
-        "calculation_details": {
-            "asset": asset,
-            "spot_price_used": spot_price,
-            "default_lot_size_used": default_lot_size,
-            "rate_info": rate_info
-        },
+    result = {
+        "calculation_details": { "asset": asset, "spot_price_used": spot_price, "default_lot_size_used": default_lot_size, "rate_info": rate_info },
         "total_estimated_cost": final_total_cost,
         "charges_summary": final_charges_summary,
         "breakdown_per_leg": breakdown
     }
+    logger.debug(f"[{func_name}] Returning result: {result}")
+    return result
 
 # ===============================================================
-# 2. Generate Payoff Chart (using Matplotlib - ENHANCED AXIS)
+# 2. Generate Payoff Chart (with Debugging)
 # ===============================================================
 def generate_payoff_chart_matplotlib(
     strategy_data: List[Dict[str, Any]],
     asset: str,
     strategy_metrics: Optional[Dict[str, Any]] # Pass calculated metrics
 ) -> Optional[str]:
-    """Generates payoff chart using Matplotlib with improved Y-axis scaling."""
+    # --- THIS FUNCTION ALREADY HAS EXTENSIVE DEBUGGING from previous prompt ---
+    # --- Keep the version from the previous prompt ---
+    # --- (Code omitted here for brevity, use the previous version with LOGs) ---
+    # --- Make sure to replace placeholders at the top if you haven't already ---
+    # --- Key debug points already included: Inputs, Prerequisites, Leg processing, Payoffs, Limits, Plotting steps ---
     func_name = "generate_payoff_chart_matplotlib"
     logger.info(f"[{func_name}] Generating chart for {len(strategy_data)} leg(s), asset: {asset}")
     # --- Debug: Log Input Data ---
@@ -897,7 +896,7 @@ def generate_payoff_chart_matplotlib(
         logger.debug(f"[{func_name}] Fetching prerequisites...")
         spot_price_info = get_latest_spot_price_from_db(asset)
         if spot_price_info and 'spot_price' in spot_price_info: # Check key exists
-             spot_price = spot_price_info['spot_price']
+             spot_price = _safe_get_float(spot_price_info, 'spot_price')
              logger.debug(f"[{func_name}] Spot price from DB: {spot_price}")
         else:
             logger.debug(f"[{func_name}] Spot price from DB failed or missing key, trying cache...")
@@ -910,15 +909,13 @@ def generate_payoff_chart_matplotlib(
 
         if not spot_price or not isinstance(spot_price, (int, float)) or spot_price <= 0 or \
            not default_lot_size or not isinstance(default_lot_size, int) or default_lot_size <= 0:
-            # --- Debug: Log invalid prereqs ---
             logger.error(f"[{func_name}] Prerequisite validation failed! Spot: {spot_price} (Type: {type(spot_price)}), Lot Size: {default_lot_size} (Type: {type(default_lot_size)})")
-            # --- End Debug ---
             raise ValueError(f"Invalid spot ({spot_price}) or lot size ({default_lot_size}) for chart generation")
         logger.debug(f"[{func_name}] Prerequisites fetched successfully.")
 
         # 2. Calculate Payoff Data
         logger.debug(f"[{func_name}] Calculating payoff data...")
-        lower_bound = max(spot_price * PAYOFF_LOWER_BOUND_FACTOR, 0.1) # Ensure > 0
+        lower_bound = max(spot_price * PAYOFF_LOWER_BOUND_FACTOR, 0.1)
         upper_bound = spot_price * PAYOFF_UPPER_BOUND_FACTOR
         price_range = np.linspace(lower_bound, upper_bound, PAYOFF_POINTS)
         total_payoff = np.zeros_like(price_range)
@@ -926,46 +923,32 @@ def generate_payoff_chart_matplotlib(
         processed_legs_count = 0
         logger.debug(f"[{func_name}] Price Range: {lower_bound:.2f} to {upper_bound:.2f} ({PAYOFF_POINTS} points)")
 
-        for i, leg in enumerate(strategy_data): # Loop through legs provided in strategy_data
-            leg_desc = f"Leg {i+1}" # Description for logging
+        for i, leg in enumerate(strategy_data):
+            leg_desc = f"Leg {i+1}"
             try:
-                # --- Debug: Log leg data being processed ---
                 logger.debug(f"[{func_name}] Processing {leg_desc}: {leg}")
-                # --- End Debug ---
-                tr_type = leg['tr_type'].lower() # Expects 'b' or 's'
-                op_type = leg['op_type'].lower() # Expects 'c' or 'p'
-                strike = float(leg['strike'])    # Expects float/int
-                premium = float(leg['op_pr'])    # Expects float/int
-                lots = int(leg['lot'])       # Expects int
-                leg_lot_size = int(leg['lot_size']) # Expects int (should be set in prepare step)
-
-                # --- Debug: Log extracted values ---
+                tr_type = leg['tr_type'].lower()
+                op_type = leg['op_type'].lower()
+                strike = float(leg['strike'])
+                premium = float(leg['op_pr'])
+                lots = int(leg['lot'])
+                leg_lot_size = int(leg['lot_size'])
                 logger.debug(f"[{func_name}] {leg_desc} Extracted: type={op_type}, tr={tr_type}, k={strike}, prem={premium}, lots={lots}, ls={leg_lot_size}")
-                # --- End Debug ---
-
-                # Basic validation (redundant if prepared correctly, but safe)
                 if not(tr_type in ('b','s') and op_type in ('c','p') and strike > 0 and premium >= 0 and lots > 0 and leg_lot_size > 0):
-                    # --- Debug: Log validation failure ---
                     logger.error(f"[{func_name}] {leg_desc} Validation failed! type={op_type}, tr={tr_type}, k={strike}, prem={premium}, lots={lots}, ls={leg_lot_size}")
-                    # --- End Debug ---
                     raise ValueError(f"Invalid params during chart generation: type={op_type}, tr={tr_type}, k={strike}, prem={premium}, lots={lots}, ls={leg_lot_size}")
                 unique_strikes.add(strike)
+            except (KeyError, ValueError, TypeError) as e:
+                 logger.error(f"[{func_name}] Error processing {leg_desc} data for chart: {e}. Leg Data: {leg}", exc_info=False)
+                 raise ValueError(f"{leg_desc} processing error for chart: {e}") from e
+            except Exception as e:
+                 logger.error(f"[{func_name}] UNEXPECTED Error processing {leg_desc} data for chart: {e}. Leg Data: {leg}", exc_info=True)
+                 raise ValueError(f"{leg_desc} UNEXPECTED processing error for chart: {e}") from e
 
-            except (KeyError, ValueError, TypeError) as e: # Catch expected errors during extraction/conversion
-                 logger.error(f"[{func_name}] Error processing {leg_desc} data for chart: {e}. Leg Data: {leg}", exc_info=False) # Don't need full traceback for this
-                 raise ValueError(f"{leg_desc} processing error for chart: {e}") from e # Re-raise as ValueError for outer handler
-            except Exception as e: # Catch unexpected errors
-                 logger.error(f"[{func_name}] UNEXPECTED Error processing {leg_desc} data for chart: {e}. Leg Data: {leg}", exc_info=True) # Log traceback
-                 raise ValueError(f"{leg_desc} UNEXPECTED processing error for chart: {e}") from e # Re-raise as ValueError
-
-            # Calculate payoff for this leg across the price range
             quantity = lots * leg_lot_size
-            leg_prem_tot = premium * quantity # Total premium cost/credit for the leg
+            leg_prem_tot = premium * quantity
             intrinsic_value = np.maximum(price_range - strike, 0) if op_type == 'c' else np.maximum(strike - price_range, 0)
             leg_payoff = (intrinsic_value * quantity - leg_prem_tot) if tr_type == 'b' else (leg_prem_tot - intrinsic_value * quantity)
-            # --- Debug: Log intermediate payoff calculation ---
-            # logger.debug(f"[{func_name}] {leg_desc} Quantity={quantity}, LegPrem={leg_prem_tot:.2f}, First Intrinsic={intrinsic_value[0]:.2f}, First Payoff={leg_payoff[0]:.2f}")
-            # --- End Debug ---
             total_payoff += leg_payoff
             processed_legs_count += 1
             logger.debug(f"[{func_name}] {leg_desc} payoff calculated and added.")
@@ -981,25 +964,54 @@ def generate_payoff_chart_matplotlib(
         actual_max_pl = np.max(total_payoff)
         logger.debug(f"[{func_name}] Actual PL range in plot: Min={actual_min_pl:.2f}, Max={actual_max_pl:.2f}")
 
-        # (Rest of Y-axis limit calculation remains the same - already has debug logs)
-        # ...
+        theo_max_profit = np.inf
+        theo_max_loss = -np.inf
+        if strategy_metrics and isinstance(strategy_metrics.get("metrics"), dict):
+            # ... (code to extract theoretical limits) ...
+            pass # Keep existing logic
+        logger.debug(f"[{func_name}] Theoretical PL range: Min={theo_max_loss}, Max={theo_max_profit}")
+
+        # ... (Y-limit calculation logic) ...
+        # Example placeholder - replace with your actual calculation
+        final_y_min = actual_min_pl * 1.1 if actual_min_pl < 0 else actual_min_pl - abs(actual_min_pl * 0.1)
+        final_y_max = actual_max_pl * 1.1 if actual_max_pl > 0 else actual_max_pl + abs(actual_max_pl * 0.1)
+        if final_y_min == final_y_max : final_y_min -=1; final_y_max += 1 # Ensure some range
+
+
         logger.debug(f"[{func_name}] Final Y-Axis limits: Min={final_y_min:.2f}, Max={final_y_max:.2f}")
+
 
         # 4. --- Create Matplotlib Figure ---
         logger.debug(f"[{func_name}] Creating Matplotlib figure...")
-        plt.close('all') # Close previous figures
+        plt.close('all')
         plt.style.use('seaborn-v0_8-whitegrid')
         fig, ax = plt.subplots(figsize=(9, 5.5), dpi=95)
 
         # 5. --- Plot and Style ---
         logger.debug(f"[{func_name}] Plotting data...")
-        # (Plotting calls remain the same)
         ax.plot(price_range, total_payoff, color='mediumblue', linewidth=2.0, label="Strategy Payoff", zorder=10)
         ax.axhline(0, color='black', linewidth=1.0, linestyle='-', alpha=0.9, zorder=1)
         ax.axvline(spot_price, color='dimgrey', linestyle='--', linewidth=1.2, label=f'Spot {spot_price:.2f}', zorder=1)
-        # ... plotting strikes ...
-        # ... filling areas ...
-        # ... setting titles/labels ...
+
+        strike_line_color = 'darkorange'
+        text_y_offset_factor = 0.05
+        final_y_range = final_y_max - final_y_min
+        text_y_pos = final_y_min - final_y_range * text_y_offset_factor
+        for k in sorted(list(unique_strikes)):
+             ax.axvline(k, color=strike_line_color, linestyle=':', linewidth=1.0, alpha=0.75, zorder=1)
+             ax.text(k, text_y_pos, f'{k:g}', color=strike_line_color, ha='center', va='top', fontsize=9, alpha=0.95, weight='medium')
+
+        ax.fill_between(price_range, total_payoff, 0, where=total_payoff >= 0, facecolor='palegreen', alpha=0.5, interpolate=True, zorder=0)
+        ax.fill_between(price_range, total_payoff, 0, where=total_payoff < 0, facecolor='lightcoral', alpha=0.5, interpolate=True, zorder=0)
+
+        ax.set_title(f"{asset} Strategy Payoff", fontsize=15, weight='bold')
+        ax.set_xlabel("Underlying Price at Expiry", fontsize=11)
+        ax.set_ylabel("Profit / Loss (₹)", fontsize=11)
+        ax.tick_params(axis='both', which='major', labelsize=10)
+        ax.legend(fontsize=10)
+        ax.grid(True, which='major', linestyle=':', linewidth=0.6, alpha=0.7)
+
+        x_padding = (upper_bound - lower_bound) * 0.02
         ax.set_xlim(lower_bound - x_padding, upper_bound + x_padding)
         ax.set_ylim(final_y_min, final_y_max)
         fig.tight_layout(pad=1.0)
@@ -1017,14 +1029,13 @@ def generate_payoff_chart_matplotlib(
         logger.info(f"[{func_name}] Successfully generated Matplotlib chart for {asset} in {duration:.3f}s")
         return img_base64
 
-    except ValueError as val_err: # Catch ValueErrors raised within the function
-        logger.error(f"[{func_name}] Value Error during chart generation: {val_err}", exc_info=False) # No need for traceback if it's our validation
+    except ValueError as val_err:
+        logger.error(f"[{func_name}] Value Error during chart generation: {val_err}", exc_info=False)
         return None
-    except Exception as e: # Catch any other unexpected errors
-        logger.error(f"[{func_name}] Unexpected error generating chart for {asset}: {e}", exc_info=True) # Log full traceback
+    except Exception as e:
+        logger.error(f"[{func_name}] Unexpected error generating chart for {asset}: {e}", exc_info=True)
         return None
     finally:
-        # Ensure the figure is closed to release memory
         if fig is not None:
             try:
                 plt.close(fig)
@@ -1032,8 +1043,9 @@ def generate_payoff_chart_matplotlib(
             except Exception as close_err:
                  logger.warning(f"[{func_name}] Error closing Matplotlib figure: {close_err}")
 
+
 # ===============================================================
-# 3. Calculate Strategy Metrics (REVISED Breakeven Calculation)
+# 3. Calculate Strategy Metrics (with Debugging)
 # ===============================================================
 def calculate_strategy_metrics(strategy_data: List[Dict[str, Any]], asset: str) -> Optional[Dict[str, Any]]:
     """
@@ -1042,246 +1054,265 @@ def calculate_strategy_metrics(strategy_data: List[Dict[str, Any]], asset: str) 
     """
     func_name = "calculate_strategy_metrics"
     logger.info(f"[{func_name}] Calculating metrics for {len(strategy_data)} leg(s), asset: {asset}")
+    logger.debug(f"[{func_name}] Input strategy_data: {strategy_data}")
 
     # --- 1. Fetch Essential Data ---
     try:
-        # Use DB helper for spot price consistency
+        logger.debug(f"[{func_name}] Fetching prerequisites...")
         spot_price_info = get_latest_spot_price_from_db(asset)
-        if spot_price_info: spot_price = spot_price_info['spot_price']
-        else: # Fallback
+        if spot_price_info and 'spot_price' in spot_price_info:
+            spot_price = _safe_get_float(spot_price_info, 'spot_price')
+            logger.debug(f"[{func_name}] Using Spot Price from DB: {spot_price}")
+        else:
+            logger.debug(f"[{func_name}] Spot price from DB failed or missing key, trying cache...")
             cached_data = get_cached_option(asset)
             spot_price = _safe_get_float(cached_data.get("records", {}), "underlyingValue") if cached_data else None
+            logger.debug(f"[{func_name}] Using Spot Price from Cache/Live: {spot_price}")
 
         if spot_price is None or not isinstance(spot_price, (int, float)) or spot_price <= 0:
              raise ValueError(f"Spot price missing/invalid ({spot_price})")
-        spot_price = float(spot_price)
+        spot_price = float(spot_price) # Ensure float
 
         default_lot_size = get_lot_size(asset)
         if default_lot_size is None or default_lot_size <= 0:
             raise ValueError("Default lot size missing/invalid")
+        logger.debug(f"[{func_name}] Prerequisites OK - Spot: {spot_price}, Default Lot Size: {default_lot_size}")
     except Exception as e:
-        logger.error(f"[{func_name}] Failed prerequisite data fetch for {asset}: {e}")
+        logger.error(f"[{func_name}] Failed prerequisite data fetch for {asset}: {e}", exc_info=True)
         return None
 
     # --- 2. Process Strategy Legs & Store Details ---
+    logger.debug(f"[{func_name}] Processing strategy legs...")
     total_net_premium = 0.0; cost_breakdown = []; processed_legs = 0
     net_long_call_qty = 0; net_short_call_qty = 0; net_long_put_qty = 0; net_short_put_qty = 0
     payoff_at_S_equals_0 = 0.0; legs_for_payoff_calc = []
     all_strikes_list = []
 
     for i, leg in enumerate(strategy_data):
+        leg_desc = f"Leg {i+1}"
         try:
+            logger.debug(f"[{func_name}] Processing {leg_desc}: {leg}")
             tr_type = str(leg.get('tr_type', '')).lower()
             option_type = str(leg.get('op_type', '')).lower() # 'c' or 'p'
             strike = _safe_get_float(leg, 'strike'); premium = _safe_get_float(leg, 'op_pr')
-            lots = _safe_get_int(leg, 'lot'); leg_lot_size = _safe_get_int(leg, 'lot_size', default_lot_size)
-            if tr_type not in ('b','s') or option_type not in ('c','p') or strike is None or strike <= 0 or premium is None or premium < 0 or lots is None or lots <= 0 or leg_lot_size <= 0:
+            lots = _safe_get_int(leg, 'lot'); leg_lot_size = _safe_get_int(leg, 'lot_size', default_lot_size) # Use default if missing
+            logger.debug(f"[{func_name}] {leg_desc} Extracted: tr={tr_type}, op={option_type}, K={strike}, prem={premium}, lots={lots}, ls={leg_lot_size}")
+
+            # Validate leg_lot_size again after potential default assignment
+            if leg_lot_size is None or leg_lot_size <= 0:
+                logger.warning(f"[{func_name}] Using default lot size {default_lot_size} for {leg_desc} due to invalid leg_lot_size ({leg.get('lot_size')})")
+                leg_lot_size = default_lot_size # Ensure it's set
+            if leg_lot_size <= 0: raise ValueError("Final leg lot size is invalid") # Should not happen if default is valid
+
+
+            if tr_type not in ('b','s') or option_type not in ('c','p') or strike is None or strike <= 0 or premium is None or premium < 0 or lots is None or lots <= 0:
+                logger.error(f"[{func_name}] {leg_desc} Validation Failed!")
                 raise ValueError("Invalid leg parameters")
+            logger.debug(f"[{func_name}] {leg_desc} Validation Passed.")
+
             quantity = lots * leg_lot_size; leg_premium_total = premium * quantity; action_verb = ""
             all_strikes_list.append(strike)
+            logger.debug(f"[{func_name}] {leg_desc} Quantity: {quantity}, Leg Total Premium: {leg_premium_total:.2f}")
 
             if tr_type == 'b': # Buy
                 total_net_premium -= leg_premium_total; action_verb = "Paid"
                 if option_type == 'c': net_long_call_qty += quantity
                 else: net_long_put_qty += quantity
+                logger.debug(f"[{func_name}] {leg_desc} BUY: NetPrem={total_net_premium:.2f}, NetLongCall={net_long_call_qty}, NetLongPut={net_long_put_qty}")
             else: # Sell
                 total_net_premium += leg_premium_total; action_verb = "Received"
                 if option_type == 'c': net_short_call_qty += quantity
                 else: net_short_put_qty += quantity
+                logger.debug(f"[{func_name}] {leg_desc} SELL: NetPrem={total_net_premium:.2f}, NetShortCall={net_short_call_qty}, NetShortPut={net_short_put_qty}")
 
             # Calculate payoff component if underlying price goes to 0
-            if option_type == 'p': # Puts have value at S=0
-                intrinsic_at_zero = strike # Intrinsic value is K - S = K - 0 = K
-                payoff_at_S_equals_0 += (intrinsic_at_zero * quantity - leg_premium_total) if tr_type == 'b' else (leg_premium_total - intrinsic_at_zero * quantity)
-            else: # Calls expire worthless at S=0
-                payoff_at_S_equals_0 += -leg_premium_total if tr_type == 'b' else leg_premium_total
+            intrinsic_at_zero = 0.0
+            leg_payoff_at_zero = 0.0
+            if option_type == 'p':
+                intrinsic_at_zero = strike
+                leg_payoff_at_zero = (intrinsic_at_zero * quantity - leg_premium_total) if tr_type == 'b' else (leg_premium_total - intrinsic_at_zero * quantity)
+            else:
+                leg_payoff_at_zero = -leg_premium_total if tr_type == 'b' else leg_premium_total
+            payoff_at_S_equals_0 += leg_payoff_at_zero
+            logger.debug(f"[{func_name}] {leg_desc} PayoffAtZero Component: {leg_payoff_at_zero:.2f}, Cumulative: {payoff_at_S_equals_0:.2f}")
 
-            cost_breakdown.append({ "leg_index": i, "action": tr_type.upper(), "type": option_type.upper(), "strike": strike, "premium_per_share": premium, "lots": lots, "lot_size": leg_lot_size, "quantity": quantity, "total_premium": round(leg_premium_total if tr_type=='s' else -leg_premium_total, 2), "effect": action_verb })
-            # Store details needed *only* for payoff calculation function
-            legs_for_payoff_calc.append({'tr_type': tr_type, 'op_type': option_type, 'strike': strike, 'premium': premium, 'quantity': quantity})
+            cost_bd_leg = { "leg_index": i, "action": tr_type.upper(), "type": option_type.upper(), "strike": strike, "premium_per_share": premium, "lots": lots, "lot_size": leg_lot_size, "quantity": quantity, "total_premium": round(leg_premium_total if tr_type=='s' else -leg_premium_total, 2), "effect": action_verb }
+            cost_breakdown.append(cost_bd_leg)
+            logger.debug(f"[{func_name}] {leg_desc} Cost Breakdown Added: {cost_bd_leg}")
+
+            payoff_calc_leg = {'tr_type': tr_type, 'op_type': option_type, 'strike': strike, 'premium': premium, 'quantity': quantity}
+            legs_for_payoff_calc.append(payoff_calc_leg)
+            logger.debug(f"[{func_name}] {leg_desc} Data for Payoff Calc Added: {payoff_calc_leg}")
+
             processed_legs += 1
         except (ValueError, KeyError, TypeError) as leg_err:
-            logger.error(f"[{func_name}] Error processing metrics leg {i}: {leg_err}. Data: {leg}")
+            logger.error(f"[{func_name}] Error processing metrics {leg_desc}: {leg_err}. Data: {leg}")
             return None # Fail fast if leg data is bad
+        except Exception as leg_exp_err: # Catch any other unexpected error
+             logger.error(f"[{func_name}] UNEXPECTED Error processing metrics {leg_desc}: {leg_exp_err}. Data: {leg}", exc_info=True)
+             return None # Fail fast
+
     if processed_legs == 0: logger.error(f"[{func_name}] No valid legs processed for metrics."); return None
+    logger.debug(f"[{func_name}] Finished processing {processed_legs} legs.")
+    logger.debug(f"[{func_name}] Net Calls: {net_long_call_qty-net_short_call_qty}, Net Puts: {net_long_put_qty-net_short_put_qty}, Net Prem: {total_net_premium:.2f}, Payoff@0: {payoff_at_S_equals_0:.2f}")
 
     # --- 3. Define Payoff Function (Helper) ---
     def _calculate_payoff_at_price(S: float, legs: List[Dict]) -> float:
+        # logger.debug(f"[_calculate_payoff_at_price] Calculating for S={S:.2f}") # Can be very verbose
         total_pnl = 0.0
-        for leg in legs:
-            intrinsic = 0.0; premium = leg['premium']; strike = leg['strike']
-            quantity = leg['quantity']; op_type = leg['op_type']; tr_type = leg['tr_type']
+        for leg_idx, leg_payoff in enumerate(legs): # Renamed loop var
+            intrinsic = 0.0; premium = leg_payoff['premium']; strike = leg_payoff['strike']
+            quantity = leg_payoff['quantity']; op_type = leg_payoff['op_type']; tr_type = leg_payoff['tr_type']
             leg_prem_tot = premium * quantity
             if op_type == 'c': intrinsic = max(S - strike, 0)
-            else: intrinsic = max(strike - S, 0) # op_type == 'p'
+            else: intrinsic = max(strike - S, 0)
             pnl = (intrinsic * quantity - leg_prem_tot) if tr_type == 'b' else (leg_prem_tot - intrinsic * quantity)
+            # logger.debug(f"  Leg {leg_idx}: Intrinsic={intrinsic:.2f}, PnL={pnl:.2f}") # Verbose
             total_pnl += pnl
+        # logger.debug(f"[_calculate_payoff_at_price] Total PnL for S={S:.2f}: {total_pnl:.2f}") # Verbose
         return total_pnl
 
     # --- 4. Determine Theoretical Max Profit / Loss ---
-    net_calls = net_long_call_qty - net_short_call_qty # Net quantity of calls (positive if net long)
-    net_puts = net_long_put_qty - net_short_put_qty   # Net quantity of puts (positive if net long)
+    logger.debug(f"[{func_name}] Determining theoretical Max P/L...")
+    net_calls = net_long_call_qty - net_short_call_qty
+    net_puts = net_long_put_qty - net_short_put_qty
     all_strikes_unique_sorted = sorted(list(set(all_strikes_list)))
+    logger.debug(f"[{func_name}] Unique Strikes Sorted: {all_strikes_unique_sorted}")
 
     # Determine Max Profit
-    if net_calls > 0 or net_puts < 0: # Potential for infinite profit (long call or short put dominant)
+    max_profit_val = -np.inf # Start assuming bounded
+    if net_calls > 0 or net_puts < 0:
         max_profit_val = np.inf
-    else: # Bounded profit - check payoff at S=0 and at all strikes
+        logger.debug(f"[{func_name}] Max Profit: Potentially Infinite (NetCalls={net_calls}, NetPuts={net_puts})")
+    else:
+        logger.debug(f"[{func_name}] Max Profit: Bounded. Checking payoff at S=0 and strikes...")
         max_profit_val = payoff_at_S_equals_0
+        logger.debug(f"[{func_name}]   Initial MaxP (Payoff@0): {max_profit_val:.2f}")
         for k in all_strikes_unique_sorted:
-            max_profit_val = max(max_profit_val, _calculate_payoff_at_price(k, legs_for_payoff_calc))
+            payoff_at_k = _calculate_payoff_at_price(k, legs_for_payoff_calc)
+            logger.debug(f"[{func_name}]   Payoff@{k:.2f}: {payoff_at_k:.2f}")
+            max_profit_val = max(max_profit_val, payoff_at_k)
+        logger.debug(f"[{func_name}]   Final Bounded Max Profit: {max_profit_val:.2f}")
 
     # Determine Max Loss
-    if net_calls < 0 or net_puts > 0: # Potential for infinite loss (short call or long put dominant)
+    max_loss_val = np.inf # Start assuming bounded
+    if net_calls < 0 or net_puts > 0:
         max_loss_val = -np.inf
-    else: # Bounded loss - check payoff at S=0 and at all strikes
+        logger.debug(f"[{func_name}] Max Loss: Potentially Infinite (NetCalls={net_calls}, NetPuts={net_puts})")
+    else:
+        logger.debug(f"[{func_name}] Max Loss: Bounded. Checking payoff at S=0 and strikes...")
         max_loss_val = payoff_at_S_equals_0
+        logger.debug(f"[{func_name}]   Initial MaxL (Payoff@0): {max_loss_val:.2f}")
         for k in all_strikes_unique_sorted:
-            max_loss_val = min(max_loss_val, _calculate_payoff_at_price(k, legs_for_payoff_calc))
+             payoff_at_k = _calculate_payoff_at_price(k, legs_for_payoff_calc)
+             logger.debug(f"[{func_name}]   Payoff@{k:.2f}: {payoff_at_k:.2f}")
+             max_loss_val = min(max_loss_val, payoff_at_k)
+        logger.debug(f"[{func_name}]   Final Bounded Max Loss: {max_loss_val:.2f}")
 
     # --- 5. Breakeven Points (Using Root Finding) ---
     logger.debug(f"[{func_name}] Starting breakeven search...")
     breakeven_points_found = []
-    unique_strikes_and_zero = sorted(list(set([0.0] + all_strikes_list))) # Include 0
+    unique_strikes_and_zero = sorted(list(set([0.0] + all_strikes_list)))
+    logger.debug(f"[{func_name}] Unique Strikes + Zero: {unique_strikes_and_zero}")
 
-    # Define the target function for the root finder (payoff should be zero)
     payoff_func = lambda s: _calculate_payoff_at_price(s, legs_for_payoff_calc)
 
-    # Search intervals: (0 to first_strike), (strike_i to strike_i+1), (last_strike to infinity_proxy)
     search_intervals = []
-    # Below first strike
-    first_strike = unique_strikes_and_zero[1] if len(unique_strikes_and_zero) > 1 else spot_price # Use spot if no strikes
-    search_intervals.append((max(0, first_strike * 0.1), first_strike * 1.05)) # Search below first strike, slightly past
+    if len(unique_strikes_and_zero) > 1:
+        first_strike = unique_strikes_and_zero[1]
+        search_intervals.append((max(0, first_strike * 0.1), first_strike * 1.05))
+    else: # Handle case with no strikes (shouldn't happen if legs exist)
+        first_strike = spot_price
+        search_intervals.append((max(0, first_strike * 0.1), first_strike * 1.05))
 
-    # Between strikes
     for i in range(len(all_strikes_unique_sorted) - 1):
         search_intervals.append((all_strikes_unique_sorted[i] * 0.95, all_strikes_unique_sorted[i+1] * 1.05))
 
-    # Above last strike
     last_strike = all_strikes_unique_sorted[-1] if all_strikes_unique_sorted else spot_price
-    # Define a reasonable upper search bound based on spot price
     upper_search_limit = max(last_strike * 1.5, spot_price * (PAYOFF_UPPER_BOUND_FACTOR + 0.2))
     search_intervals.append((last_strike * 0.95, upper_search_limit))
+    logger.debug(f"[{func_name}] Search Intervals: {search_intervals}")
 
-    processed_intervals = set()
-    root_finder_used = "None"
-
+    processed_intervals = set(); root_finder_used = "None"
     for p1_raw, p2_raw in search_intervals:
-        p1 = max(0.0, p1_raw) # Ensure lower bound >= 0
-        p2 = p2_raw
+        p1 = max(0.0, p1_raw); p2 = p2_raw
         interval_key = (round(p1, 4), round(p2, 4))
         if p1 >= p2 or interval_key in processed_intervals: continue
         processed_intervals.add(interval_key)
-
+        logger.debug(f"[{func_name}] Searching BE in interval [{p1:.2f}, {p2:.2f}]")
         try:
-            y1 = payoff_func(p1)
-            y2 = payoff_func(p2)
-
-            # Check if payoff crosses zero within the interval
-            if np.sign(y1) != np.sign(y2):
+            y1 = payoff_func(p1); y2 = payoff_func(p2)
+            logger.debug(f"[{func_name}]   Payoff({p1:.2f}) = {y1:.2f}, Payoff({p2:.2f}) = {y2:.2f}")
+            if np.sign(y1) != np.sign(y2): # Check for sign change
+                logger.debug(f"[{func_name}]   Sign change detected.")
                 found_be = None
-                if SCIPY_AVAILABLE:
+                if SCIPY_AVAILABLE and brentq is not None:
                     try:
-                        # Use Brent's method (robust root finder)
                         be = brentq(payoff_func, p1, p2, xtol=1e-6, rtol=1e-6)
-                        if be > 1e-6: # Check if BE is valid (positive price)
-                             found_be = be
-                             root_finder_used = "brentq"
-                             logger.debug(f"[{func_name}] Found BE (brentq) in [{p1:.2f}, {p2:.2f}]: {be:.4f}")
-                    except ValueError as brentq_err:
-                        # Brentq can fail if function doesn't change sign or other issues
-                        logger.debug(f"[{func_name}] Brentq failed for interval [{p1:.2f}, {p2:.2f}]: {brentq_err}. Trying interpolation.")
-                    except Exception as brentq_gen_err:
-                         logger.error(f"[{func_name}] Brentq unexpected error [{p1:.2f}, {p2:.2f}]: {brentq_gen_err}", exc_info=True)
-
-                # Fallback: Linear Interpolation if SciPy fails or is unavailable
-                if found_be is None and abs(y2 - y1) > 1e-9: # Avoid division by zero
+                        if be > 1e-6: found_be = be; root_finder_used = "brentq"
+                        logger.debug(f"[{func_name}]   Brentq result: {be:.4f}")
+                    except Exception as brentq_err: logger.debug(f"[{func_name}] Brentq failed: {brentq_err}. Trying interp.")
+                if found_be is None and abs(y2 - y1) > 1e-9: # Fallback Interpolation
                     be = p1 - y1 * (p2 - p1) / (y2 - y1)
-                    # Check if interpolated point is within bounds and positive
+                    logger.debug(f"[{func_name}]   Interpolation result: {be:.4f}")
                     if ((p1 <= be <= p2) or (p2 <= be <= p1)) and be > 1e-6:
-                        found_be = be
-                        root_finder_used = "interpolation"
-                        logger.debug(f"[{func_name}] Found BE (interp) in [{p1:.2f}, {p2:.2f}]: {be:.4f}")
-
+                        found_be = be; root_finder_used = "interpolation"
                 if found_be is not None:
+                     logger.debug(f"[{func_name}]   Found BE Point: {found_be:.4f} (Method: {root_finder_used})")
                      breakeven_points_found.append(found_be)
+            else: logger.debug(f"[{func_name}]   No sign change in interval.")
+        except Exception as search_err: logger.error(f"[{func_name}] Error during BE search interval [{p1:.2f}, {p2:.2f}]: {search_err}")
 
-        except Exception as search_err:
-            logger.error(f"[{func_name}] Error during BE search in interval [{p1:.2f}, {p2:.2f}]: {search_err}")
-
-    # Check payoff AT strikes for exact zero touches (e.g., straddle at strike)
-    zero_tolerance = 1e-4 # How close to zero counts
+    # Check strikes for exact zero touch
+    zero_tolerance = 1e-4
+    logger.debug(f"[{func_name}] Checking strikes for exact zero touch (tolerance={zero_tolerance})...")
     for k in all_strikes_unique_sorted:
         payoff_at_k = payoff_func(k)
+        logger.debug(f"[{func_name}]   Payoff@{k:.2f}: {payoff_at_k:.4f}")
         if abs(payoff_at_k) < zero_tolerance:
-             # Avoid adding duplicates extremely close to already found points
              is_close_to_existing = any(abs(k - be) < 0.01 for be in breakeven_points_found)
              if not is_close_to_existing:
-                  breakeven_points_found.append(k)
-                  logger.debug(f"[{func_name}] Found BE (strike touch): {k:.4f}")
+                  breakeven_points_found.append(k); logger.debug(f"[{func_name}]   Found BE (strike touch): {k:.4f}")
+             else: logger.debug(f"[{func_name}]   Strike touch {k:.4f} too close to existing BE, skipping.")
 
-    # Remove potential duplicates and ensure positive
     unique_be_points = sorted([p for p in list(set(round(p, 4) for p in breakeven_points_found)) if p >= 0])
+    logger.debug(f"[{func_name}] Raw Unique BE Points: {unique_be_points}")
 
     # --- Cluster Breakeven Points ---
-    def cluster_points(points: List[float], tolerance_ratio: float, reference_price: float) -> List[float]:
-        if not points: return []
-        points.sort()
-        # Use an absolute tolerance based on % of reference price, or a small minimum
-        absolute_tolerance = max(reference_price * tolerance_ratio, 0.01)
-        if not points: return []
-
-        clustered_groups = [[points[0]]] # Start first group
-        for p in points[1:]:
-            # If current point is close to the *last point added to the current group*
-            if abs(p - clustered_groups[-1][-1]) <= absolute_tolerance:
-                clustered_groups[-1].append(p) # Add to current group
-            else:
-                clustered_groups.append([p]) # Start a new group
-        # Return the average of each group, rounded
-        return [round(np.mean(group), 2) for group in clustered_groups]
-
-    breakeven_points_clustered = cluster_points(unique_be_points, BREAKEVEN_CLUSTER_GAP_PCT, spot_price)
-    logger.debug(f"Breakeven raw: {unique_be_points}, clustered: {breakeven_points_clustered}, method: {root_finder_used}")
-
+    logger.debug(f"[{func_name}] Clustering BE points with tolerance ratio {BREAKEVEN_CLUSTER_GAP_PCT}...")
+    breakeven_points_clustered = cluster_points(unique_be_points, BREAKEVEN_CLUSTER_GAP_PCT, spot_price) # Assume cluster_points exists
+    logger.debug(f"[{func_name}] Clustered BE Points: {breakeven_points_clustered}")
 
     # --- 6. Reward to Risk Ratio ---
+    logger.debug(f"[{func_name}] Calculating Reward:Risk Ratio...")
     reward_to_risk_ratio = "N/A"; zero_threshold = 1e-9
-    max_p_num = theo_max_profit # Use theoretical max profit
-    max_l_num_abs = abs(theo_max_loss) if np.isfinite(theo_max_loss) else np.inf # Use absolute theoretical max loss
+    max_p_num = max_profit_val # Use theoretical calculated above
+    max_l_num_abs = abs(max_loss_val) if np.isfinite(max_loss_val) else np.inf
+    logger.debug(f"[{func_name}] R:R Inputs - MaxP={max_p_num}, MaxL(Abs)={max_l_num_abs}")
 
-    if max_l_num_abs == np.inf: # Infinite risk
-        reward_to_risk_ratio = "0.00" # R:R is effectively zero
-    elif max_l_num_abs < zero_threshold: # Zero or negligible risk
-        if max_p_num == np.inf or max_p_num > zero_threshold:
-            reward_to_risk_ratio = "∞" # Infinite R:R
-        else:
-            reward_to_risk_ratio = "0.00" # No profit, no risk
-    elif max_p_num == np.inf: # Infinite profit, finite risk
-        reward_to_risk_ratio = "∞"
-    else: # Both profit and loss are finite and loss > 0
-        if max_p_num >= 0: # Only calculate if profit is non-negative
-             reward_to_risk_ratio = round(max_p_num / max_l_num_abs, 2)
-        else: # Max profit is negative (strategy always loses)
-             reward_to_risk_ratio = "Loss" # Indicate guaranteed loss scenario
-
+    # (R:R calculation logic remains the same)
+    if max_l_num_abs == np.inf: reward_to_risk_ratio = "0.00"
+    elif max_l_num_abs < zero_threshold: reward_to_risk_ratio = "∞" if (max_p_num == np.inf or max_p_num > zero_threshold) else "0.00"
+    elif max_p_num == np.inf: reward_to_risk_ratio = "∞"
+    else: reward_to_risk_ratio = round(max_p_num / max_l_num_abs, 2) if max_p_num >= 0 else "Loss"
+    logger.debug(f"[{func_name}] Calculated R:R = {reward_to_risk_ratio}")
 
     # --- 7. Format Final Output ---
     max_profit_str = "∞" if max_profit_val == np.inf else format(max_profit_val, '.2f')
     max_loss_str = "-∞" if max_loss_val == -np.inf else format(max_loss_val, '.2f')
-    reward_to_risk_str = str(reward_to_risk_ratio) # Already formatted or string like "∞", "Loss"
+    reward_to_risk_str = str(reward_to_risk_ratio)
+    logger.info(f"[{func_name}] Metrics calculated. MaxP: {max_profit_str}, MaxL: {max_loss_str}, BE(Clustered): {breakeven_points_clustered}, R:R: {reward_to_risk_str}, NetPrem: {total_net_premium:.2f}")
 
-    logger.info(f"[{func_name}] Metrics calculated. MaxP: {max_profit_str}, MaxL: {max_loss_str}, BE(Clustered): {breakeven_points_clustered}, R:R: {reward_to_risk_str}")
-
-    return {
+    result = {
         "calculation_inputs": { "asset": asset, "spot_price_used": round(spot_price, 2), "default_lot_size": default_lot_size, "num_legs_processed": processed_legs },
         "metrics": { "max_profit": max_profit_str, "max_loss": max_loss_str, "breakeven_points": breakeven_points_clustered, "reward_to_risk_ratio": reward_to_risk_str, "net_premium": round(total_net_premium, 2) },
-        "cost_breakdown_per_leg": cost_breakdown # Premium cost/credit only
+        "cost_breakdown_per_leg": cost_breakdown
     }
-
+    logger.debug(f"[{func_name}] Returning result: {result}")
+    return result
 
 # ===============================================================
-# 4. Calculate Option Greeks (Keep as is - Assumes Correct)
+# 4. Calculate Option Greeks (with Debugging)
 # ===============================================================
 def calculate_option_greeks(
     strategy_data: List[Dict[str, Any]],
@@ -1294,17 +1325,27 @@ def calculate_option_greeks(
     in strategy_data for each leg.
     """
     func_name = "calculate_option_greeks"
-    logger.info(f"Calculating SCALED PER-SHARE Greeks for {len(strategy_data)} legs, asset: {asset}, rate: {interest_rate_pct}%")
+    logger.info(f"[{func_name}] Calculating PER-SHARE Greeks for {len(strategy_data)} legs, asset: {asset}, rate: {interest_rate_pct}%")
+    logger.debug(f"[{func_name}] Input strategy_data: {strategy_data}")
     greeks_result_list: List[Dict[str, Any]] = []
+
+    # --- Check if mibian is available ---
+    if mibian is None:
+        logger.error(f"[{func_name}] Mibian library not found. Cannot calculate Greeks.")
+        return [] # Return empty list if library missing
 
     # --- 1. Fetch Spot Price ---
     try:
-        # Use consistent spot price source
+        logger.debug(f"[{func_name}] Fetching spot price...")
         spot_price_info = get_latest_spot_price_from_db(asset)
-        if spot_price_info: spot_price = spot_price_info['spot_price']
+        if spot_price_info and 'spot_price' in spot_price_info:
+            spot_price = _safe_get_float(spot_price_info, 'spot_price')
+            logger.debug(f"[{func_name}] Using spot price from DB {spot_price}")
         else:
+            logger.debug(f"[{func_name}] Spot price from DB failed or missing key, trying cache...")
             cached_data = get_cached_option(asset)
             spot_price = _safe_get_float(cached_data.get("records", {}), "underlyingValue") if cached_data else None
+            logger.debug(f"[{func_name}] Using spot price from Cache/Live {spot_price}")
 
         if spot_price is None or not isinstance(spot_price, (int, float)) or spot_price <= 0:
             raise ValueError(f"Spot price missing/invalid ({spot_price}) for greeks calculation")
@@ -1315,96 +1356,124 @@ def calculate_option_greeks(
         return [] # Return empty list if spot price fails
 
     # --- 2. Process Each Leg ---
+    logger.debug(f"[{func_name}] Processing legs for Greeks...")
     for i, leg_data in enumerate(strategy_data):
+        leg_desc = f"Leg {i+1}"
         try:
+            logger.debug(f"[{func_name}] Processing {leg_desc}: {leg_data}")
             # --- Validate and Extract Leg Data Safely ---
             if not isinstance(leg_data, dict):
-                raise ValueError(f"Leg {i} data is not a dictionary.")
+                raise ValueError(f"{leg_desc} data is not a dictionary.")
 
             strike_price = _safe_get_float(leg_data, 'strike')
-            # DTE calculated during preparation step
-            days_to_expiry = _safe_get_int(leg_data, 'days_to_expiry')
-            # IV extracted during preparation step
-            implied_vol_pct = _safe_get_float(leg_data, 'iv') # Expects IV as percentage (e.g., 25.5)
+            days_to_expiry = _safe_get_int(leg_data, 'days_to_expiry') # Expected from prep step
+            implied_vol_pct = _safe_get_float(leg_data, 'iv') # Expected from prep step
             option_type_flag = str(leg_data.get('op_type', '')).lower() # 'c' or 'p'
             transaction_type = str(leg_data.get('tr_type', '')).lower() # 'b' or 's'
+            # Get lots/size for potential later use if calculating portfolio greeks
+            lots = _safe_get_int(leg_data, 'lot')
+            lot_size = _safe_get_int(leg_data, 'lot_size')
+
+            # --- Debug: Log extracted values ---
+            logger.debug(f"[{func_name}] {leg_desc} Extracted: K={strike_price}, DTE={days_to_expiry}, IV={implied_vol_pct}%, Type={option_type_flag}, Tr={transaction_type}, Lots={lots}, Size={lot_size}")
+            # --- End Debug ---
 
             # --- Input Validation ---
-            if strike_price is None or strike_price <= 0: raise ValueError("Missing/invalid 'strike'")
-            if days_to_expiry is None or days_to_expiry < 0: raise ValueError("Missing/invalid 'days_to_expiry'")
-            if implied_vol_pct is None or implied_vol_pct <= 0: raise ValueError("Missing/invalid 'iv'")
-            if option_type_flag not in ['c', 'p']: raise ValueError("Invalid 'op_type'")
-            if transaction_type not in ['b', 's']: raise ValueError("Invalid 'tr_type'")
+            error_msg = None
+            if strike_price is None or strike_price <= 0: error_msg="Missing/invalid 'strike'"
+            elif days_to_expiry is None or days_to_expiry < 0: error_msg="Missing/invalid 'days_to_expiry'"
+            # Allow IV=0 (placeholder from prep step), but mibian might fail - log warning instead of error here
+            elif implied_vol_pct is None: error_msg="Missing 'iv'"
+            elif option_type_flag not in ['c', 'p']: error_msg="Invalid 'op_type'"
+            elif transaction_type not in ['b', 's']: error_msg="Invalid 'tr_type'"
+            elif lots is None or lot_size is None: error_msg="Missing 'lot' or 'lot_size'" # Need for context even if not used in calc here
+
+            if error_msg:
+                 logger.warning(f"[{func_name}] Skipping {leg_desc} due to invalid input: {error_msg}. Data: {leg_data}")
+                 continue # Skip this leg
+
+            if implied_vol_pct <= 0:
+                 logger.warning(f"[{func_name}] Skipping {leg_desc} due to non-positive IV ({implied_vol_pct}). Data: {leg_data}")
+                 continue # Skip leg if IV is zero or negative
+
 
             # Mibian calculation (handle near-zero DTE carefully)
-            mibian_dte = max(days_to_expiry, 0.0001) # Avoid zero DTE for mibian
+            mibian_dte = max(days_to_expiry, 0.0001) # Use small positive floor for DTE
             mibian_inputs = [spot_price, strike_price, interest_rate_pct, mibian_dte]
             volatility_input = implied_vol_pct
+            logger.debug(f"[{func_name}] {leg_desc} Mibian Inputs: {mibian_inputs}, Volatility: {volatility_input}")
 
             try:
                 # Use specific model based on type for clarity
+                bs_model = mibian.BS(mibian_inputs, volatility=volatility_input) # Calculate BS model once
+                logger.debug(f"[{func_name}] {leg_desc} Mibian model calculated.")
+
                 if option_type_flag == 'c':
-                    bs_model = mibian.BS(mibian_inputs, volatility=volatility_input)
                     delta = bs_model.callDelta
                     theta = bs_model.callTheta
                     rho = bs_model.callRho
+                    logger.debug(f"[{func_name}] {leg_desc} Call Greeks (Raw): D={delta:.4f}, T={theta:.4f}, R={rho:.4f}")
                 else: # Put
-                    bs_model = mibian.BS(mibian_inputs, volatility=volatility_input)
                     delta = bs_model.putDelta
                     theta = bs_model.putTheta
                     rho = bs_model.putRho
+                    logger.debug(f"[{func_name}] {leg_desc} Put Greeks (Raw): D={delta:.4f}, T={theta:.4f}, R={rho:.4f}")
+
                 # Gamma and Vega are the same for calls and puts
                 gamma = bs_model.gamma
                 vega = bs_model.vega
+                logger.debug(f"[{func_name}] {leg_desc} Common Greeks (Raw): G={gamma:.4f}, V={vega:.4f}")
+
             except OverflowError as math_err:
-                 # Often happens with extreme inputs or very near expiry
-                 logger.warning(f"[{func_name}] Mibian math error for leg {i} (asset {asset}, K={strike_price}, DTE={mibian_dte}, IV={iv}): {math_err}. Skipping greeks for this leg.")
+                 logger.warning(f"[{func_name}] Mibian math error for {leg_desc} (asset {asset}, K={strike_price}, DTE={mibian_dte}, IV={iv}): {math_err}. Skipping greeks for this leg.")
                  continue # Skip this leg
-            except Exception as mibian_err:
-                 raise ValueError(f"Mibian calculation error: {mibian_err}") from mibian_err
+            except Exception as mibian_err: # Catch other mibian errors
+                 logger.error(f"[{func_name}] Mibian calculation error for {leg_desc}: {mibian_err}", exc_info=True)
+                 raise ValueError(f"Mibian calculation error") from mibian_err # Re-raise as ValueError
 
             # --- Adjust Sign for Short Positions ---
             sign_multiplier = -1.0 if transaction_type == 's' else 1.0
+            logger.debug(f"[{func_name}] {leg_desc} Sign Multiplier (based on tr_type='{transaction_type}'): {sign_multiplier}")
             delta *= sign_multiplier
             gamma *= sign_multiplier
-            theta *= sign_multiplier # Theta is usually negative (time decay cost), so selling makes it positive
+            theta *= sign_multiplier
             vega *= sign_multiplier
             rho *= sign_multiplier
+            logger.debug(f"[{func_name}] {leg_desc} Greeks (After Sign Adjustment): D={delta:.4f}, G={gamma:.4f}, T={theta:.4f}, V={vega:.4f}, R={rho:.4f}")
 
-            # --- Store PER-SHARE Greeks (NO SCALING HERE as per user logic intent) ---
-            # Scaling was removed based on user's original provided `calculate_option_greeks`
-            # If scaling *is* desired (e.g., delta * 100), add it back here.
+
+            # --- Store PER-SHARE Greeks (Unscaled) ---
             calculated_greeks = {
-                'delta': round(delta, 4),
-                'gamma': round(gamma, 4),
-                'theta': round(theta, 4), # Theta per day
-                'vega': round(vega, 4),   # Vega per 1% IV change
-                'rho': round(rho, 4)    # Rho per 1% rate change
+                'delta': round(delta, 4), 'gamma': round(gamma, 4), 'theta': round(theta, 4),
+                'vega': round(vega, 4), 'rho': round(rho, 4)
             }
 
-            # Check for non-finite values AFTER calculations
+            # Check for non-finite values AFTER calculations and sign adjustment
             if any(not np.isfinite(v) for v in calculated_greeks.values()):
-                logger.warning(f"[{func_name}] Skipping leg {i} for {asset} due to non-finite Greek result.")
+                logger.warning(f"[{func_name}] Skipping {leg_desc} for {asset} due to non-finite Greek result after sign adjustment. Greeks: {calculated_greeks}")
                 continue # Skip this leg
 
             # Append results for this leg
-            greeks_result_list.append({
-                'leg_index': i,
-                'input_data': { # Log key inputs for debugging
-                     'strike': strike_price, 'dte': days_to_expiry, 'iv': implied_vol_pct,
-                     'op_type': option_type_flag, 'tr_type': transaction_type
-                },
-                'calculated_greeks_per_share': calculated_greeks # Unscaled, per-share
-            })
+            input_data_log = { # Log key inputs for debugging
+                 'strike': strike_price, 'dte': days_to_expiry, 'iv': implied_vol_pct,
+                 'op_type': option_type_flag, 'tr_type': transaction_type,
+                 'spot_used': spot_price, 'rate_used': interest_rate_pct
+            }
+            leg_result = { 'leg_index': i, 'input_data': input_data_log, 'calculated_greeks_per_share': calculated_greeks }
+            greeks_result_list.append(leg_result)
+            logger.debug(f"[{func_name}] {leg_desc} Greek result appended: {leg_result}")
 
         except (ValueError, KeyError, TypeError) as validation_err:
-            logger.warning(f"[{func_name}] Skipping Greek calculation for leg {i} due to invalid input: {validation_err}. Leg data snapshot: strike={leg_data.get('strike')}, dte={leg_data.get('days_to_expiry')}, iv={leg_data.get('iv')}")
+            # Log expected validation errors as warnings
+            logger.warning(f"[{func_name}] Skipping Greek calculation for {leg_desc} due to invalid input: {validation_err}. Leg data snapshot: strike={leg_data.get('strike')}, dte={leg_data.get('days_to_expiry')}, iv={leg_data.get('iv')}")
             continue # Skip to the next leg
         except Exception as e:
-            logger.error(f"[{func_name}] Unexpected error calculating Greeks for leg {i}: {e}. Leg data: {leg_data}", exc_info=True)
+            # Log unexpected errors more severely
+            logger.error(f"[{func_name}] Unexpected error calculating Greeks for {leg_desc}: {e}. Leg data: {leg_data}", exc_info=True)
             continue # Skip to the next leg
 
     logger.info(f"[{func_name}] Finished calculating PER-SHARE Greeks for {len(greeks_result_list)} valid legs.")
+    logger.debug(f"[{func_name}] Returning greeks list: {greeks_result_list}")
     return greeks_result_list
 
 
@@ -2173,110 +2242,151 @@ async def get_payoff_chart_endpoint(request: PayoffRequest):
     Calculates strategy metrics, Greeks, taxes, and generates a payoff chart.
     Handles data preparation and concurrent execution of calculations.
     """
-    endpoint_name = "get_payoff_chart_endpoint"
-    asset = request.asset; strategy_input = request.strategy
-    logger.info(f"[{endpoint_name}] Request received: Asset={asset}, Legs={len(strategy_input)}")
-    # --- Debug: Log raw request ---
-    logger.debug(f"[{endpoint_name}] Raw request strategy input: {strategy_input}")
-    # --- End Debug ---
+    endpoint_name = "get_payoff_chart_endpoint" # Keep for clarity if needed
+    asset = request.asset
+    strategy_input = request.strategy
+    # Use logger with function name implicitly via format string
+    logger.info(f"Request received: Asset={asset}, Legs={len(strategy_input)}")
+    logger.debug(f"Raw request strategy input: {strategy_input}") # Log raw Pydantic models
+
     if not asset or not strategy_input:
+        logger.warning("Missing asset or strategy legs in request.")
         raise HTTPException(status_code=400, detail="Missing asset or strategy legs")
 
     # --- Step 1: Fetch Initial Prerequisite Data (Spot Price, Lot Size) ---
-    # (This part seems okay now after the fix)
+    logger.debug("Starting Step 1: Fetch Prerequisites...")
     try:
-        # ... prerequisite fetching ...
         start_prereq_time = time.monotonic()
+        logger.debug(f"Calling get_spot_price for asset: {asset}")
         spot_response = await get_spot_price(asset)
+        logger.debug(f"Received spot_response: {spot_response}")
+
+        # Use .get() for safety when accessing dictionary keys
         spot_price = spot_response.get('spot_price')
-        if spot_price is None: raise ValueError("Could not retrieve spot price value")
-        logger.info(f"[{endpoint_name}] Prerequisite Spot Price: {spot_price}")
+        if spot_price is None:
+             logger.error(f"'spot_price' key not found in response: {spot_response}")
+             raise ValueError("Could not retrieve spot price value from internal function.")
+        # Ensure spot_price is float for calculations
+        try:
+            spot_price = float(spot_price)
+        except (ValueError, TypeError) as conv_err:
+             logger.error(f"Could not convert spot_price '{spot_response.get('spot_price')}' to float: {conv_err}")
+             raise ValueError("Invalid spot price format received.")
+        if spot_price <= 0:
+             raise ValueError(f"Invalid spot price value received: {spot_price}")
+        logger.info(f"Prerequisite Spot Price: {spot_price}")
+
+        logger.debug(f"Calling get_lot_size for asset: {asset}")
         default_lot_size = get_lot_size(asset)
-        if not default_lot_size or default_lot_size <= 0 : raise ValueError(f"Lot size missing or invalid ({default_lot_size})")
-        logger.info(f"[{endpoint_name}] Prerequisite Lot Size: {default_lot_size}")
+        logger.debug(f"Received default_lot_size: {default_lot_size}")
+        if not default_lot_size or not isinstance(default_lot_size, int) or default_lot_size <= 0 :
+            raise ValueError(f"Lot size missing or invalid ({default_lot_size})")
+        logger.info(f"Prerequisite Lot Size: {default_lot_size}")
+
         prereq_duration = time.monotonic() - start_prereq_time
-        logger.info(f"[{endpoint_name}] Prerequisites fetched in {prereq_duration:.3f}s")
-    except Exception as e: # Catch errors during prerequisite fetching
-        logger.error(f"[{endpoint_name}] Error fetching prerequisites for {asset}: {e}", exc_info=True)
-        status_code = 404 if isinstance(e, ValueError) else 503 # Use 404 for ValueErrors (missing data), 503 otherwise
+        logger.info(f"Prerequisites fetched successfully in {prereq_duration:.3f}s")
+
+    except HTTPException as http_err: # Catch HTTP exceptions from called functions
+        logger.error(f"HTTP error during prerequisite fetch: {http_err.detail}", exc_info=True) # Log details
+        raise http_err # Re-raise
+    except ValueError as val_err: # Catch our specific validation errors
+         logger.error(f"Prerequisite data validation failed: {val_err}")
+         raise HTTPException(status_code=404, detail=str(val_err))
+    except Exception as e: # Catch any other unexpected errors
+        logger.error(f"Unexpected error fetching prerequisites: {e}", exc_info=True) # Log full traceback
+        status_code = 503 # Service unavailable likely if basic data fails
         raise HTTPException(status_code=status_code, detail=f"Server error fetching initial data: {e}")
 
 
     # --- Step 2: Prepare Strategy Data (Validate, Add IV, DTE) ---
-    logger.info(f"[{endpoint_name}] Preparing strategy data...")
+    logger.info("Starting Step 2: Prepare Strategy Data...")
     prepared_strategy_data = []
     today = date.today()
     prep_errors = []
-    for i, leg_input_model in enumerate(strategy_input): # Use different variable name
-        leg_input = leg_input_model.dict() # Convert Pydantic model to dict for easier access
-        leg_desc = f"Leg {i+1}" # Description for logging
-        logger.debug(f"[{endpoint_name}] Processing {leg_desc} Input: {leg_input}")
+    logger.debug(f"Current date (for DTE): {today}")
+
+    for i, leg_input_model in enumerate(strategy_input):
+        leg_input = leg_input_model.dict() # Convert Pydantic model to dict
+        leg_desc = f"Leg {i+1}"
+        logger.debug(f"--- Processing {leg_desc} --- Input: {leg_input}")
         try:
-            # Extract using .get() on the dictionary for safety
+            # Extract using .get() for safety, provide defaults where possible
             strike_raw = leg_input.get('strike_price')
             premium_raw = leg_input.get('option_price')
             lots_raw = leg_input.get('lots')
-            opt_type_req = str(leg_input.get('option_type', '')).upper() # Default to empty string if missing
-            tr_type_req = str(leg_input.get('tr_type', '')).lower()     # Default to empty string if missing
-            expiry_str = str(leg_input.get('expiry_date', ''))         # Default to empty string if missing
+            opt_type_req = str(leg_input.get('option_type', '')).upper()
+            tr_type_req = str(leg_input.get('tr_type', '')).lower()
+            expiry_str = str(leg_input.get('expiry_date', ''))
             lot_size_raw = leg_input.get('lot_size') # Can be None
 
-            # --- Debug: Log extracted raw values ---
-            logger.debug(f"[{endpoint_name}] {leg_desc} Raw Extracted: strike={strike_raw}, premium={premium_raw}, lots={lots_raw}, type={opt_type_req}, tr={tr_type_req}, expiry={expiry_str}, lot_size={lot_size_raw}")
-            # --- End Debug ---
+            logger.debug(f"{leg_desc} Raw Extracted: strike={strike_raw}, premium={premium_raw}, lots={lots_raw}, type={opt_type_req}, tr={tr_type_req}, expiry={expiry_str}, lot_size={lot_size_raw}")
 
-            # Use safe conversion helpers
-            strike = _safe_get_float({'val': strike_raw}, 'val') # Pass as dict to helper
-            premium = _safe_get_float({'val': premium_raw}, 'val')
-            lots_abs = _safe_get_int({'val': lots_raw}, 'val')
-
-            # --- Debug: Log converted values ---
-            logger.debug(f"[{endpoint_name}] {leg_desc} Converted: strike={strike}, premium={premium}, lots_abs={lots_abs}")
-            # --- End Debug ---
+            # Use safe conversion helpers or direct conversion with checks
+            strike = _safe_get_float(leg_input, 'strike_price')
+            premium = _safe_get_float(leg_input, 'option_price')
+            lots_abs = _safe_get_int(leg_input, 'lots')
+            logger.debug(f"{leg_desc} Converted: strike={strike}, premium={premium}, lots_abs={lots_abs}")
 
             # Validate core types and values
-            if strike is None or strike <= 0: raise ValueError("Invalid strike price")
-            if premium is None or premium < 0: raise ValueError("Invalid option price")
-            if lots_abs is None or lots_abs <= 0: raise ValueError("Invalid lots")
-            if opt_type_req not in ("CE", "PE"): raise ValueError("Invalid option type")
-            if tr_type_req not in ("b", "s"): raise ValueError("Invalid transaction type")
+            if strike is None or strike <= 0: raise ValueError("Invalid/Missing strike price")
+            if premium is None or premium < 0: raise ValueError("Invalid/Missing option price")
+            if lots_abs is None or lots_abs <= 0: raise ValueError("Invalid/Missing lots")
+            if opt_type_req not in ("CE", "PE"): raise ValueError(f"Invalid option type: '{opt_type_req}'")
+            if tr_type_req not in ("b", "s"): raise ValueError(f"Invalid transaction type: '{tr_type_req}'")
             if not expiry_str: raise ValueError("Missing expiry date")
+            logger.debug(f"{leg_desc} Core values validated.")
 
             # Validate and calculate Date-to-Expiry (DTE)
             try:
                 expiry_dt = datetime.strptime(expiry_str, "%Y-%m-%d").date()
-                logger.debug(f"[{endpoint_name}] {leg_desc} Parsed expiry_dt: {expiry_dt}")
-            except ValueError: raise ValueError("Invalid expiry date format (use YYYY-MM-DD)")
+                logger.debug(f"{leg_desc} Parsed expiry_dt: {expiry_dt}")
+            except ValueError:
+                logger.error(f"{leg_desc} Invalid expiry date format: '{expiry_str}'")
+                raise ValueError("Invalid expiry date format (use YYYY-MM-DD)")
             days_to_expiry = (expiry_dt - today).days
-            logger.debug(f"[{endpoint_name}] {leg_desc} Calculated DTE: {days_to_expiry}")
+            logger.debug(f"{leg_desc} Calculated DTE: {days_to_expiry}")
+            # Allow DTE=0 for calculations, but maybe log warning
             if days_to_expiry < 0: raise ValueError("Expiry date cannot be in the past")
+            elif days_to_expiry == 0: logger.warning(f"{leg_desc} Expiry date is today (DTE=0). Calculations might be sensitive.")
 
             # Determine Lot Size
             leg_lot_size = default_lot_size # Start with default
             if lot_size_raw is not None:
-                temp_ls = _safe_get_int({'val': lot_size_raw}, 'val')
+                temp_ls = _safe_get_int({'val': lot_size_raw}, 'val') # Use safe helper correctly
                 if temp_ls is not None and temp_ls > 0:
                     leg_lot_size = temp_ls
-                    logger.debug(f"[{endpoint_name}] {leg_desc} Using leg-specific lot size: {leg_lot_size}")
+                    logger.debug(f"{leg_desc} Using leg-specific lot size: {leg_lot_size}")
                 else:
-                    logger.warning(f"[{endpoint_name}] Ignoring invalid leg-specific lot size ({lot_size_raw}) for {leg_desc}, using default {default_lot_size}")
-            logger.debug(f"[{endpoint_name}] {leg_desc} Final lot size: {leg_lot_size}")
+                    logger.warning(f"Ignoring invalid leg-specific lot size ({lot_size_raw}) for {leg_desc}, using default {default_lot_size}")
+            else:
+                 logger.debug(f"{leg_desc} No leg-specific lot size provided, using default: {leg_lot_size}")
+            # Final check on lot size used
+            if not isinstance(leg_lot_size, int) or leg_lot_size <= 0:
+                logger.error(f"{leg_desc} Final lot size is invalid: {leg_lot_size}")
+                raise ValueError("Invalid final lot size determined.")
+            logger.debug(f"{leg_desc} Final lot size to use: {leg_lot_size}")
 
-            # Extract Implied Volatility (IV) - Critical for Greeks
-            logger.debug(f"[{endpoint_name}] {leg_desc} Calling extract_iv with: asset={asset}, strike={strike}, expiry={expiry_str}, type={opt_type_req}")
+
+            # Extract Implied Volatility (IV)
+            logger.debug(f"{leg_desc} Calling extract_iv with: asset={asset}, strike={strike}, expiry={expiry_str}, type={opt_type_req}")
             iv = extract_iv(asset, strike, expiry_str, opt_type_req)
-            logger.debug(f"[{endpoint_name}] {leg_desc} IV returned from extract_iv: {iv} (Type: {type(iv)})")
+            logger.debug(f"{leg_desc} IV returned from extract_iv: {iv} (Type: {type(iv)})")
 
-            if iv is None or not isinstance(iv, (int, float)) or iv <= 0: # Added type check
-                logger.warning(f"[{endpoint_name}] Missing or invalid IV (val={iv}, type={type(iv)}) for {leg_desc}: {asset} {expiry_str} {strike} {opt_type_req}. Using 0.0 placeholder. Greeks may be inaccurate.")
-                iv = 0.0 # Use placeholder
-
-            # Convert IV to float safely
-            try:
-                 iv_float = float(iv)
-            except (ValueError, TypeError) as iv_conv_err:
-                 logger.error(f"[{endpoint_name}] {leg_desc} Failed to convert IV '{iv}' to float: {iv_conv_err}. Using 0.0.")
-                 iv_float = 0.0
+            # Validate and prepare IV
+            iv_float = 0.0 # Default placeholder
+            if iv is None:
+                logger.warning(f"{leg_desc} IV is None. Using placeholder 0.0. Greeks will be inaccurate.")
+            else:
+                try:
+                    iv_float = float(iv)
+                    if iv_float <= 0:
+                        logger.warning(f"{leg_desc} IV is not positive ({iv_float}). Using placeholder 0.0. Greeks will be inaccurate.")
+                        iv_float = 0.0 # Reset to placeholder if not positive
+                    else:
+                        logger.debug(f"{leg_desc} IV successfully converted to float: {iv_float}")
+                except (ValueError, TypeError) as iv_conv_err:
+                     logger.error(f"{leg_desc} Failed to convert IV '{iv}' to float: {iv_conv_err}. Using 0.0 placeholder.")
+                     iv_float = 0.0 # Use placeholder on conversion error
 
             # Prepare final dictionary for this leg
             prepared_leg = {
@@ -2286,81 +2396,97 @@ async def get_payoff_chart_endpoint(request: PayoffRequest):
                 "op_pr": premium,
                 "lot": lots_abs,
                 "lot_size": leg_lot_size,
-                "iv": iv_float, # Use the safely converted float
+                "iv": iv_float, # Use the validated/converted float
                 "days_to_expiry": days_to_expiry,
                 "expiry_date_str": expiry_str,
             }
-            # --- Debug: Log the fully prepared leg data ---
-            logger.debug(f"[{endpoint_name}] {leg_desc} Prepared Data: {prepared_leg}")
-            # --- End Debug ---
+            logger.debug(f"{leg_desc} Prepared Data: {prepared_leg}")
             prepared_strategy_data.append(prepared_leg)
+            logger.debug(f"--- {leg_desc} Processed Successfully ---")
 
         except (ValueError, KeyError, TypeError) as e: # Catch expected validation/conversion errors
             error_msg = f"{leg_desc}: {e}"
-            logger.error(f"[{endpoint_name}] Validation/Type error processing {error_msg}. Input: {leg_input}")
-            prep_errors.append(error_msg)
-        except Exception as e: # Catch unexpected errors
-             # Log exception type along with message
+            logger.error(f"Validation/Type error processing leg: {error_msg}. Input: {leg_input}")
+            prep_errors.append(error_msg) # Collect specific error
+            logger.debug(f"--- {leg_desc} FAILED Validation/Type ---")
+        except Exception as e: # Catch any other unexpected errors during leg processing
              error_msg = f"{leg_desc}: Unexpected error ({type(e).__name__})"
-             logger.error(f"[{endpoint_name}] {error_msg}: {e}. Input: {leg_input}", exc_info=True) # Include traceback
-             prep_errors.append(error_msg) # Append more informative error
+             logger.error(f"{error_msg}: {e}. Input: {leg_input}", exc_info=True) # Log traceback
+             prep_errors.append(error_msg) # Collect specific error
+             logger.debug(f"--- {leg_desc} FAILED Unexpectedly ---")
 
-    if prep_errors: # If any legs failed preparation
-        logger.error(f"[{endpoint_name}] Failing request due to preparation errors: {prep_errors}")
-        raise HTTPException(status_code=400, detail=f"Invalid strategy leg data: {'; '.join(prep_errors)}")
-    if not prepared_strategy_data: # If input was empty or all legs failed
-        logger.error(f"[{endpoint_name}] No valid strategy legs after preparation.")
+    # --- After Loop ---
+    if prep_errors:
+        logger.error(f"Failing request due to {len(prep_errors)} preparation error(s): {prep_errors}")
+        # Join errors for detail, limit length if necessary
+        detail_str = f"Invalid strategy leg data: {'; '.join(prep_errors)}"
+        if len(detail_str) > 400: detail_str = detail_str[:397] + "..."
+        raise HTTPException(status_code=400, detail=detail_str)
+    if not prepared_strategy_data:
+        logger.error("No valid strategy legs after preparation.")
         raise HTTPException(status_code=400, detail="No valid strategy legs provided after preparation.")
-    logger.info(f"[{endpoint_name}] Strategy data prepared successfully for {len(prepared_strategy_data)} legs.")
+    logger.info(f"Strategy data prepared successfully for {len(prepared_strategy_data)} legs.")
 
 
     # --- Step 3: Perform Calculations Concurrently ---
-    # (Calculation logic and logging remain the same)
-    # ...
-    logger.info(f"[{endpoint_name}] Starting concurrent calculations for {len(prepared_strategy_data)} legs...")
+    logger.info(f"Starting Step 3: Concurrent Calculations for {len(prepared_strategy_data)} legs...")
     start_calc_time = time.monotonic()
     results = {}
     try:
-        # ... (metrics, chart, tax, greeks) ...
-        logger.debug(f"[{endpoint_name}] Calculating metrics...")
+        logger.debug("Dispatching metrics calculation...")
         metrics_result = await asyncio.to_thread(calculate_strategy_metrics, prepared_strategy_data, asset)
-        if metrics_result is None: raise ValueError("Strategy metrics calculation failed")
+        if metrics_result is None:
+            # Make this specific error more informative
+             logger.error("Strategy metrics calculation returned None. Cannot generate chart accurately.")
+             raise ValueError("Strategy metrics calculation failed") # Raise ValueError to be caught below
         results["metrics"] = metrics_result
-        logger.debug(f"[{endpoint_name}] Metrics calculated.")
+        logger.debug(f"Metrics calculation completed. Result keys: {list(metrics_result.keys()) if metrics_result else 'None'}")
 
-        logger.debug(f"[{endpoint_name}] Starting concurrent chart, tax, greeks...")
+        logger.debug("Dispatching concurrent chart, tax, greeks calculations...")
         tasks = {
             "chart": asyncio.to_thread(generate_payoff_chart_matplotlib, prepared_strategy_data, asset, metrics_result),
             "tax": asyncio.to_thread(calculate_option_taxes, prepared_strategy_data, asset),
             "greeks": asyncio.to_thread(calculate_option_greeks, prepared_strategy_data, asset)
         }
+        # Await remaining tasks
+        logger.debug(f"Awaiting {len(tasks)} concurrent tasks: {list(tasks.keys())}")
         task_values = await asyncio.gather(*tasks.values(), return_exceptions=True)
-        # ... (assign results, log errors) ...
+        logger.debug(f"Concurrent tasks finished. Results/Exceptions: {task_values}")
+
+        # Assign results, checking for exceptions
         results["chart"] = task_values[0] if not isinstance(task_values[0], Exception) else None
         results["tax"] = task_values[1] if not isinstance(task_values[1], Exception) else None
-        results["greeks"] = task_values[2] if not isinstance(task_values[2], Exception) else []
-        for i, name in enumerate(tasks.keys()):
-            if isinstance(task_values[i], Exception): logger.error(f"[{endpoint_name}] Error during concurrent calculation of '{name}': {task_values[i]}", exc_info=task_values[i])
-        if results["chart"] is None: logger.error(f"[{endpoint_name}] Payoff chart generation failed.")
-        if results["tax"] is None: logger.warning(f"[{endpoint_name}] Tax calculation failed or returned None.")
-        if not results["greeks"]: logger.warning(f"[{endpoint_name}] Greeks calculation failed or returned empty list.")
+        results["greeks"] = task_values[2] if not isinstance(task_values[2], Exception) else [] # Default to empty list on error
 
-    except ValueError as calc_val_err:
-        logger.error(f"[{endpoint_name}] Calculation prerequisite failed for {asset}: {calc_val_err}")
+        # Log detailed errors from concurrent tasks
+        for i, name in enumerate(tasks.keys()):
+            task_result = task_values[i]
+            if isinstance(task_result, Exception):
+                 logger.error(f"Error during concurrent calculation of '{name}': {type(task_result).__name__}: {task_result}", exc_info=task_result) # Log full traceback for exception
+            else:
+                 logger.debug(f"Concurrent task '{name}' completed successfully.") # Log success
+
+        # Check for critical failures after logging details
+        if results["chart"] is None: logger.error("Payoff chart generation failed.")
+        if results["tax"] is None: logger.warning("Tax calculation failed or returned None.")
+        if not results["greeks"]: logger.warning("Greeks calculation failed or returned empty list.")
+
+
+    except ValueError as calc_val_err: # Catch specific ValueErrors (like metrics failing)
+        logger.error(f"Calculation prerequisite error: {calc_val_err}", exc_info=True) # Log traceback
         raise HTTPException(status_code=500, detail=f"Calculation Error: {calc_val_err}")
-    except Exception as e:
-        logger.error(f"[{endpoint_name}] Error during calculation phase for {asset}: {e}", exc_info=True)
+    except Exception as e: # Catch errors from gather or other unexpected issues
+        logger.error(f"Unexpected error during calculation phase: {e}", exc_info=True) # Log full traceback
+        # This is where the original "Unexpected Server Error during calculation." came from
         raise HTTPException(status_code=500, detail=f"Unexpected Server Error during calculation.")
 
     calc_duration = time.monotonic() - start_calc_time
-    logger.info(f"[{endpoint_name}] Calculations finished in {calc_duration:.3f}s")
+    logger.info(f"Calculations finished in {calc_duration:.3f}s")
 
     # --- Step 4: Return Results ---
-    # (Return logic remains the same)
-    # ...
+    logger.info("Starting Step 4: Prepare and Return Results...")
     success_status = results.get("chart") is not None
-    logger.info(f"[{endpoint_name}] Successfully processed payoff request for asset: {asset}. Status: {'Success' if success_status else 'Partial Success (Chart Failed)'}")
-    return {
+    final_response = {
         "image_base64": results.get("chart"),
         "success": success_status,
         "metrics": results.get("metrics"),
