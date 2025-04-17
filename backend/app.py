@@ -181,6 +181,25 @@ def _safe_get_int(data: Dict, key: str, default: Optional[int] = None) -> Option
         # logger.debug(f"Invalid int value '{value}' for key '{key}'. Using default {default}.") # Less noisy debug
         return default
 
+def cluster_points(points: List[float], tolerance_ratio: float, reference_value: float) -> List[float]:
+    """Clusters nearby breakeven points."""
+    if not points:
+        return []
+    points.sort()
+    clustered = []
+    current_cluster = [points[0]]
+    tolerance_value = tolerance_ratio * reference_value
+
+    for i in range(1, len(points)):
+        if abs(points[i] - current_cluster[-1]) <= tolerance_value:
+            current_cluster.append(points[i])
+        else:
+            clustered.append(np.mean(current_cluster)) # Use mean of the cluster
+            current_cluster = [points[i]]
+
+    clustered.append(np.mean(current_cluster)) # Add the last cluster
+    return [round(p, 2) for p in clustered] # Return rounded means
+
 def get_cached_option(asset: str) -> Optional[dict]:
     """
     Fetches option chain data, prioritizing cache, then live NSE fetch.
@@ -315,20 +334,20 @@ def fetch_and_update_single_asset_data(asset_name: str):
                 asset_id = result["id"]
 
                 # --- Update Spot Price in Assets Table ---
-                if db_live_spot is not None:
-                    try:
-                        cursor.execute(
-                            "UPDATE option_data.assets SET last_spot_price = %s, last_spot_update_time = NOW() WHERE id = %s",
-                            (db_live_spot, asset_id)
-                        )
-                        if cursor.rowcount > 0:
-                             logger.info(f"[{func_name}] Updated spot price ({db_live_spot}) in DB for asset ID {asset_id}")
-                        # No warning if 0 rows affected, might be same price
-                    except mysql.connector.Error as spot_upd_err:
-                         # Log as warning, but continue processing chain data if possible
-                         logger.warning(f"[{func_name}] FAILED to update spot price in DB for {asset_name} (Check columns exist): {spot_upd_err}")
-                else:
-                    logger.warning(f"[{func_name}] Could not extract spot price from live data for DB update ({asset_name}).")
+                # if db_live_spot is not None:
+                #     try:
+                #         cursor.execute(
+                #             "UPDATE option_data.assets SET last_spot_price = %s, last_spot_update_time = NOW() WHERE id = %s",
+                #             (db_live_spot, asset_id)
+                #         )
+                #         if cursor.rowcount > 0:
+                #              logger.info(f"[{func_name}] Updated spot price ({db_live_spot}) in DB for asset ID {asset_id}")
+                #         # No warning if 0 rows affected, might be same price
+                #     except mysql.connector.Error as spot_upd_err:
+                #          # Log as warning, but continue processing chain data if possible
+                #          logger.warning(f"[{func_name}] FAILED to update spot price in DB for {asset_name} (Check columns exist): {spot_upd_err}")
+                # else:
+                #     logger.warning(f"[{func_name}] Could not extract spot price from live data for DB update ({asset_name}).")
 
                 # --- Process Option Chain Data (if available) ---
                 if not option_data_list:
@@ -877,7 +896,7 @@ def extract_iv(asset_name: str, strike_price: float, expiry_date: str, option_ty
 # ===============================================================
 # 1. Calculate Option Taxes (with Debugging)
 # ===============================================================
-def calculate_option_taxes(strategy_data: List[Dict[str, Any]], asset: str) -> Optional[Dict[str, Any]]:
+def calculate_option_taxes(strategy_data: List[Dict[str, Any]],  spot_price: float, asset: str) -> Optional[Dict[str, Any]]:
     """Calculates estimated option taxes based on strategy legs."""
     func_name = "calculate_option_taxes"
     logger.info(f"[{func_name}] Calculating for {len(strategy_data)} leg(s), asset: {asset}")
@@ -1042,6 +1061,7 @@ def calculate_option_taxes(strategy_data: List[Dict[str, Any]], asset: str) -> O
 def generate_payoff_chart_matplotlib( # <<< Function name retained
     strategy_data: List[Dict[str, Any]],
     asset: str,
+    spot_price: float,
     strategy_metrics: Optional[Dict[str, Any]] # Pass calculated metrics (used for potential future enhancements, not directly in this plot logic)
 ) -> Optional[str]: # <<< Return type is now string (HTML)
     """
@@ -1358,7 +1378,7 @@ def generate_payoff_chart_matplotlib( # <<< Function name retained
 # ===============================================================
 # 3. Calculate Strategy Metrics (Updated with new.py logic)
 # ===============================================================
-def calculate_strategy_metrics(strategy_data: List[Dict[str, Any]], asset: str) -> Optional[Dict[str, Any]]:
+def calculate_strategy_metrics(strategy_data: List[Dict[str, Any]], spot_price: float, asset: str,) -> Optional[Dict[str, Any]]:
     """
     Calculates Profit & Loss metrics for a multi-leg options strategy,
     using theoretical P/L limits and refined breakeven calculation.
@@ -1763,6 +1783,7 @@ def calculate_strategy_metrics(strategy_data: List[Dict[str, Any]], asset: str) 
 def calculate_option_greeks(
     strategy_data: List[Dict[str, Any]],
     asset: str,
+    spot_price: float,
     interest_rate_pct: float = DEFAULT_INTEREST_RATE_PCT # Use global default
 ) -> List[Dict[str, Any]]:
     """
@@ -2373,32 +2394,76 @@ Analyze the stock/index **{stock_symbol}** based *only* on the provided data sna
 # Helper to get latest spot price from DB (used by multiple functions)
 # ===============================================================
 def get_latest_spot_price_from_db(asset: str, max_age_minutes: int = 5) -> Optional[Dict[str, Any]]:
-    """Queries the DB for the latest spot price updated by the background thread."""
-    sql = """
-        SELECT last_spot_price, last_spot_update_time
-        FROM option_data.assets
-        WHERE asset_name = %s
-          AND last_spot_update_time >= NOW() - INTERVAL %s MINUTE
     """
+    Queries the DB for the latest spot price updated within max_age_minutes.
+    **NOTE:** Uses assumed column names based on previous errors.
+            Verify 'spot_price_column', 'timestamp_column', 'asset_column',
+            and 'table_name' against your actual database schema.
+    """
+    func_name = "get_latest_spot_price_from_db"
+
+    # --- !! VERIFY THESE NAMES AGAINST YOUR DATABASE !! ---
+    spot_price_column = "spot_price"       # ASSUMED actual column name for the spot price
+    timestamp_column = "updated_at"        # ASSUMED actual column name for the timestamp
+    asset_column = "asset_name"            # Keep 'asset_name' as used before, verify if needed
+    table_name = "option_data.assets"      # Keep table name as used before, verify if needed
+    # --- End Verification Section ---
+
+    # Construct SQL query using the (verified) column names
+    sql = f"""
+        SELECT {spot_price_column}, {timestamp_column}
+        FROM {table_name}
+        WHERE {asset_column} = %s
+          AND {timestamp_column} >= NOW() - INTERVAL %s MINUTE
+        ORDER BY {timestamp_column} DESC
+        LIMIT 1
+    """
+    logger.debug(f"[{func_name}] Executing SQL: {sql} with params: ({asset}, {max_age_minutes})")
+
     try:
+        # Assuming get_db_connection is a context manager providing connection and cleanup
         with get_db_connection() as conn:
+            # Use dictionary=True to access results by column name
             with conn.cursor(dictionary=True) as cursor:
                 cursor.execute(sql, (asset, max_age_minutes))
-                result = cursor.fetchone()
-                if result and result.get("last_spot_price") is not None:
-                    price = _safe_get_float(result, "last_spot_price")
-                    ts = result.get("last_spot_update_time")
-                    ts_str = ts.strftime("%Y-%m-%d %H:%M:%S") if isinstance(ts, datetime) else str(ts)
-                    logger.debug(f"Found recent spot price in DB for {asset}: {price} at {ts_str}")
-                    return {"spot_price": price, "timestamp": ts_str}
+                result = cursor.fetchone() # Fetch the latest row
+
+                # Check if a result was found and the assumed spot price column exists and is not None
+                if result and result.get(spot_price_column) is not None:
+                    # Use safe conversion for the spot price using the correct column name
+                    price = _safe_get_float(result, spot_price_column)
+
+                    # Get the timestamp using the correct column name
+                    ts = result.get(timestamp_column)
+
+                    # Safely format the timestamp
+                    ts_str = None
+                    if isinstance(ts, datetime):
+                        ts_str = ts.strftime("%Y-%m-%d %H:%M:%S")
+                    elif ts is not None:
+                        ts_str = str(ts) # Fallback to string conversion
+
+                    # Log and return if price is valid
+                    if price is not None:
+                        logger.debug(f"[{func_name}] Found recent spot price in DB for {asset}: {price} at {ts_str}")
+                        # Return dictionary with standard keys expected by other functions
+                        return {"spot_price": price, "timestamp": ts_str}
+                    else:
+                        logger.warning(f"[{func_name}] Found row in DB for {asset} but failed to parse price from column '{spot_price_column}'. Result: {result}")
+                        return None
                 else:
-                    logger.debug(f"No recent spot price (<{max_age_minutes}min) found in DB for {asset}")
+                    # Log if no recent data found
+                    logger.debug(f"[{func_name}] No recent spot price (<{max_age_minutes}min) found in DB for {asset}. Result: {result}")
                     return None
     except (ConnectionError, mysql.connector.Error) as db_err:
-        logger.error(f"DB Error fetching latest spot price for {asset}: {db_err}")
+        # Log specific database connection/query errors
+        logger.error(f"[{func_name}] DB Error fetching latest spot price for {asset}: {db_err}")
+        # Propagate the error info upwards for better context if needed by adding 'raise' or returning specific error object
+        # For now, returning None as per original logic
         return None
     except Exception as e:
-        logger.error(f"Unexpected error fetching spot price from DB for {asset}: {e}", exc_info=True)
+        # Log any other unexpected errors during the process
+        logger.error(f"[{func_name}] Unexpected error fetching spot price from DB for {asset}: {e}", exc_info=True)
         return None
 
 
@@ -2816,9 +2881,9 @@ async def get_payoff_chart_endpoint(request: PayoffRequest):
         # --- Run Chart, Tax, Greeks Concurrently (Non-critical if they fail individually) ---
         logger.debug(f"[{func_name}] Calculating Chart, Tax, and Greeks concurrently...")
         tasks = {
-            "chart": asyncio.to_thread(generate_payoff_chart_matplotlib, prepared_strategy_data, asset, metrics_result),
-            "tax": asyncio.to_thread(calculate_option_taxes, prepared_strategy_data, asset),
-            "greeks": asyncio.to_thread(calculate_option_greeks, prepared_strategy_data, asset) # Pass default rate or specific one if needed
+            "chart": asyncio.to_thread(generate_payoff_chart_matplotlib, prepared_strategy_data, asset, spot_price, metrics_result),
+            "tax": asyncio.to_thread(calculate_option_taxes, prepared_strategy_data, spot_price, asset),
+            "greeks": asyncio.to_thread(calculate_option_greeks, prepared_strategy_data, spot_price, asset) # Pass default rate or specific one if needed
         }
         # Gather results, allowing individual tasks to fail without stopping others
         task_values = await asyncio.gather(*tasks.values(), return_exceptions=True)
