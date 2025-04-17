@@ -43,8 +43,6 @@ import plotly.graph_objects as go
 import plotly.io as pio
 
 import math
-import mibian
-
 
 # *** Ensure Matplotlib Imports are Correct ***
 # import matplotlib
@@ -63,6 +61,14 @@ except ImportError:
     SCIPY_AVAILABLE = False
     logger = logging.getLogger(__name__) # Need logger early for this message
     logger.warning("SciPy not found. Breakeven calculation will use linear interpolation fallback.")
+
+try:
+    import mibian
+    MIBIAN_AVAILABLE = True
+except ImportError:
+    mibian = None
+    MIBIAN_AVAILABLE = False
+    print("WARNING: Mibian library not found. Greeks calculation will be skipped.")
 
 
 # --- Caching ---
