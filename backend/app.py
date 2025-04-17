@@ -2395,75 +2395,67 @@ Analyze the stock/index **{stock_symbol}** based *only* on the provided data sna
 # ===============================================================
 def get_latest_spot_price_from_db(asset: str, max_age_minutes: int = 5) -> Optional[Dict[str, Any]]:
     """
-    Queries the DB for the latest spot price updated within max_age_minutes.
-    **NOTE:** Uses assumed column names based on previous errors.
-            Verify 'spot_price_column', 'timestamp_column', 'asset_column',
-            and 'table_name' against your actual database schema.
-    """
-    func_name = "get_latest_spot_price_from_db"
+    Retrieves the latest spot price for an asset, prioritizing cache data.
+    This function *now* fetches from the option chain cache instead of the DB
+    to avoid DB schema issues, while maintaining the original function signature.
+    The 'max_age_minutes' argument is effectively ignored in this cache-based implementation.
 
-    # --- !! VERIFY THESE NAMES AGAINST YOUR DATABASE !! ---
-    spot_price_column = "spot_price"       # ASSUMED actual column name for the spot price
-    timestamp_column = "updated_at"        # ASSUMED actual column name for the timestamp
-    asset_column = "asset_name"            # Keep 'asset_name' as used before, verify if needed
-    table_name = "option_data.assets"      # Keep table name as used before, verify if needed
-    # --- End Verification Section ---
+    Args:
+        asset: The underlying asset symbol.
+        max_age_minutes: This argument is ignored in this cache-based version.
 
-    # Construct SQL query using the (verified) column names
-    sql = f"""
-        SELECT {spot_price_column}, {timestamp_column}
-        FROM {table_name}
-        WHERE {asset_column} = %s
-          AND {timestamp_column} >= NOW() - INTERVAL %s MINUTE
-        ORDER BY {timestamp_column} DESC
-        LIMIT 1
+    Returns:
+        A dictionary {"spot_price": price, "timestamp": ts_str} if a valid
+        spot price is found in the cache, otherwise None.
     """
-    logger.debug(f"[{func_name}] Executing SQL: {sql} with params: ({asset}, {max_age_minutes})")
+    func_name = "get_latest_spot_price_from_db_USING_CACHE" # Rename for clarity in logs
+    logger.debug(f"[{func_name}] Attempting to get spot price for '{asset}' from cache (max_age_minutes ignored).")
 
     try:
-        # Assuming get_db_connection is a context manager providing connection and cleanup
-        with get_db_connection() as conn:
-            # Use dictionary=True to access results by column name
-            with conn.cursor(dictionary=True) as cursor:
-                cursor.execute(sql, (asset, max_age_minutes))
-                result = cursor.fetchone() # Fetch the latest row
+        # Call the function that handles cache logic and potential live fetch
+        # This function should return the full option chain dictionary or None
+        cached_data = get_cached_option(asset)
 
-                # Check if a result was found and the assumed spot price column exists and is not None
-                if result and result.get(spot_price_column) is not None:
-                    # Use safe conversion for the spot price using the correct column name
-                    price = _safe_get_float(result, spot_price_column)
+        if cached_data and isinstance(cached_data, dict):
+            # Attempt to extract spot price from the nested structure
+            records = cached_data.get("records", {})
+            if not isinstance(records, dict):
+                 logger.warning(f"[{func_name}] Cached data for {asset} has invalid 'records' structure.")
+                 return None
 
-                    # Get the timestamp using the correct column name
-                    ts = result.get(timestamp_column)
+            # Use safe float conversion for the spot price
+            # Key is often 'underlyingValue' in NSE option chain data
+            spot_price = _safe_get_float(records, "underlyingValue")
 
-                    # Safely format the timestamp
-                    ts_str = None
-                    if isinstance(ts, datetime):
-                        ts_str = ts.strftime("%Y-%m-%d %H:%M:%S")
-                    elif ts is not None:
-                        ts_str = str(ts) # Fallback to string conversion
-
-                    # Log and return if price is valid
-                    if price is not None:
-                        logger.debug(f"[{func_name}] Found recent spot price in DB for {asset}: {price} at {ts_str}")
-                        # Return dictionary with standard keys expected by other functions
-                        return {"spot_price": price, "timestamp": ts_str}
-                    else:
-                        logger.warning(f"[{func_name}] Found row in DB for {asset} but failed to parse price from column '{spot_price_column}'. Result: {result}")
-                        return None
+            if spot_price is not None and spot_price > 0:
+                # Attempt to extract a timestamp associated with the cached data
+                ts_str = records.get("timestamp") # Check common key name
+                if not ts_str:
+                    ts_str = cached_data.get("timestamp") # Check top level
+                if not ts_str:
+                     # If no timestamp, maybe use current time? Or just None? Let's use None.
+                     ts_str = None
+                     logger.debug(f"[{func_name}] Timestamp not found in cached data for {asset}.")
                 else:
-                    # Log if no recent data found
-                    logger.debug(f"[{func_name}] No recent spot price (<{max_age_minutes}min) found in DB for {asset}. Result: {result}")
-                    return None
-    except (ConnectionError, mysql.connector.Error) as db_err:
-        # Log specific database connection/query errors
-        logger.error(f"[{func_name}] DB Error fetching latest spot price for {asset}: {db_err}")
-        # Propagate the error info upwards for better context if needed by adding 'raise' or returning specific error object
-        # For now, returning None as per original logic
-        return None
+                     # Ensure ts_str is a string if found
+                     ts_str = str(ts_str)
+                     logger.debug(f"[{func_name}] Using timestamp from cached data: {ts_str}")
+
+
+                logger.debug(f"[{func_name}] Found valid spot price in cache for {asset}: {spot_price}")
+                # Return dictionary with standard keys expected by calculation functions
+                return {"spot_price": spot_price, "timestamp": ts_str}
+            else:
+                logger.warning(f"[{func_name}] Invalid spot price ({spot_price}) found within cached data for {asset}.")
+                return None
+        else:
+            # Log if cache miss or invalid data type returned by get_cached_option
+            logger.debug(f"[{func_name}] No valid cached data found via get_cached_option for {asset}.")
+            return None
+
     except Exception as e:
-        # Log any other unexpected errors during the process
-        logger.error(f"[{func_name}] Unexpected error fetching spot price from DB for {asset}: {e}", exc_info=True)
+        # Log any unexpected errors during the cache access or processing
+        logger.error(f"[{func_name}] Unexpected error retrieving/processing spot price from cache for {asset}: {e}", exc_info=True)
         return None
 
 
