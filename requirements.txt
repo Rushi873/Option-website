@@ -13,11 +13,13 @@ jugaad-data
 yfinance
 requests
 beautifulsoup4 # For HTML parsing (requests dependency)
+feedpaser
 
 # Calculation & Plotting
 numpy
 mibian # For Option Greeks
-matplotlib # For plotting
+plotly
+pandas
 
 # Caching
 cachetools
