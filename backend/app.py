@@ -544,6 +544,7 @@ def live_update_runner():
         if asset_to_update and isinstance(asset_to_update, str) and asset_to_update.strip():
             logger.info(f"[{thread_name}] Updating DB data for selected asset: {asset_to_update}")
             start_time = time.monotonic()
+        
             try:
                 fetch_and_update_single_asset_data(asset_to_update) # Updates DB
                 duration = time.monotonic() - start_time
