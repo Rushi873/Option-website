@@ -1722,11 +1722,11 @@ function renderGreeksTable(tableElement, greeksList) {
             <th>Lots</th> <!-- Changed from Quantity -->
             <th>Type</th>
             <th>Strike</th>
-            <th title="Option Delta per Share">Δ Delta/Share</th>
-            <th title="Option Gamma per Share">Γ Gamma/Share</th>
-            <th title="Option Theta per Share (per Day)">Θ Theta/Share</th>
-            <th title="Option Vega per Share (per 1% IV)">Vega/Share</th>
-            <th title="Option Rho per Share (per 1% Rate)">Ρ Rho/Share</th>
+            <th title="Option Delta per Share">Δ Delta</th>
+            <th title="Option Gamma per Share">Γ Gamma</th>
+            <th title="Option Theta per Share (per Day)">Θ Theta</th>
+            <th title="Option Vega per Share (per 1% IV)">Vega</th>
+            <th title="Option Rho per Share (per 1% Rate)">Ρ Rho</th>
         </tr>`;
 
     const tbody = tableElement.createTBody();
