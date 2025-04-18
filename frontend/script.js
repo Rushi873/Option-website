@@ -1453,23 +1453,40 @@ async function fetchPayoffChart() {
 
         // --- Display Metrics, Breakdown, Taxes, Greeks ---
         // (This part remains the same as before)
-        const metricsData = data?.metrics?.metrics;
+        const metricsData = data?.metrics?.metrics; // Access nested metrics object
         if (metricsData) {
-            // Ensure displayMetric handles strings like "∞", "-∞", "Loss"
-            displayMetric(metricsData.max_profit, SELECTORS.maxProfitDisplay);
-            displayMetric(metricsData.max_loss, SELECTORS.maxLossDisplay);
-            const breakevens = Array.isArray(metricsData.breakeven_points) && metricsData.breakeven_points.length > 0
-                ? metricsData.breakeven_points.map(p => formatCurrency(p, 2, 'N/A', '₹')).join(', ')
-                : (metricsData.max_loss === "0.00" && metricsData.max_profit !== "0.00" && metricsData.max_profit !== "Loss" ? "Always Profitable/BE" : "None");
-            displayMetric(breakevens, SELECTORS.breakevenDisplay);
-            displayMetric(metricsData.reward_to_risk_ratio, SELECTORS.rewardToRiskDisplay);
-            const netPremiumValue = metricsData.net_premium; // This is a number
+            displayMetric(metricsData.max_profit, SELECTORS.maxProfitDisplay); // Should handle "∞" string
+            displayMetric(metricsData.max_loss, SELECTORS.maxLossDisplay);   // Should handle "-∞" string
+
+            // *** Refined Breakeven Display ***
+            let breakevens_text = "N/A"; // Default if missing or issues
+            if (Array.isArray(metricsData.breakeven_points)) { // Check if it's an array
+                if (metricsData.breakeven_points.length > 0) {
+                    // Format each point (assuming they are strings like "123.45")
+                    breakevens_text = metricsData.breakeven_points.map(p => `~${formatCurrency(p, 2, '', '₹')}`).join(', '); // Add ~ prefix maybe
+                } else {
+                    // Array is empty, determine reason if possible (optional)
+                    if (metricsData.max_loss === "0.00" && metricsData.max_profit !== "0.00" && metricsData.max_profit !== "Loss") {
+                         breakevens_text = "Always Profitable / BE"; // Or "No Risk Zone"
+                    } else if (metricsData.max_profit === "Loss" || (parseFloat(metricsData.max_profit) <= 0 && metricsData.max_profit !== "∞")) {
+                         breakevens_text = "Always Loss Making"; // Or "No Profit Zone"
+                    }
+                    else {
+                         breakevens_text = "None Found"; // General case for no BE points
+                    }
+                }
+            }
+            displayMetric(breakevens_text, SELECTORS.breakevenDisplay);
+            // **********************************
+
+            displayMetric(metricsData.reward_to_risk_ratio, SELECTORS.rewardToRiskDisplay); // Should handle "∞", "Loss", "∞ / ∞" etc.
+            const netPremiumValue = metricsData.net_premium;
             const netPremiumPrefix = (typeof netPremiumValue === 'number' && netPremiumValue >= 0) ? "Net Credit: " : "Net Debit: ";
             displayMetric(Math.abs(netPremiumValue), SELECTORS.netPremiumDisplay, netPremiumPrefix, "", 2, true);
-        } else if (data?.success) { // Only show N/A if backend succeeded but metrics are missing
-            logger.warn("Metrics data missing in successful response.");
-            displayMetric("N/A", SELECTORS.maxProfitDisplay); // Set N/A for missing metrics
-            // ... set N/A for others ...
+
+        } else if (data?.success) {
+             logger.warn("Metrics data missing in successful response.");
+             displayMetric("N/A", SELECTORS.maxProfitDisplay); displayMetric("N/A", SELECTORS.maxLossDisplay); displayMetric("N/A", SELECTORS.breakevenDisplay); displayMetric("N/A", SELECTORS.rewardToRiskDisplay); displayMetric("N/A", SELECTORS.netPremiumDisplay);
         } // If !data.success, error state is handled in catch block
 
         // Cost Breakdown

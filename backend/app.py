@@ -1207,223 +1207,197 @@ def calculate_strategy_metrics(
     asset: str,
 ) -> Optional[Dict[str, Any]]:
     """
-    Calculates Profit & Loss metrics. v5: Fixed UnboundLocalError potential issue.
-    Reads 'lot' key (singular), expects 'tr_type'. Skips invalid legs.
+    Calculates P/L metrics. v6: Improved BE/RR formatting and handling.
+    Reads 'lot' key, expects 'tr_type'. Skips invalid legs.
     """
-    func_name = "calculate_strategy_metrics_v5" # Indicate version
-    logger.info(f"[{func_name}] Calculating metrics for {len(strategy_data)} leg(s), asset: {asset}, using Spot: {spot_price}")
-    # ... (rest of initial setup: constants, spot validation, lot size fetch - kept from v4) ...
-    # --- Define constants ---
-    PAYOFF_UPPER_BOUND_FACTOR = 1.5
-    BREAKEVEN_CLUSTER_GAP_PCT = 0.005 # 0.5% tolerance
-    PAYOFF_CHECK_EPSILON = 0.01
-
-    # --- Validate Spot Price (Critical) ---
-    if spot_price is None or not isinstance(spot_price, (int, float)) or spot_price <= 0:
-        logger.error(f"[{func_name}] Received invalid spot_price ({spot_price}) argument.")
-        return None
+    func_name = "calculate_strategy_metrics_v6"
+    logger.info(f"[{func_name}] Calculating metrics for {len(strategy_data)} leg(s), Asset: {asset}, Spot: {spot_price}")
+    # ... (Constants, Spot Validation, Lot Size Fetch - Keep from v5) ...
+    PAYOFF_UPPER_BOUND_FACTOR = 1.5; BREAKEVEN_CLUSTER_GAP_PCT = 0.005; PAYOFF_CHECK_EPSILON = 0.01
+    if spot_price is None or not isinstance(spot_price, (int, float)) or spot_price <= 0: logger.error(f"[{func_name}] Invalid spot_price ({spot_price})."); return None
     spot_price = float(spot_price)
-
-    # --- Get Default Lot Size (Critical) ---
     default_lot_size = None
-    try:
-        default_lot_size = get_lot_size(asset)
-        if default_lot_size is None or not isinstance(default_lot_size, int) or default_lot_size <= 0:
-             raise ValueError(f"Invalid default lot size ({default_lot_size})")
-        logger.debug(f"[{func_name}] Using default lot size: {default_lot_size}")
-    except Exception as lot_err:
-         logger.error(f"[{func_name}] Failed default lot size fetch for {asset}: {lot_err}", exc_info=True)
-         return None
+    try: default_lot_size = get_lot_size(asset)
+    except Exception as lot_err: logger.error(f"[{func_name}] Failed lot size fetch: {lot_err}"); return None
+    if default_lot_size is None or not isinstance(default_lot_size, int) or default_lot_size <= 0: logger.error(f"[{func_name}] Invalid default lot size ({default_lot_size})"); return None
 
-    # --- Process Strategy Legs & Store Details ---
-    logger.debug(f"[{func_name}] Processing strategy legs...")
+    # --- Process Legs (Keep logic from v5 - reading 'lot', skipping invalid) ---
     total_net_premium = 0.0; cost_breakdown = []; processed_legs = 0; skipped_legs = 0
     net_long_call_qty = 0; net_short_call_qty = 0; net_long_put_qty = 0; net_short_put_qty = 0
     legs_for_payoff_calc = []; all_strikes_list = []
-
     for i, leg in enumerate(strategy_data):
         leg_desc = f"Leg {i+1}"
         try:
-            # ... (leg data extraction using 'lot' key - kept from v4 fix) ...
-            tr_type = str(leg.get('tr_type', '')).lower()
-            option_type = str(leg.get('op_type', '')).lower()
-            strike = _safe_get_float(leg, 'strike')
-            premium = _safe_get_float(leg, 'op_pr')
-            lots = _safe_get_int(leg, 'lot') # Read the 'lot' key
+            tr_type = str(leg.get('tr_type', '')).lower(); option_type = str(leg.get('op_type', '')).lower()
+            strike = _safe_get_float(leg, 'strike'); premium = _safe_get_float(leg, 'op_pr')
+            lots = _safe_get_int(leg, 'lot'); # Read 'lot' key
             raw_ls = leg.get('lot_size'); temp_ls = _safe_get_int({'ls': raw_ls}, 'ls')
             leg_lot_size = temp_ls if temp_ls is not None and temp_ls > 0 else default_lot_size
-
-            # --- Validate parameters (using 'lots' variable from 'lot' key) ---
-            error_msg = None
+            error_msg = None # Validation checks kept from v5...
             if tr_type not in ('b','s'): error_msg = f"Invalid tr_type: '{tr_type}'"
             elif option_type not in ('c','p'): error_msg = f"Invalid op_type: '{option_type}'"
             elif strike is None or strike <= 0: error_msg = f"Invalid strike: {strike}"
             elif premium is None or premium < 0: error_msg = f"Invalid premium: {premium}"
             elif lots is None or not isinstance(lots, int) or lots <= 0: error_msg = f"Invalid 'lot' value: {lots}"
-            elif not isinstance(leg_lot_size, int) or leg_lot_size <= 0: error_msg = f"Invalid final lot_size: {leg_lot_size}"
-
-            if error_msg:
-                logger.warning(f"[{func_name}] Skipping {leg_desc} (Validation): {error_msg}. Data: {leg}")
-                skipped_legs += 1; continue
-
-            # --- If validation passed, proceed ---
-            quantity = lots * leg_lot_size; leg_premium_total = premium * quantity
-            action_verb = ""; all_strikes_list.append(strike)
-            # ... (accumulation logic - kept from v4) ...
-            if tr_type == 'b':
-                total_net_premium -= leg_premium_total; action_verb = "Paid"
-                if option_type == 'c': net_long_call_qty += quantity
-                else: net_long_put_qty += quantity
-            else:
-                total_net_premium += leg_premium_total; action_verb = "Received"
-                if option_type == 'c': net_short_call_qty += quantity
-                else: net_short_put_qty += quantity
-            # ... (store details logic - kept from v4) ...
-            cost_bd_leg = { "leg_index": i, "action": tr_type.upper(), "type": option_type.upper(), "strike": strike, "premium_per_share": premium, "lots": lots, "lot_size": leg_lot_size, "quantity": quantity, "total_premium": round(leg_premium_total if tr_type=='s' else -leg_premium_total, 2), "effect": action_verb }
-            cost_breakdown.append(cost_bd_leg)
-            payoff_calc_leg = { 'tr_type': tr_type, 'op_type': option_type, 'strike': strike, 'premium': premium, 'quantity': quantity }
-            legs_for_payoff_calc.append(payoff_calc_leg)
+            elif not isinstance(leg_lot_size, int) or leg_lot_size <= 0: error_msg = f"Invalid lot_size: {leg_lot_size}"
+            if error_msg: logger.warning(f"[{func_name}] Skipping {leg_desc} (Validation): {error_msg}."); skipped_legs += 1; continue
+            quantity = lots * leg_lot_size; leg_premium_total = premium * quantity; all_strikes_list.append(strike) # Accumulation kept from v5...
+            if tr_type == 'b': total_net_premium -= leg_premium_total; action_verb = "Paid"; net_long_call_qty += quantity if option_type == 'c' else 0; net_long_put_qty += quantity if option_type == 'p' else 0;
+            else: total_net_premium += leg_premium_total; action_verb = "Received"; net_short_call_qty += quantity if option_type == 'c' else 0; net_short_put_qty += quantity if option_type == 'p' else 0;
+            cost_bd_leg = { "leg_index": i, "action": tr_type.upper(), "type": option_type.upper(), "strike": strike, "premium_per_share": premium, "lots": lots, "lot_size": leg_lot_size, "quantity": quantity, "total_premium": round(leg_premium_total if tr_type=='s' else -leg_premium_total, 2), "effect": action_verb }; cost_breakdown.append(cost_bd_leg)
+            payoff_calc_leg = { 'tr_type': tr_type, 'op_type': option_type, 'strike': strike, 'premium': premium, 'quantity': quantity }; legs_for_payoff_calc.append(payoff_calc_leg)
             processed_legs += 1
-        except Exception as leg_exp_err:
-             logger.error(f"[{func_name}] UNEXPECTED Error processing {leg_desc}: {leg_exp_err}. Skipping.", exc_info=True)
-             skipped_legs += 1; continue
-
-    if processed_legs == 0:
-        logger.error(f"[{func_name}] No valid legs processed after checking {len(strategy_data)} ({skipped_legs} skipped).")
-        return None
+        except Exception as leg_exp_err: logger.error(f"[{func_name}] UNEXPECTED Error processing {leg_desc}: {leg_exp_err}. Skipping.", exc_info=True); skipped_legs += 1; continue
+    if processed_legs == 0: logger.error(f"[{func_name}] No valid legs processed."); return None
     logger.info(f"[{func_name}] Leg processing complete. Valid: {processed_legs}, Skipped: {skipped_legs}")
 
-    # --- Payoff Function Definition ---
-    # ... (kept from v4 - no changes) ...
+    # --- Payoff Function (Keep as is) ---
     def _calculate_payoff_at_price(S: float, legs: List[Dict]) -> float:
         total_pnl = 0.0; S = max(0.0, S)
-        for leg_payoff in legs:
-            intrinsic = 0.0; premium = leg_payoff['premium']; strike = leg_payoff['strike']
-            quantity = leg_payoff['quantity']; op_type = leg_payoff['op_type']; tr_type = leg_payoff['tr_type']
-            leg_prem_tot = premium * quantity
-            if op_type == 'c': intrinsic = max(S - strike, 0)
-            else: intrinsic = max(strike - S, 0)
-            pnl = (intrinsic * quantity - leg_prem_tot) if tr_type == 'b' else (leg_prem_tot - intrinsic * quantity)
+        for leg in legs:
+            intrinsic = max(S - leg['strike'], 0) if leg['op_type'] == 'c' else max(leg['strike'] - S, 0)
+            pnl = (intrinsic * leg['quantity'] - leg['premium'] * leg['quantity']) if leg['tr_type'] == 'b' else (leg['premium'] * leg['quantity'] - intrinsic * leg['quantity'])
             total_pnl += pnl
         return total_pnl
 
-    # --- Determine Max Profit / Loss ---
-    # ... (kept from v4 - no changes) ...
+    # --- Determine Max Profit / Loss (Refined Logic/Logging) ---
     logger.debug(f"[{func_name}] Determining Max P/L...")
-    net_calls_qty = net_long_call_qty - net_short_call_qty; net_puts_qty = net_long_put_qty - net_short_put_qty
-    max_profit_is_unbounded = (net_calls_qty > 0); max_loss_is_unbounded = (net_calls_qty < 0) or (net_puts_qty < 0)
-    max_profit_val = -np.inf; max_loss_val = np.inf
+    net_calls_qty = net_long_call_qty - net_short_call_qty
+    net_puts_qty = net_long_put_qty - net_short_put_qty
+    max_profit_is_unbounded = (net_calls_qty > 0)
+    max_loss_is_unbounded = (net_calls_qty < 0) or (net_puts_qty < 0)
+    logger.debug(f"[{func_name}] Unbounded Checks -> MaxProfit: {max_profit_is_unbounded}, MaxLoss: {max_loss_is_unbounded}")
+
+    max_profit_val = -np.inf; max_loss_val = np.inf # Use numpy infinities for calculation
     if max_profit_is_unbounded: max_profit_val = np.inf
     if max_loss_is_unbounded: max_loss_val = -np.inf
+
+    # Calculate bounded values only if needed
     if not max_profit_is_unbounded or not max_loss_is_unbounded:
-        payoff_check_points = {0.0}; unique_strikes = sorted(list(set(all_strikes_list)))
-        for k in unique_strikes: payoff_check_points.add(k); payoff_check_points.add(max(0.0, k - PAYOFF_CHECK_EPSILON)); payoff_check_points.add(k + PAYOFF_CHECK_EPSILON)
-        payoff_check_points.add(spot_price); calculated_payoffs = []
+        payoff_check_points = {0.0}
+        unique_strikes = sorted(list(set(all_strikes_list)))
+        for k in unique_strikes:
+            payoff_check_points.add(k); payoff_check_points.add(max(0.0, k - PAYOFF_CHECK_EPSILON)); payoff_check_points.add(k + PAYOFF_CHECK_EPSILON)
+        payoff_check_points.add(spot_price)
+        logger.debug(f"[{func_name}] Checking payoffs at points: {sorted(list(payoff_check_points))}")
+        calculated_payoffs = []
         for p in payoff_check_points:
             try: calculated_payoffs.append(_calculate_payoff_at_price(p, legs_for_payoff_calc))
             except Exception as payoff_err: logger.error(f"[{func_name}] Error calculating payoff at S={p:.2f}: {payoff_err}")
-        if not max_profit_is_unbounded: candidates = calculated_payoffs + ([total_net_premium] if total_net_premium > 0 else []); max_profit_val = max(candidates) if candidates else 0.0
-        if not max_loss_is_unbounded: candidates = calculated_payoffs + ([total_net_premium] if total_net_premium < 0 else []); max_loss_val = min(candidates) if candidates else 0.0
+
+        if not calculated_payoffs: # Handle case where all payoff calcs failed
+            logger.error(f"[{func_name}] Failed to calculate any payoffs for bounded checks.")
+            # Fallback or return error state? Let's fallback to net premium for now.
+            if not max_profit_is_unbounded: max_profit_val = total_net_premium if total_net_premium > 0 else 0.0
+            if not max_loss_is_unbounded: max_loss_val = total_net_premium if total_net_premium < 0 else 0.0
+        else:
+             if not max_profit_is_unbounded:
+                  candidates = calculated_payoffs + ([total_net_premium] if total_net_premium > 0 else [-np.inf]) # Include -inf to ensure max works
+                  max_profit_val = max(candidates) # Max of calculated payoffs and positive net premium
+             if not max_loss_is_unbounded:
+                  candidates = calculated_payoffs + ([total_net_premium] if total_net_premium < 0 else [np.inf]) # Include +inf to ensure min works
+                  max_loss_val = min(candidates) # Min of calculated payoffs and negative net premium
+
+    # Log the final numerical values before formatting
+    logger.info(f"[{func_name}] Calculated Max P/L values: MaxProfit={max_profit_val}, MaxLoss={max_loss_val}")
+
+    # --- Format Max P/L Strings ---
     max_profit_str = "∞" if max_profit_val == np.inf else f"{max_profit_val:.2f}"
     max_loss_str = "-∞" if max_loss_val == -np.inf else f"{max_loss_val:.2f}"
-    logger.info(f"[{func_name}] Determined MaxP: {max_profit_str}, MaxL: {max_loss_str}")
+    logger.info(f"[{func_name}] Formatted MaxP: {max_profit_str}, MaxL: {max_loss_str}")
 
-
-    # --- Breakeven Points ---
+    # --- Breakeven Points (Refined Logic/Logging) ---
     logger.debug(f"[{func_name}] Starting breakeven search...")
     breakeven_points_found = []
     payoff_func = lambda s: _calculate_payoff_at_price(s, legs_for_payoff_calc)
     search_points = sorted(list(set([0.0] + all_strikes_list)))
     search_intervals = []
-    # ... (interval generation - kept from v4) ...
-    if not search_points or len(search_points) < 1: logger.warning(f"[{func_name}] Not enough points for BE intervals.")
-    else: # Generate intervals
-        if search_points[0] > 1e-6: search_intervals.append((max(0.0, search_points[0] * 0.5), search_points[0] * 1.05))
-        elif len(search_points) > 1: search_intervals.append((max(0.0, search_points[1]*0.1), search_points[1] * 1.05))
-        for i in range(len(search_points) - 1):
-            k1, k2 = search_points[i], search_points[i+1]
-            if k2 > k1 + 1e-6: search_intervals.append((k1 * 0.99, k2 * 1.01))
-        last_strike = search_points[-1]
-        upper_search_limit = max(last_strike * PAYOFF_UPPER_BOUND_FACTOR, spot_price * PAYOFF_UPPER_BOUND_FACTOR)
-        search_intervals.append((last_strike * 0.99 if last_strike > 1e-6 else spot_price * 0.8, upper_search_limit))
-    logger.debug(f"[{func_name}] Potential Search Intervals: {search_intervals}")
+    # ... (Interval generation kept from v5) ...
+    if search_points and len(search_points) >= 1: # Ensure points exist
+        if search_points[0] > 1e-6: search_intervals.append((max(0.0, search_points[0]*0.5), search_points[0]*1.05))
+        elif len(search_points) > 1: search_intervals.append((max(0.0, search_points[1]*0.1), search_points[1]*1.05))
+        for i in range(len(search_points) - 1): k1, k2 = search_points[i], search_points[i+1];
+        if k2 > k1 + 1e-6: search_intervals.append((k1*0.99, k2*1.01))
+        last_strike = search_points[-1]; upper_search_limit = max(last_strike * PAYOFF_UPPER_BOUND_FACTOR, spot_price * PAYOFF_UPPER_BOUND_FACTOR)
+        search_intervals.append((last_strike*0.99 if last_strike > 1e-6 else spot_price*0.8, upper_search_limit))
+    else: logger.warning(f"[{func_name}] No valid strikes found for BE interval generation.")
 
     processed_intervals = set()
-    for p1_raw, p2_raw in search_intervals:
-        p1 = max(0.0, p1_raw); p2 = max(p1 + 1e-5, p2_raw)
-        if p1 >= p2: continue
+    if search_intervals: # Only loop if intervals were generated
+        for p1_raw, p2_raw in search_intervals:
+            p1 = max(0.0, p1_raw); p2 = max(p1 + 1e-5, p2_raw)
+            if p1 >= p2: continue
+            interval_key = (round(p1, 4), round(p2, 4))
+            if interval_key in processed_intervals: continue
+            processed_intervals.add(interval_key)
+            try:
+                y1 = payoff_func(p1); y2 = payoff_func(p2)
+                logger.debug(f"[{func_name}] BE Check Interval {interval_key}: y1={y1:.2f}, y2={y2:.2f}") # Log payoff values
+                if np.isfinite(y1) and np.isfinite(y2) and np.sign(y1) != np.sign(y2):
+                    # ... (Root finding logic kept from v5) ...
+                    found_be = None; root_finder_used = "None"
+                    if SCIPY_AVAILABLE and brentq:
+                        try: be = brentq(payoff_func, p1, p2, xtol=1e-6, rtol=1e-6, maxiter=100); found_be = be if be is not None and be > 1e-6 else None; root_finder_used = "brentq" if found_be else root_finder_used
+                        except Exception: pass # Ignore brentq errors, fallback
+                    if found_be is None and abs(y2 - y1) > 1e-9:
+                        be = p1 - y1 * (p2 - p1) / (y2 - y1)
+                        if p1 <= be <= p2 and be > 1e-6 and abs(payoff_func(be)) < 1e-3: found_be = be; root_finder_used = "interpolation"
+                    if found_be:
+                        is_close = any(abs(found_be - eb) < 0.01 for eb in breakeven_points_found)
+                        if not is_close: breakeven_points_found.append(found_be); logger.debug(f"[{func_name}] Added BE {found_be:.4f} ({root_finder_used})")
+            except Exception as search_err: logger.error(f"[{func_name}] Error during BE search interval {interval_key}: {search_err}")
 
-        # ***** THE FIX AREA *****
-        # Define interval_key *unconditionally* for this iteration
-        interval_key = (round(p1, 4), round(p2, 4))
-
-        # Check if already processed *before* the try block
-        if interval_key in processed_intervals:
-            logger.debug(f"[{func_name}] Skipping already processed interval: {interval_key}")
-            continue
-        # If not skipped, add it now
-        processed_intervals.add(interval_key)
-        # ************************
-
-        # Now perform calculations within the try block
-        try:
-            y1 = payoff_func(p1); y2 = payoff_func(p2)
-            if np.isfinite(y1) and np.isfinite(y2) and np.sign(y1) != np.sign(y2):
-                # ... (root finding logic - kept from v4) ...
-                found_be = None; root_finder_used = "None"
-                if SCIPY_AVAILABLE and brentq:
-                    try: be = brentq(payoff_func, p1, p2, xtol=1e-6, rtol=1e-6, maxiter=100); found_be = be if be is not None and be > 1e-6 else None; root_finder_used = "brentq" if found_be else root_finder_used
-                    except Exception as brentq_err: logger.debug(f"[{func_name}] Brentq failed/skipped: {brentq_err}")
-                if found_be is None and abs(y2 - y1) > 1e-9:
-                    be = p1 - y1 * (p2 - p1) / (y2 - y1)
-                    if p1 <= be <= p2 and be > 1e-6 and abs(payoff_func(be)) < 1e-3: found_be = be; root_finder_used = "interpolation"
-                if found_be: is_close = any(abs(found_be - eb) < 0.01 for eb in breakeven_points_found);
-                if found_be and not is_close: # Ensure found_be is not None before using it
-                    breakeven_points_found.append(found_be); logger.debug(f"[{func_name}] Added BE {found_be:.4f} ({root_finder_used})")
-                elif found_be and is_close: logger.debug(f"[{func_name}] Skipping close BE {found_be:.4f}")
-
-        except Exception as search_err:
-             # Log error but continue to next interval
-             logger.error(f"[{func_name}] Error during BE search for interval {interval_key}: {search_err}", exc_info=True)
-
-    # --- Strike touch check ---
-    # ... (kept from v4 - no changes) ...
+    # --- Strike touch check (Keep as is) ---
     zero_tolerance = 1e-4; unique_strikes = sorted(list(set(all_strikes_list)))
     for k in unique_strikes:
         try:
             payoff_at_k = payoff_func(k)
-            if np.isfinite(payoff_at_k) and abs(payoff_at_k) < zero_tolerance: is_close = any(abs(k - be) < 0.01 for be in breakeven_points_found);
-            if not is_close: breakeven_points_found.append(k); logger.debug(f"[{func_name}] Found BE (strike touch): {k:.4f}")
-        except Exception as payoff_err: logger.error(f"[{func_name}] Error calculating payoff at strike {k}: {payoff_err}")
+            if np.isfinite(payoff_at_k) and abs(payoff_at_k) < zero_tolerance:
+                is_close = any(abs(k - be) < 0.01 for be in breakeven_points_found)
+                if not is_close: breakeven_points_found.append(k); logger.debug(f"[{func_name}] Found BE (strike touch): {k:.4f}")
+        except Exception as payoff_err: logger.error(f"[{func_name}] Error checking payoff at strike {k}: {payoff_err}")
 
     # --- Cluster and Format Breakeven Points ---
-    # ... (kept from v4 - no changes) ...
-    positive_be_points = sorted([p for p in breakeven_points_found if p > 1e-6])
-    breakeven_points_clustered = cluster_points(positive_be_points, BREAKEVEN_CLUSTER_GAP_PCT, spot_price)
+    # Ensure clustering happens on positive points and formatting handles empty list
+    positive_be_points = [p for p in breakeven_points_found if p > 1e-6]
+    breakeven_points_clustered = cluster_points(positive_be_points, BREAKEVEN_CLUSTER_GAP_PCT, spot_price) if positive_be_points else []
+    # Format list for output, will be empty if none found/clustered
     breakeven_points_formatted = [f"{be:.2f}" for be in breakeven_points_clustered]
-    logger.debug(f"[{func_name}] Clustered & Formatted BE Points: {breakeven_points_formatted}")
+    logger.info(f"[{func_name}] Final Breakeven Points (Formatted): {breakeven_points_formatted}") # Changed log level
 
-    # --- Reward to Risk Ratio ---
-    # ... (kept from v4 - no changes) ...
-    logger.debug(f"[{func_name}] Calculating Reward:Risk Ratio...")
+    # --- Reward to Risk Ratio (Refined Formatting) ---
+    logger.debug(f"[{func_name}] Calculating Reward:Risk Ratio (MaxP={max_profit_val}, MaxL={max_loss_val})...")
     reward_to_risk_ratio_str = "N/A"; zero_threshold = 1e-9
-    max_p_num, max_l_num = max_profit_val, max_loss_val
-    if max_p_num == np.inf and max_l_num == -np.inf: reward_to_risk_ratio_str = "∞ / ∞"
-    elif max_p_num == np.inf: reward_to_risk_ratio_str = "∞" if np.isfinite(max_l_num) and abs(max_l_num) > zero_threshold else "∞ / 0"
-    elif max_l_num == -np.inf: reward_to_risk_ratio_str = "Loss / ∞"
-    elif not (np.isfinite(max_p_num) and np.isfinite(max_l_num)): reward_to_risk_ratio_str = "N/A (Calc Error)"
-    else:
+    # Use the numerical values for logic
+    max_p_num = max_profit_val; max_l_num = max_loss_val
+
+    if max_p_num == np.inf and max_l_num == -np.inf: reward_to_risk_ratio_str = "∞ / ∞" # Both unbounded
+    elif max_p_num == np.inf: reward_to_risk_ratio_str = "∞" # Unbounded profit, assumes finite loss is acceptable risk
+    elif max_l_num == -np.inf: reward_to_risk_ratio_str = "Loss / ∞" # Unbounded loss
+    elif not (np.isfinite(max_p_num) and np.isfinite(max_l_num)): reward_to_risk_ratio_str = "N/A (Calc Error)" # Should not happen
+    else: # Both are finite
         max_l_num_abs = abs(max_l_num)
-        if max_l_num_abs < zero_threshold: reward_to_risk_ratio_str = "∞" if max_p_num > zero_threshold else "0 / 0"
-        elif max_p_num <= zero_threshold: reward_to_risk_ratio_str = "Loss"
-        else:
+        if max_l_num_abs < zero_threshold: # Near zero or zero risk
+            reward_to_risk_ratio_str = "∞" if max_p_num > zero_threshold else "0 / 0"
+        elif max_p_num <= zero_threshold: # Non-positive profit with finite risk
+             reward_to_risk_ratio_str = "Loss" # Strategy results in loss or zero profit at best
+        else: # Positive profit and finite, non-zero risk
              try: ratio = max_p_num / max_l_num_abs; reward_to_risk_ratio_str = f"{ratio:.2f}"
-             except ZeroDivisionError: reward_to_risk_ratio_str = "∞"
-    logger.debug(f"[{func_name}] Calculated R:R String = {reward_to_risk_ratio_str}")
+             except ZeroDivisionError: reward_to_risk_ratio_str = "∞" # Should be caught above
+    logger.info(f"[{func_name}] Calculated R:R String = {reward_to_risk_ratio_str}") # Changed log level
 
     # --- Prepare Final Result ---
-    # ... (kept from v4 - no changes) ...
-    result = { "calculation_inputs": { "asset": asset, "spot_price_used": round(spot_price, 2), "default_lot_size": default_lot_size, "num_legs_input": len(strategy_data), "num_legs_processed": processed_legs, "num_legs_skipped": skipped_legs }, "metrics": { "max_profit": max_profit_str, "max_loss": max_loss_str, "breakeven_points": breakeven_points_formatted, "reward_to_risk_ratio": reward_to_risk_ratio_str, "net_premium": round(total_net_premium, 2) }, "cost_breakdown_per_leg": cost_breakdown }
+    result = {
+        "calculation_inputs": { "asset": asset, "spot_price_used": round(spot_price, 2), "default_lot_size": default_lot_size, "num_legs_input": len(strategy_data), "num_legs_processed": processed_legs, "num_legs_skipped": skipped_legs },
+        "metrics": {
+             "max_profit": max_profit_str, # Use formatted strings
+             "max_loss": max_loss_str,     # Use formatted strings
+             "breakeven_points": breakeven_points_formatted, # Use formatted list (can be empty)
+             "reward_to_risk_ratio": reward_to_risk_ratio_str, # Use calculated string
+             "net_premium": round(total_net_premium, 2)
+        },
+        "cost_breakdown_per_leg": cost_breakdown
+    }
     logger.debug(f"[{func_name}] Returning result: {result}")
     return result
     
