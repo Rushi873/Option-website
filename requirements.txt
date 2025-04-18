@@ -14,7 +14,6 @@ yfinance
 requests
 beautifulsoup4 # For HTML parsing (requests dependency)
 feedparser
-urllib
 
 # Calculation & Plotting
 numpy
