@@ -1553,9 +1553,12 @@ async function fetchPayoffChart() {
 // --- Rendering Helpers for Payoff Results ---
 
 function renderTaxTable(containerElement, taxData) {
+    // Assume logger, formatCurrency, formatNumber are defined globally or imported
+    const logger = window.console; // Use console if no specific logger
+
     // Guard against null/undefined taxData or missing nested properties
     if (!taxData || !taxData.breakdown_per_leg || !taxData.charges_summary || !Array.isArray(taxData.breakdown_per_leg)) {
-        containerElement.innerHTML = "<p>Charge calculation data is incomplete or unavailable.</p>";
+        containerElement.innerHTML = '<p class="error-message">Charge calculation data is incomplete or unavailable.</p>';
         logger.warn("renderTaxTable called with invalid or incomplete taxData:", taxData);
         return;
     }
@@ -1567,6 +1570,7 @@ function renderTaxTable(containerElement, taxData) {
     details.open = false; // Default closed
 
     const summary = document.createElement('summary');
+    // Use formatCurrency for the total in the summary for consistency
     summary.innerHTML = `<strong>Estimated Charges Breakdown (Total: ${formatCurrency(taxData.total_estimated_cost, 2)})</strong>`;
     details.appendChild(summary);
 
@@ -1575,15 +1579,36 @@ function renderTaxTable(containerElement, taxData) {
     details.appendChild(tableWrapper);
 
     const table = document.createElement("table");
-    table.className = "results-table charges-table data-table"; // Add data-table class
+    table.className = "results-table charges-table data-table"; // Keep consistent classes
     const charges = taxData.charges_summary || {};
     const breakdown = taxData.breakdown_per_leg;
 
-    // Ensure all expected keys exist in breakdown items, providing defaults
-    const tableBody = breakdown.map(t => `
+    // --- Generate Table Body with Mapped Values ---
+    const tableBody = breakdown.map(t => {
+        // Map Transaction Type ('B'/'S' to 'BUY'/'SELL')
+        let actionDisplay = '?'; // Default placeholder
+        const actionRaw = (t.transaction_type || '').toUpperCase();
+        if (actionRaw === 'B') {
+            actionDisplay = 'BUY';
+        } else if (actionRaw === 'S') {
+            actionDisplay = 'SELL';
+        }
+
+        // Map Option Type ('C'/'P' to 'CE'/'PE')
+        let typeDisplay = '?'; // Default placeholder
+        const typeRaw = (t.option_type || '').toUpperCase();
+        if (typeRaw === 'C') {
+            typeDisplay = 'CE';
+        } else if (typeRaw === 'P') {
+            typeDisplay = 'PE';
+        }
+
+        // Ensure all expected keys exist in breakdown items, providing defaults
+        // Use the mapped display values in the first two columns
+        return `
         <tr>
-            <td>${t.transaction_type || '?'}</td>
-            <td>${t.option_type || '?'}</td>
+            <td>${actionDisplay}</td>
+            <td>${typeDisplay}</td>
             <td>${formatNumber(t.strike, 2, '-')}</td>
             <td>${formatNumber(t.lots, 0, '-')}</td>
             <td>${formatNumber(t.premium_per_share, 2, '-')}</td>
@@ -1594,27 +1619,42 @@ function renderTaxTable(containerElement, taxData) {
             <td>${formatNumber(t.brokerage, 2, '0.00')}</td>
             <td>${formatNumber(t.gst, 2, '0.00')}</td>
             <td class="note" title="${t.stt_note || ''}">${((t.stt_note || '').substring(0, 15))}${ (t.stt_note || '').length > 15 ? '...' : ''}</td>
-        </tr>`).join('');
+        </tr>`;
+    }).join('');
 
-    // Ensure all expected keys exist in charges summary
+    // --- Prepare Footer Totals ---
+    // Use nullish coalescing (??) for safer defaults
     const total_stt = charges.stt ?? 0;
     const total_stamp = charges.stamp_duty ?? 0;
     const total_sebi = charges.sebi_fee ?? 0;
-    const total_txn = charges.txn_charges ?? 0; // Note: backend key is txn_charges
+    const total_txn = charges.txn_charges ?? 0; // Match backend key if it's 'txn_charges'
     const total_brokerage = charges.brokerage ?? 0;
     const total_gst = charges.gst ?? 0;
     const overall_total = taxData.total_estimated_cost ?? 0;
 
-
-    // Colspan = 12 based on header
+    // --- Assemble Table HTML ---
+    // Header column count = 12
     table.innerHTML = `
         <thead>
-            <tr><th>Act</th><th>Type</th><th>Strike</th><th>Lots</th><th>Premium</th><th>STT</th><th>Stamp</th><th>SEBI</th><th>Txn</th><th>Broker</th><th>GST</th><th title="Securities Transaction Tax Note">STT Note</th></tr>
+            <tr>
+                <th>Act</th>
+                <th>Type</th>
+                <th>Strike</th>
+                <th>Lots</th>
+                <th>Premium</th>
+                <th>STT</th>
+                <th>Stamp</th>
+                <th>SEBI</th>
+                <th>Txn</th>
+                <th>Broker</th>
+                <th>GST</th>
+                <th title="Securities Transaction Tax Note">STT Note</th>
+            </tr>
         </thead>
         <tbody>${tableBody}</tbody>
         <tfoot>
             <tr class="totals-row">
-                <td colspan="5" style="text-align: right; font-weight: bold;">Total</td>
+                <td colspan="5" style="text-align: right; font-weight: bold;">Total Estimated Charges</td>
                 <td>${formatCurrency(total_stt, 2)}</td>
                 <td>${formatCurrency(total_stamp, 2)}</td>
                 <td>${formatCurrency(total_sebi, 4)}</td>
