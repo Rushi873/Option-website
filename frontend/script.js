@@ -1402,123 +1402,218 @@ async function fetchPayoffChart() {
     const logger = window.console; // Use console if no specific logger
 
     // --- Input Validation ---
-    if (!asset) { alert("Please select an asset."); return; }
+    if (!asset) {
+        alert("Please select an asset.");
+        return;
+    }
     if (strategyPositions.length === 0) {
-        resetResultsUI(); // Clear UI if no positions before alerting
+        resetResultsUI(); // Clear UI if no positions
         alert("Please add positions first.");
         return;
     }
-    if (!chartContainer) { logger.error("Payoff chart container element not found in DOM."); return; }
+    if (!chartContainer) {
+        logger.error("Payoff chart container element not found in DOM.");
+        // Display error somewhere user can see it
+        const messageContainer = document.querySelector(SELECTORS.statusMessageContainer);
+        if (messageContainer) messageContainer.textContent = "Error: UI component missing (Chart Container).";
+        return;
+    }
 
     // --- Set Loading States & Reset UI ---
     logger.info("Initiating strategy analysis fetch...");
     // <<< CALL THE COMPLETE RESET FUNCTION HERE >>>
-    resetResultsUI();
+    resetResultsUI(); // Clears previous results, purges chart, sets placeholders
     // <<< ------------------------------------ >>>
 
-    // Now set specific loading messages/states
+    // Now set specific loading messages/states for this fetch operation
     setElementState(SELECTORS.payoffChartContainer, 'loading', 'Generating chart data...');
     setElementState(SELECTORS.taxInfoContainer, 'loading', 'Calculating charges...');
     setElementState(SELECTORS.greeksTable, 'loading', 'Calculating Greeks...');
-    // Metrics already show "..." from resetResultsUI
+    // Metrics should show "..." from resetResultsUI
 
     if (updateButton) updateButton.disabled = true;
 
-    // --- Prepare Request Data (Ensure keys match backend: 'lot', 'op_pr', etc.) ---
+    // --- Prepare Request Data (Corrected Keys & Local Validation) ---
     let dataIsValid = true;
     const requestStrategy = strategyPositions.map((pos, index) => {
+        const legNum = index + 1;
         const currentDTE = calculateDaysToExpiry(pos.expiry_date);
-        if (currentDTE === null) { logger.error(`Invalid expiry date leg ${index + 1}.`); dataIsValid = false; }
-        if (isNaN(parseFloat(pos.strike_price)) || parseFloat(pos.strike_price) <= 0) { logger.error(`Invalid strike leg ${index+1}`); dataIsValid = false; }
-        if (isNaN(parseFloat(pos.last_price)) || parseFloat(pos.last_price) < 0) { logger.error(`Invalid premium leg ${index+1}`); dataIsValid = false; }
-        if (isNaN(parseInt(pos.lots)) || parseInt(pos.lots) === 0) { logger.error(`Invalid lots leg ${index+1}`); dataIsValid = false; }
 
+        // Basic local validation for common errors
+        if (currentDTE === null) { logger.error(`Invalid expiry date leg ${legNum}.`); dataIsValid = false; }
+        if (!pos.strike_price || isNaN(parseFloat(pos.strike_price)) || parseFloat(pos.strike_price) <= 0) { logger.error(`Invalid strike leg ${legNum}: ${pos.strike_price}`); dataIsValid = false; }
+        if (pos.last_price === null || pos.last_price === undefined || isNaN(parseFloat(pos.last_price)) || parseFloat(pos.last_price) < 0) { logger.error(`Invalid premium leg ${legNum}: ${pos.last_price}`); dataIsValid = false; }
+        if (!pos.lots || isNaN(parseInt(pos.lots)) || parseInt(pos.lots) === 0) { logger.error(`Invalid lots leg ${legNum}: ${pos.lots}`); dataIsValid = false; }
+        // IV is often optional for payoff, but log warning if missing/invalid for Greeks
+        if (pos.iv === null || pos.iv === undefined || pos.iv === '' || isNaN(parseFloat(pos.iv))) { logger.warn(`Missing or invalid IV leg ${legNum}. Greeks might be inaccurate or unavailable.`); }
+        // Lot size can be optional if backend defaults
+        if (pos.lot_size && (isNaN(parseInt(pos.lot_size)) || parseInt(pos.lot_size) <= 0)) { logger.warn(`Invalid explicit lot size leg ${legNum}: ${pos.lot_size}. Backend default might be used.`); }
+
+
+        // Return object with keys matching backend Pydantic model
         return {
-            op_type: pos.option_type,
-            strike: String(pos.strike_price), // Use 'strike' key
-            tr_type: parseInt(pos.lots) > 0 ? "b" : "s",
-            op_pr: String(pos.last_price),    // Use 'op_pr' key
-            expiry_date: pos.expiry_date,
-            lot: String(Math.abs(parseInt(pos.lots || '0'))), // Use 'lot' key
-            lot_size: pos.lot_size ? String(pos.lot_size) : null,
-            iv: (pos.iv !== null && pos.iv !== undefined && pos.iv !== '') ? pos.iv : null,
-            days_to_expiry: currentDTE,
+            // --- Use Keys Expected by Backend ---
+            op_type: pos.option_type,       // e.g., 'c' or 'p'
+            strike: String(pos.strike_price), // Use 'strike', send as string
+            tr_type: parseInt(pos.lots) >= 0 ? "b" : "s", // BUY if lots >= 0, SELL if lots < 0
+            op_pr: String(pos.last_price),  // Use 'op_pr', send as string
+            lot: String(Math.abs(parseInt(pos.lots || '0'))), // Use 'lot', send absolute value as string
+            // ------------------------------------
+            lot_size: pos.lot_size ? String(pos.lot_size) : null, // Use 'lot_size', send as string or null
+            iv: (pos.iv !== null && pos.iv !== undefined && pos.iv !== '' && !isNaN(parseFloat(pos.iv))) ? parseFloat(pos.iv) : null, // Use 'iv', send number or null
+            days_to_expiry: currentDTE, // Use 'days_to_expiry'
+            // expiry_date: pos.expiry_date, // Optional: Send original date if needed by backend
         };
     });
 
+    // Abort if local validation failed
     if (!dataIsValid) {
-        alert("Invalid data found in one or more strategy legs. Please correct and try again.");
-        resetResultsUI(); // Reset fully on input error
-        setElementState(SELECTORS.payoffChartContainer, 'error', 'Invalid input data.');
+        alert("Invalid data found in one or more strategy legs (e.g., expiry, strike, premium, lots). Please correct and try again.");
+        resetResultsUI(); // Reset UI to initial state
+        setElementState(SELECTORS.payoffChartContainer, 'error', 'Invalid input data. Check console for details.'); // Show error
         if (updateButton) updateButton.disabled = false;
         return;
     }
+
+    // Prepare final request payload
     const requestData = { asset: asset, strategy: requestStrategy };
-    logger.debug("Sending request to /get_payoff_chart:", requestData);
+    logger.debug("Sending request to /get_payoff_chart with corrected keys:", JSON.stringify(requestData)); // Log stringified version
 
     // --- Fetch API and Handle Response ---
     try {
+        // Assume fetchAPI is enhanced to handle 422 and other errors as shown previously
         const data = await fetchAPI('/get_payoff_chart', {
-            method: 'POST', body: JSON.stringify(requestData)
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }, // Ensure correct header
+            body: JSON.stringify(requestData)
         });
-        logger.debug("Received response from /get_payoff_chart:", data);
+        logger.debug("Received response data from /get_payoff_chart:", data); // Log the parsed data object
 
-        // --- Render Plotly Chart (Keep Purge & React logic) ---
+        // --- Render Plotly Chart (Using Purge & React) ---
         if (!chartContainer) { /* Should have been caught earlier */ }
         else if (data && data.chart_figure_json) {
             try {
-                if (typeof Plotly === 'undefined') { /* ... handle missing Plotly ... */ }
-                else {
+                if (typeof Plotly === 'undefined') {
+                     logger.error("Plotly.js library not loaded."); setElementState(SELECTORS.payoffChartContainer, 'error', 'Plotly library failed to load.');
+                } else {
                     const figure = JSON.parse(data.chart_figure_json);
                     const plotConfig = { responsive: true, displaylogo: false, modeBarButtonsToRemove: ['sendDataToCloud', 'lasso2d', 'select2d'] };
-                    if (chartContainer.layout) { await Plotly.purge(chartContainer.id); } // Purge if plot exists
+
+                    // Purge existing plot before rendering new one
+                    if (chartContainer.layout) { // Check if a Plotly layout object exists (indicates a plot is there)
+                        await Plotly.purge(chartContainer.id);
+                        logger.debug("Purged existing Plotly chart.");
+                    }
+
+                    // Render the new plot
                     await Plotly.react(chartContainer.id, figure.data, figure.layout, plotConfig);
-                    chartContainer.style.display = '';
-                    setElementState(SELECTORS.payoffChartContainer, 'content');
+
+                    chartContainer.style.display = ''; // Ensure visible
+                    setElementState(SELECTORS.payoffChartContainer, 'content'); // Set state AFTER rendering
                     logger.info("Successfully rendered Plotly chart.");
                  }
-            } catch (e) { logger.error("Error parsing/rendering chart:", e); setElementState(SELECTORS.payoffChartContainer, 'error', 'Failed to render chart.'); }
-        } else if (data?.success) { logger.warn("Chart JSON missing."); setElementState(SELECTORS.payoffChartContainer, 'error', 'Chart generation failed.'); }
-        else { logger.error("Backend analysis failed or invalid data for chart."); setElementState(SELECTORS.payoffChartContainer, 'error', data?.message || 'Chart generation failed.'); }
+            } catch (e) {
+                logger.error("Error parsing Plotly JSON or rendering chart:", e);
+                setElementState(SELECTORS.payoffChartContainer, 'error', 'Failed to render chart data.');
+            }
+        } else if (data?.success) { // Backend call succeeded but chart data is missing
+             logger.warn("Chart JSON missing in successful response.");
+             setElementState(SELECTORS.payoffChartContainer, 'error', 'Chart generation failed on backend.');
+        } else { // Backend call failed overall or returned unexpected structure without chart
+             logger.error("Backend analysis failed or invalid data for chart.", data?.message || '');
+             setElementState(SELECTORS.payoffChartContainer, 'error', data?.message || 'Chart generation failed.');
+        }
 
-        // --- Display Metrics (Keep improved logic from previous response) ---
-        const metricsContainer = data?.metrics;
-        const metricsData = metricsContainer?.metrics;
-        if (metricsData) { // Display metrics if available
+        // --- Display Metrics (Improved Logic) ---
+        const metricsContainer = data?.metrics; // Top-level object
+        const metricsData = metricsContainer?.metrics; // Nested actual metrics
+        const inputsData = metricsContainer?.calculation_inputs; // Inputs/counts
+
+        if (metricsData) {
+            logger.info("Displaying metrics:", metricsData);
+            // Display Max P/L and R:R directly using backend strings
             displayMetric(metricsData.max_profit ?? "N/A", SELECTORS.maxProfitDisplay);
             displayMetric(metricsData.max_loss ?? "N/A", SELECTORS.maxLossDisplay);
             displayMetric(metricsData.reward_to_risk_ratio ?? "N/A", SELECTORS.rewardToRiskDisplay);
-            let breakevens_text = "N/A"; /* ... Breakeven display logic from previous response ... */
-            if (Array.isArray(metricsData.breakeven_points)) {if (metricsData.breakeven_points.length > 0) {breakevens_text = metricsData.breakeven_points.join(', ');} else {const mp = metricsData.max_profit; const ml = metricsData.max_loss; if (ml === "0.00" || (ml !== "-∞" && parseFloat(ml) > 0)) { breakevens_text = "Always Profitable / BE";} else if (mp === "Loss" || mp === "0.00" || (mp !== "∞" && parseFloat(mp) < 0)) { breakevens_text = "Always Loss-Making";} else { breakevens_text = "None Found";}}}
+
+            // Display Breakeven Points with better context
+            let breakevens_text = "N/A"; // Default
+            if (Array.isArray(metricsData.breakeven_points)) {
+                if (metricsData.breakeven_points.length > 0) {
+                    breakevens_text = metricsData.breakeven_points.join(', '); // Use backend formatting
+                } else { // Empty array: determine context
+                    const mp = metricsData.max_profit; const ml = metricsData.max_loss;
+                    if (ml === "0.00" || (ml !== "-∞" && parseFloat(ml) > 0)) { breakevens_text = "Always Profitable / BE"; }
+                    else if (mp === "Loss" || mp === "0.00" || (mp !== "∞" && parseFloat(mp) < 0)) { breakevens_text = "Always Loss-Making"; }
+                    else { breakevens_text = "None Found"; }
+                }
+            } else { logger.warn("BE points data is not an array:", metricsData.breakeven_points); }
             displayMetric(breakevens_text, SELECTORS.breakevenDisplay);
-            const netPremiumValue = metricsData.net_premium; /* ... Net Premium display logic ... */
-            if (typeof netPremiumValue === 'number' && isFinite(netPremiumValue)) {const netPremiumPrefix = (netPremiumValue >= 0) ? "Net Credit: " : "Net Debit: "; displayMetric(Math.abs(netPremiumValue), SELECTORS.netPremiumDisplay, netPremiumPrefix, "", 2, true); } else { displayMetric("N/A", SELECTORS.netPremiumDisplay); }
-            const warnings = metricsData?.warnings; /* ... Warnings display logic ... */
-            const warningContainer = document.querySelector(SELECTORS.warningContainer); if (warningContainer) { if (warnings && Array.isArray(warnings) && warnings.length > 0) {warningContainer.textContent = "Warnings: " + warnings.join('; '); warningContainer.style.display = 'block'; warningContainer.style.color = 'orange';} else {warningContainer.style.display = 'none';} }
-        } else { // Reset metrics if metricsData is missing completely
-             logger.warn("Metrics data object missing in response, displaying N/A.");
+
+            // Display Net Premium
+            const netPremiumValue = metricsData.net_premium;
+            if (typeof netPremiumValue === 'number' && isFinite(netPremiumValue)) {
+                const netPremiumPrefix = (netPremiumValue >= 0) ? "Net Credit: " : "Net Debit: ";
+                displayMetric(Math.abs(netPremiumValue), SELECTORS.netPremiumDisplay, netPremiumPrefix, "", 2, true);
+            } else { displayMetric("N/A", SELECTORS.netPremiumDisplay); }
+
+            // Display warnings
+            const warnings = metricsData?.warnings;
+            const warningContainer = document.querySelector(SELECTORS.warningContainer);
+            if (warningContainer) {
+                if (warnings && Array.isArray(warnings) && warnings.length > 0) {
+                    logger.warn("Backend Calculation Warnings:", warnings);
+                    warningContainer.textContent = "Warnings: " + warnings.join('; ');
+                    warningContainer.style.display = 'block'; warningContainer.style.color = 'orange';
+                } else { warningContainer.style.display = 'none'; }
+            }
+
+        } else { // Handle missing metrics data
+             logger.warn("Metrics data object missing in response, displaying N/A for metrics.");
              displayMetric("N/A", SELECTORS.maxProfitDisplay); displayMetric("N/A", SELECTORS.maxLossDisplay); displayMetric("N/A", SELECTORS.breakevenDisplay); displayMetric("N/A", SELECTORS.rewardToRiskDisplay); displayMetric("N/A", SELECTORS.netPremiumDisplay);
         }
 
-        // --- Display Breakdown, Taxes, Greeks (Keep as is) ---
-        const costBreakdownData = metricsContainer?.cost_breakdown_per_leg; /* ... Breakdown rendering ... */
-        const taxContainer = document.querySelector(SELECTORS.taxInfoContainer); /* ... Tax rendering ... */
-        const greeksTable = document.querySelector(SELECTORS.greeksTable); /* ... Greeks rendering ... */
-        const messageContainer = document.querySelector(SELECTORS.statusMessageContainer); /* ... Status message ... */
-        // (Include the rendering logic blocks as before)
-        const breakdownList=document.querySelector(SELECTORS.costBreakdownList); const breakdownContainer=document.querySelector(SELECTORS.costBreakdownContainer); if(breakdownList&&breakdownContainer&&Array.isArray(costBreakdownData)&&costBreakdownData.length>0){breakdownList.innerHTML=""; costBreakdownData.forEach(item=>{const li=document.createElement("li"); const absPremium=Math.abs(item.total_premium); const premiumEffect=item.effect==='Paid'?`Paid ${formatCurrency(absPremium)}`:`Received ${formatCurrency(absPremium)}`; li.textContent=`${item.action} ${item.lots} Lot(s) [${item.quantity} Qty] ${item.type} ${item.strike} @ ${formatCurrency(item.premium_per_share)} (${premiumEffect} Total)`; breakdownList.appendChild(li);}); setElementState(SELECTORS.costBreakdownContainer,'content'); breakdownContainer.style.display=""; breakdownContainer.open=false;}else if(breakdownContainer){setElementState(SELECTORS.costBreakdownContainer,'hidden'); breakdownContainer.style.display='none';}
-        if(taxContainer){if(data?.charges){renderTaxTable(taxContainer,data.charges); setElementState(SELECTORS.taxInfoContainer,'content');}else{taxContainer.innerHTML="<p class='text-muted'>Charge data unavailable.</p>"; setElementState(SELECTORS.taxInfoContainer,'content');}}
-        if(greeksTable){renderGreeksTable(greeksTable,data?.greeks); setElementState(SELECTORS.greeksTable,'content');}
-        if(messageContainer){if(data?.message){messageContainer.textContent=data.message; messageContainer.className=data.success?'status-message success':'status-message warning';}else{messageContainer.textContent='';}}
+        // --- Display Breakdown, Taxes, Greeks ---
+        // Cost Breakdown
+        const breakdownList = document.querySelector(SELECTORS.costBreakdownList);
+        const breakdownContainer = document.querySelector(SELECTORS.costBreakdownContainer);
+        const costBreakdownData = metricsContainer?.cost_breakdown_per_leg; // From metrics container
+        if(breakdownList && breakdownContainer && Array.isArray(costBreakdownData) && costBreakdownData.length > 0) {
+            breakdownList.innerHTML=""; costBreakdownData.forEach(item=>{const li=document.createElement("li"); const absPremium=Math.abs(item.total_premium); const premiumEffect=item.effect==='Paid'?`Paid ${formatCurrency(absPremium)}`:`Received ${formatCurrency(absPremium)}`; li.textContent=`${item.action} ${item.lots} Lot(s) [${item.quantity} Qty] ${item.type} ${item.strike} @ ${formatCurrency(item.premium_per_share)} (${premiumEffect} Total)`; breakdownList.appendChild(li);});
+            setElementState(SELECTORS.costBreakdownContainer,'content'); breakdownContainer.style.display=""; breakdownContainer.open=false;
+        } else if(breakdownContainer){
+            setElementState(SELECTORS.costBreakdownContainer,'hidden'); breakdownContainer.style.display='none';
+        }
 
+        // Taxes/Charges (from top-level data.charges)
+        const taxContainer = document.querySelector(SELECTORS.taxInfoContainer);
+        if(taxContainer){ if(data?.charges){renderTaxTable(taxContainer,data.charges); setElementState(SELECTORS.taxInfoContainer,'content');} else{taxContainer.innerHTML="<p class='text-muted'>Charge data unavailable.</p>"; setElementState(SELECTORS.taxInfoContainer,'content');}}
 
-    } catch (error) { // Handle major API errors
-        logger.error("Fatal error fetching or displaying payoff results:", error);
-        resetResultsUI(); // Reset UI to initial state on error
-        setElementState(SELECTORS.payoffChartContainer, 'error', `API Error: ${error.message || 'Unknown'}`);
-        // Display error message prominently
+        // Greeks (from top-level data.greeks)
+        const greeksTable = document.querySelector(SELECTORS.greeksTable);
+        if(greeksTable){ renderGreeksTable(greeksTable,data?.greeks); setElementState(SELECTORS.greeksTable,'content');}
+
+        // Status Message (from top-level data.message)
         const messageContainer = document.querySelector(SELECTORS.statusMessageContainer);
-        if (messageContainer) { messageContainer.textContent = `Fatal Error: ${error.message || 'API Error'}`; messageContainer.className = 'status-message error';}
+        if(messageContainer){ if(data?.message){messageContainer.textContent=data.message; messageContainer.className=data.success?'status-message success':'status-message warning';} else{messageContainer.textContent='';}}
+
+    } catch (error) { // Handle errors from fetchAPI (network, HTTP status, etc.)
+        logger.error(`Fatal error during API call or processing: ${error.status || 'Network Error'}`, error);
+        resetResultsUI(); // Reset UI fully
+
+        // Display a user-friendly error message
+        let errorMsg = `Error: ${error.message || 'Failed to fetch analysis.'}`;
+        if (error.status === 422) {
+             errorMsg = "Error: Invalid data sent to server. Please check strategy inputs.";
+             // Log the detailed validation errors if fetchAPI provides them
+             if (error.data?.detail) logger.error("Validation Details:", error.data.detail);
+        } else if (error.status) {
+             errorMsg = `Error ${error.status}: Failed to fetch analysis. Please try again later.`;
+        }
+
+        setElementState(SELECTORS.payoffChartContainer, 'error', errorMsg); // Show error in chart area
+        const messageContainer = document.querySelector(SELECTORS.statusMessageContainer);
+        if (messageContainer) { messageContainer.textContent = errorMsg; messageContainer.className = 'status-message error';}
 
     } finally {
         if (updateButton) updateButton.disabled = false; // Always re-enable button
