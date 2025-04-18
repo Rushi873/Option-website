@@ -210,23 +210,21 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
 /* ===============================================================
    Payoff Chart & Results Sections
    =============================================================== */
-#payoff-chart-container {
-  /* Increase max-width significantly */
-  max-width: 1200px; /* <<< Increased from 900px */
-
+#payoffChartContainer {
+  max-width: 1200px;
   width: 100%;
-  min-height: 600px; /* Keep a reasonable minimum */
-  aspect-ratio: 1.8 / 1; /* Keep original aspect ratio for now */
-  margin: 1.5em auto; /* Optional: Add slightly more vertical margin */
+  min-height: 600px;
+  aspect-ratio: 1.8 / 1;
+  margin: 1.5em auto;
   padding: 5px;
   border: 1px solid #ccc;
   box-sizing: border-box;
   position: relative;
 }
 
-/* Keep the rest of the styles (.loading, .error, .plotly) the same */
-#payoff-chart-container.loading::before,
-#payoff-chart-container.error::before {
+/* Update these selectors too */
+#payoffChartContainer.loading::before,
+#payoffChartContainer.error::before {
   content: attr(data-message);
   position: absolute;
   inset: 0;
@@ -238,13 +236,14 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
   color: #555;
   z-index: 10;
 }
-#payoff-chart-container.error::before {
-    color: red;
+
+#payoffChartContainer.error::before {
+  color: red;
 }
 
-#payoff-chart-container .plotly {
-    width: 100% !important;
-    height: 100% !important;
+#payoffChartContainer .plotly {
+  width: 100% !important;
+  height: 100% !important;
 }
 
 
