@@ -560,168 +560,145 @@ def fetch_and_update_single_asset_data(asset_name: str):
 
 
 def prepare_strategy_data(
-    raw_strategy: List[Dict[str, Any]],
+    # Renamed arg for clarity: these dicts come *after* Pydantic validation
+    strategy_dicts: List[Dict[str, Any]],
     asset: str,
-    spot_price: float # Pass spot price for potential use in IV extraction
+    spot_price: float # Pass spot price for potential use
 ) -> List[Dict[str, Any]]:
     """
-    Validates raw strategy leg data, calculates Days to Expiry (DTE),
-    extracts Implied Volatility (IV) using a helper function, determines
-    lot size, and formats the data for downstream calculation functions.
-
-    Args:
-        raw_strategy: List of dictionaries, likely from API request.
-                      Expected keys per dict: 'expiry_date', 'strike_price',
-                      'option_type', 'tr_type', 'option_price', 'lots'.
-                      Optional: 'lot_size'.
-        asset: The underlying asset symbol (e.g., "NIFTY").
-        spot_price: The current spot price of the underlying asset.
-
-    Returns:
-        A list of dictionaries, where each dictionary represents a valid,
-        prepared strategy leg with keys required by calculation functions
-        (op_type, strike, tr_type, op_pr, lot, lot_size, iv, days_to_expiry).
-        Invalid legs from the input are skipped.
+    Validates strategy leg dicts (post-Pydantic), calculates DTE,
+    extracts IV, determines lot size, and formats for calculations.
+    Expects input dicts with keys: 'op_type', 'strike', 'tr_type', 'op_pr',
+    'lot', 'lot_size'(opt), 'iv'(opt), 'days_to_expiry'(opt), 'expiry_date'(opt).
+    Outputs dicts with keys: 'op_type', 'strike', 'tr_type', 'op_pr',
+    'lot', 'lot_size', 'iv', 'days_to_expiry'.
     """
-    func_name = "prepare_strategy_data"
-    logger.info(f"[{func_name}] Preparing data for {len(raw_strategy)} raw legs for asset {asset} (Spot: {spot_price}).")
+    func_name = "prepare_strategy_data_v2" # Version tracking
+    logger.info(f"[{func_name}] Preparing data for {len(strategy_dicts)} legs for asset {asset} (Spot: {spot_price}).")
     prepared_data: List[Dict[str, Any]] = []
     today = date.today()
 
-    # --- Get Default Lot Size for Fallback ---
+    # --- Get Default Lot Size ---
     default_lot_size = None
     try:
         default_lot_size = get_lot_size(asset)
         if default_lot_size is None or not isinstance(default_lot_size, int) or default_lot_size <= 0:
-             raise ValueError(f"Invalid default lot size ({default_lot_size}) retrieved for asset {asset}")
-        logger.debug(f"[{func_name}] Using default lot size: {default_lot_size} for {asset}")
+             raise ValueError(f"Invalid default lot size ({default_lot_size})")
+        logger.debug(f"[{func_name}] Using default lot size: {default_lot_size}")
     except Exception as lot_err:
-         logger.error(f"[{func_name}] Failed to get valid default lot size for {asset}: {lot_err}. Cannot prepare legs without a default.", exc_info=True)
-         return [] # Cannot proceed without a valid default
+         logger.error(f"[{func_name}] Failed default lot size fetch: {lot_err}. Cannot prepare.", exc_info=True)
+         return [] # Critical failure
 
-    # --- Process Each Raw Leg ---
-    for i, leg_input in enumerate(raw_strategy):
+    # --- Process Each Leg Dictionary ---
+    for i, leg_input in enumerate(strategy_dicts): # Use the new argument name
         leg_desc = f"Leg {i+1}"
         try:
-            logger.debug(f"[{func_name}] Processing raw {leg_desc}: {leg_input}")
+            logger.debug(f"[{func_name}] Processing dict {leg_desc}: {leg_input}")
 
-            # --- Extract and Validate Core Inputs ---
-            expiry_str = leg_input.get('expiry_date') # Expects "YYYY-MM-DD"
-            # Use safe float conversion for strike
-            strike_raw = leg_input.get('strike_price')
-            strike_price = _safe_get_float({'sp': strike_raw}, 'sp')
+            # --- Extract and Validate Core Inputs (Using Corrected Keys) ---
+            # *** READ CORRECTED KEYS FROM INPUT DICT ***
+            op_type_in = str(leg_input.get('op_type', '')).lower() # Expect 'c' or 'p'
+            strike_in = leg_input.get('strike')       # Expect string number
+            tr_type_in = str(leg_input.get('tr_type', '')).lower() # Expect 'b' or 's'
+            op_pr_in = leg_input.get('op_pr')         # Expect string number (premium)
+            lot_in = leg_input.get('lot')             # Expect string number (singular)
+            lot_size_in = leg_input.get('lot_size')   # Expect string number or null
+            iv_in = leg_input.get('iv')               # Expect float or null
+            dte_in = leg_input.get('days_to_expiry')  # Expect int or null
+            expiry_in = leg_input.get('expiry_date') # Optional string "YYYY-MM-DD"
+            # ********************************************
 
-            # Standardize option type (CE/PE -> c/p)
-            opt_type_req = str(leg_input.get('option_type', '')).upper()
-            op_type = None
-            if opt_type_req == 'CE': op_type = 'c'
-            elif opt_type_req == 'PE': op_type = 'p'
-
-            # Standardize transaction type (b/s)
-            tr_type = str(leg_input.get('tr_type', '')).lower()
-
-            # Basic validation for essential fields
+            # --- Basic Validation & Conversion ---
             error_msg = None
-            if not expiry_str: error_msg = "Missing 'expiry_date'"
-            elif strike_price is None or strike_price <= 0: error_msg = f"Invalid 'strike_price' ({strike_raw})"
-            elif op_type is None: error_msg = f"Invalid 'option_type' ({leg_input.get('option_type')})"
-            elif tr_type not in ('b', 's'): error_msg = f"Invalid 'tr_type' ({leg_input.get('tr_type')})"
+            strike_price = _safe_get_float({'sp': strike_in}, 'sp')
+            lots = _safe_get_int({'l': lot_in}, 'l')
+            option_price = _safe_get_float({'op': op_pr_in}, 'op', default=0.0) # Default OK?
 
-            if error_msg:
-                logger.warning(f"[{func_name}] Skipping {leg_desc} due to basic info error: {error_msg}. Input: {leg_input}")
+            if op_type_in not in ('c', 'p'): error_msg = f"Invalid 'op_type' ({leg_input.get('op_type')})"
+            elif strike_price is None or strike_price <= 0: error_msg = f"Invalid 'strike' ({strike_in})"
+            elif tr_type_in not in ('b', 's'): error_msg = f"Invalid 'tr_type' ({leg_input.get('tr_type')})"
+            # Premium validation - allow 0 but not negative?
+            elif option_price < 0: logger.warning(f"[{func_name}] Negative premium '{op_pr_in}' for {leg_desc}, using 0.0."); option_price = 0.0
+            elif lots is None or lots <= 0: error_msg = f"Invalid 'lot' ({lot_in})"
+
+            # --- Determine/Validate Days to Expiry ---
+            days_to_expiry = None
+            if isinstance(dte_in, int) and dte_in >= 0:
+                 days_to_expiry = dte_in # Use DTE if validly provided
+                 logger.debug(f"[{func_name}] {leg_desc} Using provided DTE: {days_to_expiry}")
+            elif expiry_in: # Calculate from expiry date if DTE missing/invalid
+                 try:
+                      expiry_dt = datetime.strptime(expiry_in, "%Y-%m-%d").date()
+                      days_to_expiry = (expiry_dt - today).days
+                      if days_to_expiry < 0:
+                           error_msg = f"Expiry date '{expiry_in}' is in the past"
+                      else:
+                           logger.debug(f"[{func_name}] {leg_desc} Calculated DTE: {days_to_expiry} from {expiry_in}")
+                 except ValueError:
+                      error_msg = f"Invalid 'expiry_date' format ({expiry_in})"
+            else: # Cannot determine DTE
+                 error_msg = "Missing or invalid 'days_to_expiry' and 'expiry_date'"
+
+            if error_msg: # If any error occurred so far
+                logger.warning(f"[{func_name}] Skipping {leg_desc} due to error: {error_msg}. Input: {leg_input}")
                 continue
 
-            # --- Calculate Days to Expiry (DTE) ---
-            expiry_dt = datetime.strptime(expiry_str, "%Y-%m-%d").date()
-            days_to_expiry = (expiry_dt - today).days
-            # Allow DTE=0 (expiry today), but reject past expiry
-            if days_to_expiry < 0:
-                 logger.warning(f"[{func_name}] Skipping {leg_desc} with expiry {expiry_str} in the past (DTE={days_to_expiry}).")
-                 continue
-            logger.debug(f"[{func_name}] {leg_desc} DTE calculated: {days_to_expiry}")
-
-            # --- Extract Implied Volatility (IV) ---
-            # Assumes extract_iv handles API calls/DB lookups/mocks and returns float or None
-            iv_extracted = extract_iv(asset, strike_price, expiry_str, opt_type_req)
-            iv_float = 0.0 # Default placeholder
-
-            if iv_extracted is None:
-                logger.warning(f"[prepare_strategy_data] IV extraction failed for {leg_desc} ({opt_type_req} {strike_price} {expiry_str}). Using 0.0 placeholder. Greeks may be skipped or inaccurate.")
-            elif not isinstance(iv_extracted, (int, float)) or iv_extracted < 0:
-                 logger.warning(f"[prepare_strategy_data] IV extraction for {leg_desc} returned invalid value {iv_extracted}. Using 0.0 placeholder. Greeks may be skipped or inaccurate.")
+            # --- Determine/Validate IV ---
+            # Prioritize provided IV if valid
+            iv_float = None
+            if isinstance(iv_in, (int, float)) and iv_in >= 0:
+                 iv_float = float(iv_in)
+                 logger.debug(f"[{func_name}] {leg_desc} Using provided IV: {iv_float}")
             else:
-                 iv_float = float(iv_extracted)
-                 # Warn if IV is effectively zero, might cause issues in calculations
-                 if iv_float <= 1e-6:
-                     logger.warning(f"[prepare_strategy_data] IV for {leg_desc} is near zero ({iv_float}). Using 0.0 placeholder. Greeks may be skipped.")
-                     iv_float = 0.0 # Force to exactly 0.0 for consistency downstream
+                 # Fallback to extraction if needed (assuming expiry_in and op_type_req are available)
+                 # Construct the required op_type_req ('CE'/'PE') from op_type_in ('c'/'p')
+                 op_type_req = 'CE' if op_type_in == 'c' else 'PE'
+                 logger.debug(f"[{func_name}] {leg_desc} Provided IV invalid or missing ({iv_in}). Attempting extraction...")
+                 iv_extracted = extract_iv(asset, strike_price, expiry_in, op_type_req) # Requires expiry_in
+                 if iv_extracted is None or not isinstance(iv_extracted, (int, float)) or iv_extracted < 0:
+                      logger.warning(f"[{func_name}] IV extraction failed or invalid for {leg_desc}. Using 0.0 placeholder.")
+                      iv_float = 0.0 # Default placeholder if extraction fails
+                 else:
+                      iv_float = float(iv_extracted)
+                      logger.debug(f"[{func_name}] {leg_desc} Using extracted IV: {iv_float}")
 
-            logger.debug(f"[{func_name}] {leg_desc} IV assigned: {iv_float}")
-
-            # --- Extract and Validate Other Numeric Inputs ---
-            # Use safe float conversion, default to 0.0 if missing/invalid
-            option_price_raw = leg_input.get('option_price')
-            option_price = _safe_get_float({'op': option_price_raw}, 'op', default=0.0)
-            if option_price < 0:
-                 logger.warning(f"[{func_name}] Invalid negative option_price ({option_price_raw}) for {leg_desc}. Using 0.0.")
-                 option_price = 0.0
-
-            # Use safe int conversion, default to 1 if missing/invalid? Or fail? Let's fail if invalid.
-            lots_raw = leg_input.get('lots')
-            lots = _safe_get_int({'l': lots_raw}, 'l')
-            if lots is None or lots <= 0:
-                 logger.warning(f"[{func_name}] Skipping {leg_desc} due to invalid 'lots' ({lots_raw}).")
-                 continue
+            # Ensure IV is non-negative, warn if zero
+            iv_float = max(0.0, iv_float)
+            if iv_float <= 1e-6:
+                logger.warning(f"[{func_name}] IV for {leg_desc} is zero or near-zero. Greeks might be skipped or inaccurate.")
+                iv_float = 0.0 # Standardize to exactly 0.0
 
             # --- Determine Final Lot Size ---
-            lot_size_raw = leg_input.get('lot_size')
-            leg_specific_lot_size = _safe_get_int({'ls': lot_size_raw}, 'ls')
+            leg_specific_lot_size = _safe_get_int({'ls': lot_size_in}, 'ls')
             final_lot_size = default_lot_size # Start with default
-
             if leg_specific_lot_size is not None and leg_specific_lot_size > 0:
-                final_lot_size = leg_specific_lot_size # Use leg-specific if valid
-                logger.debug(f"[{func_name}] {leg_desc} Using leg-specific lot size: {final_lot_size}")
-            else:
-                 # Log if leg-specific was provided but invalid
-                 if lot_size_raw is not None:
-                      logger.warning(f"[{func_name}] Invalid leg-specific lot size '{lot_size_raw}' for {leg_desc}. Using default: {default_lot_size}")
-                 else:
-                      logger.debug(f"[{func_name}] {leg_desc} No valid leg-specific lot size. Using default: {default_lot_size}")
-            # Final check on the chosen lot size (should be redundant if default is valid)
-            if final_lot_size <= 0:
-                 logger.error(f"[{func_name}] Skipping {leg_desc} due to final invalid lot size ({final_lot_size}). Check default lot size for {asset}.")
-                 continue
+                final_lot_size = leg_specific_lot_size
+            elif lot_size_in is not None: # Log if provided but invalid
+                 logger.warning(f"[{func_name}] Invalid leg-specific lot size '{lot_size_in}' for {leg_desc}. Using default: {default_lot_size}")
+            # No final check needed as default_lot_size was validated initially
 
             # --- Assemble Prepared Leg Data ---
-            # Use keys expected by downstream calculation functions
+            # Keys here MUST match what calculation functions expect
             prepared_leg = {
-                "op_type": op_type,           # 'c' or 'p'
+                "op_type": op_type_in,        # 'c' or 'p'
                 "strike": strike_price,       # float
-                "tr_type": tr_type,           # 'b' or 's'
+                "tr_type": tr_type_in,        # 'b' or 's'
                 "op_pr": option_price,        # float (premium per share)
                 "lot": lots,                  # int
-                "lot_size": final_lot_size,   # int (validated)
-                "iv": 1e-6 if iv_extracted == 0 else iv_extracted,               # float (validated IV, can be 0.0)
-                "days_to_expiry": days_to_expiry, # int (can be 0)
-                # Optional: Keep original info for deeper debugging if needed
-                # "original_input": leg_input
-                "expiry_date_str": expiry_str, # Keep for reference
+                "lot_size": final_lot_size,   # int
+                "iv": iv_float,               # float (non-negative)
+                "days_to_expiry": days_to_expiry, # int (non-negative)
+                "expiry_date_str": expiry_in, # Keep original expiry if needed downstream
             }
             prepared_data.append(prepared_leg)
             logger.debug(f"[{func_name}] Successfully prepared {leg_desc}: {prepared_leg}")
 
-        except (ValueError, TypeError, KeyError) as prep_err:
-            # Catch errors during conversion (strptime, float, int) or unexpected key issues
-            logger.error(f"[{func_name}] Error preparing {leg_desc}: {prep_err}. Skipping leg. Input: {leg_input}", exc_info=False)
-            # Skip this leg and continue with the next
-            continue
-        except Exception as unexpected_err:
-             # Catch any other unexpected error during leg processing
+        except Exception as unexpected_err: # Catch any other unexpected error
              logger.error(f"[{func_name}] UNEXPECTED Error preparing {leg_desc}: {unexpected_err}. Skipping leg. Input: {leg_input}", exc_info=True)
-             continue
+             continue # Skip leg
 
     # --- Final Log ---
-    logger.info(f"[{func_name}] Finished preparation. Prepared {len(prepared_data)} valid legs out of {len(raw_strategy)} raw legs for asset {asset}.")
+    logger.info(f"[{func_name}] Finished preparation. Prepared {len(prepared_data)} valid legs out of {len(strategy_dicts)} input legs for asset {asset}.")
     return prepared_data
 
 
@@ -816,53 +793,22 @@ class AssetUpdateRequest(BaseModel): asset: str
 class SpotPriceResponse(BaseModel): spot_price: float; timestamp: Optional[str] = None # Added timestamp
 class StockRequest(BaseModel): asset: str
 class PositionInput(BaseModel): symbol: str; strike: float; type: str = Field(pattern="^(CE|PE)$"); quantity: int; price: float
-class StrategyLegInput_New(BaseModel):
-    # Match the keys sent by the corrected frontend
+class StrategyLegInput(BaseModel): # Ensure this name is used below
+    # These field names MUST match the keys sent by the frontend JS
     op_type: str
-    strike: str # Receive as string, convert later if needed
+    strike: str  # Receive as string
     tr_type: str
     op_pr: str   # Receive premium as string
     lot: str     # Receive lots as string
-    lot_size: Optional[str] = None
-    iv: Optional[float] = None # Keep as Optional float
-    days_to_expiry: Optional[int] = None # Keep as Optional int
-    expiry_date: Optional[str] = None # Optional
-
-    # Optional: Add validators if you want Pydantic to convert/validate types further
-    # Example for Pydantic v2+
-    @field_validator('strike', 'op_pr', mode='before')
-    @classmethod
-    def check_numeric_string(cls, v):
-        try:
-            float(v)
-        except (ValueError, TypeError):
-            raise ValueError(f"Value must be convertible to a number: {v}")
-        return v # Return original string if needed later, or float(v)
-
-    @field_validator('lot', 'lot_size', mode='before')
-    @classmethod
-    def check_integer_string(cls, v):
-        if v is None: return v # Allow None for lot_size
-        try:
-            val = int(v)
-            if val <= 0: raise ValueError("Must be positive")
-        except (ValueError, TypeError):
-            raise ValueError(f"Value must be convertible to a positive integer: {v}")
-        return v # Return original string if needed later, or int(v)
-
-    @field_validator('op_type')
-    @classmethod
-    def check_op_type(cls, v):
-        if v.lower() not in ('c', 'p'): raise ValueError("op_type must be 'c' or 'p'")
-        return v.lower() # Standardize to lowercase
-
-    @field_validator('tr_type')
-    @classmethod
-    def check_tr_type(cls, v):
-        if v.lower() not in ('b', 's'): raise ValueError("tr_type must be 'b' or 's'")
-        return v.lower() # Standardize to lowercase
+    lot_size: Optional[str] = None # Receive as string or null
+    iv: Optional[float] = None # Allow float or null
+    days_to_expiry: Optional[int] = None # Allow int or null
+    expiry_date: Optional[str] = None # Optional, if used
     
-class PayoffRequest(BaseModel): asset: str; strategy: List[StrategyLegInput_New]
+class PayoffRequest(BaseModel):
+    asset: str
+    strategy: List[StrategyLegInput] 
+    
 class DebugAssetSelectRequest(BaseModel): asset: str
 
 
