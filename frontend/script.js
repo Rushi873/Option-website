@@ -1547,24 +1547,78 @@ async function fetchPayoffChart() {
         logger.debug("Received response data from /get_payoff_chart:", data);
 
         // ===========================================================
-        // vvv PLOTLY RENDERING BLOCK (with Fixes) vvv
+        // vvv PLOTLY RENDERING BLOCK (IMPROVED) vvv
         // ===========================================================
         if (data && data.chart_figure_json && typeof data.chart_figure_json === 'string') {
             try {
                 if (typeof Plotly === 'undefined') { throw new Error("Plotly.js library is not loaded."); }
+                
+                // Parse the figure JSON from server
                 const figure = JSON.parse(data.chart_figure_json);
-                const plotConfig = { responsive: true, displaylogo: false, modeBarButtonsToRemove: ['sendDataToCloud', 'lasso2d', 'select2d', 'toImage'] };
+                
+                // Ensure layout is properly defined
+                if (!figure.layout) figure.layout = {};
+                
+                // Set optimal layout settings for proper sizing
+                figure.layout.height = 500; // Fixed height
+                figure.layout.autosize = true;
+                
+                // Better margins for financial charts
+                figure.layout.margin = {
+                    l: 70,  // Left margin for y-axis labels
+                    r: 50,  // Right margin
+                    t: 30,  // Top margin
+                    b: 70   // Bottom margin for x-axis labels
+                };
+                
+                // Improve y-axis appearance
+                if (!figure.layout.yaxis) figure.layout.yaxis = {};
+                figure.layout.yaxis.automargin = true;
+                figure.layout.yaxis.title = {
+                    text: 'Profit / Loss (₹)',
+                    standoff: 10
+                };
+                
+                // Improve x-axis appearance
+                if (!figure.layout.xaxis) figure.layout.xaxis = {};
+                figure.layout.xaxis.automargin = true;
+                figure.layout.xaxis.title = {
+                    text: 'Underlying Spot Price',
+                    standoff: 10
+                };
+                
+                // Enhanced config to improve user interaction
+                const plotConfig = { 
+                    responsive: true, 
+                    displayModeBar: true,
+                    displaylogo: false, 
+                    modeBarButtonsToRemove: ['sendDataToCloud', 'lasso2d', 'select2d', 'toImage'] 
+                };
+                
+                // Make sure container is visible
                 chartContainer.style.display = '';
+                
+                // Clear existing chart
                 try {
                     logger.debug("Attempting to purge existing Plotly chart...");
                     await Plotly.purge(chartContainer.id);
                 } catch (purgeError) {
                     logger.warn("Ignoring potential error during Plotly.purge:", purgeError.message);
                 }
-                logger.debug("Rendering Plotly chart...");
-                await Plotly.react(chartContainer.id, figure.data, figure.layout, plotConfig);
+                
+                // Clear any placeholder content
+                chartContainer.innerHTML = '';
+                
+                // Create the plot
+                logger.debug("Rendering Plotly chart with improved settings...");
+                await Plotly.newPlot(chartContainer.id, figure.data, figure.layout, plotConfig);
+                
+                // Force resize with delay to ensure proper rendering
                 logger.debug("Forcing Plotly resize check...");
-                Plotly.Plots.resize(chartContainer);
+                setTimeout(() => {
+                    Plotly.Plots.resize(chartContainer);
+                }, 100);
+                
                 setElementState(SELECTORS.payoffChartContainer, 'content');
                 logger.info("Successfully rendered and resized Plotly chart.");
             } catch (renderError) {
@@ -1657,7 +1711,6 @@ async function fetchPayoffChart() {
         logger.info("Payoff analysis request finished.");
     }
 }
-
 
 // --- Rendering Helpers for Payoff Results ---
 

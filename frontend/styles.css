@@ -213,16 +213,16 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
 #payoffChartContainer {
   max-width: 1200px;
   width: 100%;
-  min-height: 600px;
-  aspect-ratio: 1.8 / 1;
+  height: 500px;  /* Fixed height instead of min-height */
   margin: 1.5em auto;
-  padding: 5px;
+  padding: 0;  /* Remove padding to maximize chart area */
   border: 1px solid #ccc;
   box-sizing: border-box;
   position: relative;
+  overflow: hidden;  /* Prevent any overflow issues */
 }
 
-/* Update these selectors too */
+/* Loading and error states */
 #payoffChartContainer.loading::before,
 #payoffChartContainer.error::before {
   content: attr(data-message);
@@ -241,7 +241,16 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
   color: red;
 }
 
-#payoffChartContainer .plotly {
+/* Make Plotly completely fill the container */
+#payoffChartContainer .plotly,
+#payoffChartContainer .js-plotly-plot,
+#payoffChartContainer .plot-container {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* Ensure SVG elements properly scale */
+#payoffChartContainer .main-svg {
   width: 100% !important;
   height: 100% !important;
 }
