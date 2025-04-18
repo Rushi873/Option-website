@@ -816,9 +816,6 @@ class AssetUpdateRequest(BaseModel): asset: str
 class SpotPriceResponse(BaseModel): spot_price: float; timestamp: Optional[str] = None # Added timestamp
 class StockRequest(BaseModel): asset: str
 class PositionInput(BaseModel): symbol: str; strike: float; type: str = Field(pattern="^(CE|PE)$"); quantity: int; price: float
-class PayoffRequest(BaseModel): asset: str; strategy: List[StrategyLegInput_New]
-class DebugAssetSelectRequest(BaseModel): asset: str
-
 class StrategyLegInput_New(BaseModel):
     # Match the keys sent by the corrected frontend
     op_type: str
@@ -864,6 +861,11 @@ class StrategyLegInput_New(BaseModel):
     def check_tr_type(cls, v):
         if v.lower() not in ('b', 's'): raise ValueError("tr_type must be 'b' or 's'")
         return v.lower() # Standardize to lowercase
+    
+class PayoffRequest(BaseModel): asset: str; strategy: List[StrategyLegInput_New]
+class DebugAssetSelectRequest(BaseModel): asset: str
+
+
 
 
 # ===============================================================
