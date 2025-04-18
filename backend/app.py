@@ -145,6 +145,8 @@ PAYOFF_LOWER_FACTOR = 0.90 # Adjusted factors for potentially better range
 PAYOFF_UPPER_FACTOR = 1.10
 PAYOFF_POINTS = 300 # Increased points for smoother curve
 BREAKEVEN_CLUSTER_GAP_PCT = 0.01
+MIN_Y_AXIS_ABS_RANGE = 100 # Minimum absolute difference between Y-max and Y-min (e.g., ₹100)
+Y_AXIS_PADDING_FACTOR = 0.12
 
 # --- LLM Configuration ---
 try:
@@ -1042,20 +1044,16 @@ def calculate_option_taxes(strategy_data: List[Dict[str, Any]],  spot_price: flo
     return result
 
 
-def generate_payoff_chart_matplotlib(
+def generate_payoff_chart_matplotlib( # Keep function signature as before
     strategy_data: List[Dict[str, Any]],
     asset: str,
     spot_price: float,
-    strategy_metrics: Optional[Dict[str, Any]], # Keep arg, might be used for annotations later
+    strategy_metrics: Optional[Dict[str, Any]],
     payoff_points: int = PAYOFF_POINTS,
     lower_factor: float = PAYOFF_LOWER_FACTOR,
     upper_factor: float = PAYOFF_UPPER_FACTOR
 ) -> Optional[str]:
-    """
-    Generates Plotly chart JSON. Reads 'lot' key for lots.
-    v3: Explicit Y-axis range setting based on calculated payoff.
-    """
-    func_name = "generate_payoff_chart_matplotlib_v3" # Version tracking
+    func_name = "generate_payoff_chart_matplotlib_v4" # Version tracking
     logger.info(f"[{func_name}] Generating Plotly chart JSON for {len(strategy_data)} leg(s), asset: {asset}, Spot: {spot_price}")
     start_time = time.monotonic()
 
@@ -1069,7 +1067,9 @@ def generate_payoff_chart_matplotlib(
         logger.debug(f"[{func_name}] Using default lot size: {default_lot_size}")
 
         # --- Calculate Standard Deviation Move (Optional visual aid) ---
+        # (Keep your existing SD calculation logic here...)
         one_std_dev_move = None
+        # ... (your SD calc logic) ...
         if strategy_data:
              try:
                 first_leg = strategy_data[0]; iv_raw = first_leg.get('iv'); dte_raw = first_leg.get('days_to_expiry')
@@ -1078,10 +1078,11 @@ def generate_payoff_chart_matplotlib(
                     calc_dte = max(dte_used, 0.1); iv_decimal = iv_used / 100.0; time_fraction = calc_dte / 365.0
                     one_std_dev_move = spot_price * iv_decimal * math.sqrt(time_fraction)
                     logger.debug(f"[{func_name}] Calculated 1 StDev move: {one_std_dev_move:.2f}")
-                # else: logger.warning(f"[{func_name}] Cannot calculate StDev move: IV/DTE invalid") # Reduce noise
-             except Exception as sd_calc_err: logger.error(f"[{func_name}] Error calculating SD move: {sd_calc_err}", exc_info=False) # Log less verbosely
+             except Exception as sd_calc_err: logger.error(f"[{func_name}] Error calculating SD move: {sd_calc_err}", exc_info=False)
+
 
         # --- Determine Chart X-axis Range ---
+        # (Keep your existing X-axis range logic here...)
         sd_factor = 2.5; chart_min = 0; chart_max = 0
         if one_std_dev_move and one_std_dev_move > 0: chart_min = spot_price - sd_factor * one_std_dev_move; chart_max = spot_price + sd_factor * one_std_dev_move
         else: chart_min = spot_price * lower_factor; chart_max = spot_price * upper_factor
@@ -1090,12 +1091,12 @@ def generate_payoff_chart_matplotlib(
         price_range = np.linspace(lower_bound, upper_bound, payoff_points)
 
         # --- Calculate Payoff Data ---
+        # (Keep your existing payoff calculation logic here...)
         total_payoff = np.zeros_like(price_range)
         processed_legs_count = 0
         for i, leg in enumerate(strategy_data):
             leg_desc = f"Leg {i+1}"
             try:
-                # Extract and validate data (using 'lot' key)
                 tr_type = str(leg.get('tr_type', '')).lower()
                 op_type = str(leg.get('op_type', '')).lower()
                 strike = _safe_get_float(leg, 'strike')
@@ -1103,16 +1104,12 @@ def generate_payoff_chart_matplotlib(
                 lots = _safe_get_int(leg, 'lot') # Read 'lot' key
                 raw_ls = leg.get('lot_size'); temp_ls = _safe_get_int({'ls': raw_ls}, 'ls')
                 leg_lot_size = temp_ls if temp_ls is not None and temp_ls > 0 else default_lot_size
-
-                # Perform validation checks
                 if tr_type not in ('b','s'): raise ValueError(f"invalid tr_type ('{tr_type}')")
                 if op_type not in ('c','p'): raise ValueError(f"invalid op_type ('{op_type}')")
                 if strike is None or strike <= 0: raise ValueError(f"invalid strike ({leg.get('strike')})")
                 if premium is None or premium < 0: raise ValueError(f"invalid premium ({leg.get('op_pr')})")
                 if lots is None or not isinstance(lots, int) or lots <= 0: raise ValueError(f"invalid 'lot' value ({leg.get('lot')})")
                 if not isinstance(leg_lot_size, int) or leg_lot_size <= 0: raise ValueError(f"invalid final lot_size ({leg_lot_size})")
-
-                # Calculate payoff contribution
                 quantity = lots * leg_lot_size
                 leg_prem_tot = premium * quantity
                 if op_type == 'c': intrinsic_value = np.maximum(price_range - strike, 0)
@@ -1121,78 +1118,106 @@ def generate_payoff_chart_matplotlib(
                 else: leg_payoff = leg_prem_tot - (intrinsic_value * quantity)
                 total_payoff += leg_payoff
                 processed_legs_count += 1
-
             except Exception as e:
                  logger.error(f"[{func_name}] Error processing {leg_desc} data for chart: {e}. Leg Data: {leg}", exc_info=False)
-                 raise ValueError(f"Error preparing {leg_desc} for chart: {e}") from e # Stop generation if leg is bad
+                 raise ValueError(f"Error preparing {leg_desc} for chart: {e}") from e
 
         if processed_legs_count == 0:
             logger.warning(f"[{func_name}] No valid legs processed for chart generation: {asset}.")
-            return None
+            return None # Cannot generate chart without data
         logger.debug(f"[{func_name}] Payoff calculation complete for {processed_legs_count} legs.")
 
-        # +++ Calculate Y-Axis Range +++
-        # Filter out potential NaNs or Infs before calculating min/max
+
+        # +++ REVISED Y-Axis Range Calculation +++
         finite_payoffs = total_payoff[np.isfinite(total_payoff)]
         if len(finite_payoffs) == 0:
-             logger.warning(f"[{func_name}] No finite payoff values calculated. Cannot determine Y-axis range automatically.")
-             # Fallback to a default range or maybe use strategy_metrics if available?
-             payoff_min = -1000 # Example fallback
-             payoff_max = 1000  # Example fallback
-        else:
-            payoff_min = np.min(finite_payoffs)
-            payoff_max = np.max(finite_payoffs)
+            logger.error(f"[{func_name}] No finite payoff values calculated. Cannot determine Y-axis range.")
+            # Consider returning None or a default plot with an error message
+            return None # Cannot generate a meaningful plot
 
+        payoff_min = np.min(finite_payoffs)
+        payoff_max = np.max(finite_payoffs)
         logger.info(f"[{func_name}] Calculated Finite Payoff Range: [{payoff_min:.2f}, {payoff_max:.2f}]")
 
-        padding_factor = 0.10 # Add 10% padding
         payoff_range = payoff_max - payoff_min
 
-        # Handle edge case: flat payoff line
-        if payoff_range < 1e-6: # Use tolerance for floating point
-             y_axis_padding = max(abs(payoff_min) * padding_factor, 50.0) # Use 50 units or 10%
-             yaxis_min = payoff_min - y_axis_padding
-             yaxis_max = payoff_max + y_axis_padding
-        else: # Standard case
-             y_axis_padding = payoff_range * padding_factor
-             yaxis_min = payoff_min - y_axis_padding
-             yaxis_max = payoff_max + y_axis_padding
+        # --- Determine Padding ---
+        if payoff_range < 1e-6: # Flat line case
+            # Padding relative to the absolute value of the level, with a minimum fixed amount
+            padding = max(abs(payoff_min) * Y_AXIS_PADDING_FACTOR, MIN_Y_AXIS_ABS_RANGE / 2.0)
+            logger.debug(f"[{func_name}] Flat line detected. Using padding: {padding:.2f}")
+        else: # Normal range case
+            padding = payoff_range * Y_AXIS_PADDING_FACTOR
+            logger.debug(f"[{func_name}] Calculated base padding: {padding:.2f}")
 
-        # Ensure zero line is comfortably visible if the range crosses it
-        if yaxis_min < 0 < yaxis_max:
-             # Add a bit more padding away from zero if range is tight around it
-             yaxis_min = min(yaxis_min, -payoff_range * 0.05) # Ensure space below 0
-             yaxis_max = max(yaxis_max, payoff_range * 0.05)  # Ensure space above 0
-        elif yaxis_max <= 0: # All loss or zero
-             yaxis_max = max(yaxis_max, abs(yaxis_min * 0.1)) # Ensure 0 or slightly above is visible
-        elif yaxis_min >= 0: # All profit or zero
-             yaxis_min = min(yaxis_min, -abs(yaxis_max * 0.1)) # Ensure 0 or slightly below is visible
+        # --- Calculate Initial Padded Range ---
+        yaxis_min = payoff_min - padding
+        yaxis_max = payoff_max + padding
+
+        # --- Ensure Zero Line Visibility ---
+        # If the range is entirely above zero, make sure yaxis_min is at most zero (or slightly below)
+        if yaxis_min > 0:
+            yaxis_min = min(0.0, yaxis_min - padding * 0.5) # Give a little extra space below 0 if needed
+            logger.debug(f"[{func_name}] Adjusted yaxis_min for zero visibility (all positive): {yaxis_min:.2f}")
+        # If the range is entirely below zero, make sure yaxis_max is at least zero (or slightly above)
+        elif yaxis_max < 0:
+            yaxis_max = max(0.0, yaxis_max + padding * 0.5) # Give a little extra space above 0 if needed
+            logger.debug(f"[{func_name}] Adjusted yaxis_max for zero visibility (all negative): {yaxis_max:.2f}")
+        # If it crosses zero, the initial padding should generally be sufficient.
+
+        # --- Enforce Minimum Absolute Range ---
+        current_abs_range = yaxis_max - yaxis_min
+        if current_abs_range < MIN_Y_AXIS_ABS_RANGE:
+            needed_extra_padding = (MIN_Y_AXIS_ABS_RANGE - current_abs_range) / 2.0
+            yaxis_min -= needed_extra_padding
+            yaxis_max += needed_extra_padding
+            logger.debug(f"[{func_name}] Enforced minimum absolute range. Added padding: {needed_extra_padding:.2f}. New range: [{yaxis_min:.2f}, {yaxis_max:.2f}]")
+
+        # --- Final Sanity Check ---
+        if yaxis_min >= yaxis_max:
+            logger.error(f"[{func_name}] Invalid Y-axis range calculated (min >= max): [{yaxis_min:.2f}, {yaxis_max:.2f}]. Falling back.")
+            # Fallback: Center around 0 or the average payoff
+            avg_payoff = np.mean(finite_payoffs)
+            yaxis_min = avg_payoff - MIN_Y_AXIS_ABS_RANGE
+            yaxis_max = avg_payoff + MIN_Y_AXIS_ABS_RANGE
 
         final_yaxis_range = [yaxis_min, yaxis_max]
-        logger.debug(f"[{func_name}] Setting Y-Axis range: [{final_yaxis_range[0]:.2f}, {final_yaxis_range[1]:.2f}]")
-        # +++++++++++++++++++++++++++++
+        logger.info(f"[{func_name}] Final Y-Axis range set to: [{final_yaxis_range[0]:.2f}, {final_yaxis_range[1]:.2f}]")
+        # +++++++++++++++++++++++++++++++++++++++
+
 
         # --- Create Plotly Figure ---
         fig = go.Figure()
         hovertemplate = ("<b>Spot Price:</b> %{x:,.2f}<br>" "<b>P/L:</b> %{y:,.2f}<extra></extra>")
 
         # --- Add Traces (Payoff line, Shading) ---
+        # (Keep your trace adding logic here...)
         fig.add_trace(go.Scatter(x=price_range, y=total_payoff, mode='lines', name='Payoff', line=dict(color='mediumblue', width=2.5), hovertemplate=hovertemplate, hoverinfo='skip'))
         profit_color = 'rgba(144, 238, 144, 0.4)'; loss_color = 'rgba(255, 153, 153, 0.4)'; x_fill = np.concatenate([price_range, price_range[::-1]]);
         payoff_for_profit_fill = np.maximum(total_payoff, 0); y_profit_fill = np.concatenate([np.zeros_like(price_range), payoff_for_profit_fill[::-1]]); fig.add_trace(go.Scatter(x=x_fill, y=y_profit_fill, fill='toself', mode='none', fillcolor=profit_color, hoverinfo='skip', name='Profit Zone'));
         payoff_for_loss_fill = np.minimum(total_payoff, 0); y_loss_fill = np.concatenate([payoff_for_loss_fill, np.zeros_like(price_range)[::-1]]); fig.add_trace(go.Scatter(x=x_fill, y=y_loss_fill, fill='toself', mode='none', fillcolor=loss_color, hoverinfo='skip', name='Loss Zone'));
 
+
         # --- Add Lines and Annotations (Zero, Spot, Stdev) ---
+        # (Keep your line/annotation logic here...)
         fig.add_hline(y=0, line=dict(color='rgba(0, 0, 0, 0.7)', width=1.0, dash='solid'))
         fig.add_vline(x=spot_price, line=dict(color='dimgrey', width=1.5, dash='dash'))
-        fig.add_annotation(x=spot_price, y=1, yref="paper", text=f"Spot {spot_price:.2f}", showarrow=False, yshift=10, font=dict(color='dimgrey', size=12, family="Arial"), bgcolor="rgba(255,255,255,0.6)")
+        # Ensure annotation doesn't clash with top padding
+        fig.add_annotation(x=spot_price, y=0.98, yref="paper", # Slightly lower y
+                           text=f"Spot {spot_price:.2f}", showarrow=False,
+                           yshift=10, font=dict(color='dimgrey', size=12, family="Arial"),
+                           bgcolor="rgba(255,255,255,0.7)") # Slightly more opaque bg
         if one_std_dev_move is not None and one_std_dev_move > 0:
             levels = [-2, -1, 1, 2]; sig_color = 'rgba(100, 100, 100, 0.8)';
             for level in levels:
                 sd_price = spot_price + level * one_std_dev_move;
                 if lower_bound < sd_price < upper_bound:
-                     label = f"{level:+}σ"; fig.add_vline(x=sd_price, line=dict(color=sig_color, width=1, dash='dot')); fig.add_annotation(x=sd_price, y=1, yref="paper", text=label, showarrow=False, yshift=10, font=dict(color=sig_color, size=11, family="Arial"), bgcolor="rgba(255,255,255,0.6)");
-
+                     label = f"{level:+}σ"; fig.add_vline(x=sd_price, line=dict(color=sig_color, width=1, dash='dot'));
+                     # Ensure annotation doesn't clash with top padding
+                     fig.add_annotation(x=sd_price, y=0.98, yref="paper", # Slightly lower y
+                                        text=label, showarrow=False, yshift=10,
+                                        font=dict(color=sig_color, size=11, family="Arial"),
+                                        bgcolor="rgba(255,255,255,0.7)") # Slightly more opaque bg
 
         # --- Update Layout (Apply Y-axis Range) ---
         fig.update_layout(
@@ -1213,9 +1238,9 @@ def generate_payoff_chart_matplotlib(
                 zeroline=False,
                 tickprefix="₹",
                 tickformat=',.0f', # Format Y-axis ticks
-                range=final_yaxis_range # <<< APPLY CALCULATED RANGE
+                range=final_yaxis_range # <<< APPLY REVISED RANGE
             ),
-            margin=dict(l=45, r=25, t=20, b=40), # Keep reduced margins
+            margin=dict(l=50, r=25, t=35, b=45), # Adjusted margins slightly for clarity
             font=dict(family="Arial, sans-serif", size=12)
         )
 
@@ -1230,9 +1255,10 @@ def generate_payoff_chart_matplotlib(
 
     except ValueError as val_err: # Catch specific validation errors
         logger.error(f"[{func_name}] Value Error generating chart for {asset}: {val_err}", exc_info=False)
-        return None
+        return None # Return None on validation errors
     except ImportError as imp_err:
          logger.critical(f"[{func_name}] Import Error (Plotly/Numpy missing?): {imp_err}", exc_info=False)
+         # Depending on deployment, maybe raise or return None
          return None
     except Exception as e: # Catch other unexpected errors
         logger.error(f"[{func_name}] Unexpected error generating chart for {asset}: {e}", exc_info=True)
