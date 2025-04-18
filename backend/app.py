@@ -816,10 +816,10 @@ class AssetUpdateRequest(BaseModel): asset: str
 class SpotPriceResponse(BaseModel): spot_price: float; timestamp: Optional[str] = None # Added timestamp
 class StockRequest(BaseModel): asset: str
 class PositionInput(BaseModel): symbol: str; strike: float; type: str = Field(pattern="^(CE|PE)$"); quantity: int; price: float
-class PayoffRequest(BaseModel): asset: str; strategy: List[StrategyLegInputPayoff]
+class PayoffRequest(BaseModel): asset: str; strategy: List[StrategyLegInput_New]
 class DebugAssetSelectRequest(BaseModel): asset: str
 
-class StrategyLegInputPayoff(BaseModel):
+class StrategyLegInput_New(BaseModel):
     # Match the keys sent by the corrected frontend
     op_type: str
     strike: str # Receive as string, convert later if needed
