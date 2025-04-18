@@ -1155,7 +1155,34 @@ def generate_payoff_chart_matplotlib( # Keep original name if preferred
             for level in levels:
                 sd_price = spot_price + level * one_std_dev_move;
                 if lower_bound < sd_price < upper_bound: label = f"{level:+}σ"; fig.add_vline(x=sd_price, line=dict(color=sig_color, width=1, dash='dot')); fig.add_annotation(x=sd_price, y=1, yref="paper", text=label, showarrow=False, yshift=10, font=dict(color=sig_color, size=11, family="Arial"), bgcolor="rgba(255,255,255,0.6)");
-        fig.update_layout( xaxis_title_text="Underlying Spot Price", yaxis_title_text="Profit / Loss (₹)", xaxis_title_font=dict(size=13), yaxis_title_font=dict(size=13), hovermode="x unified", showlegend=False, template='plotly_white', xaxis=dict(gridcolor='rgba(220, 220, 220, 0.7)', zeroline=False, tickformat=",.0f"), yaxis=dict(gridcolor='rgba(220, 220, 220, 0.7)', zeroline=False, tickprefix="₹", tickformat=',.0f'), margin=dict(l=50, r=30, t=30, b=50), font=dict(family="Arial, sans-serif", size=12) )
+        fig.update_layout(
+            # title=None, # Keep title removed
+            xaxis_title_text="Underlying Spot Price",
+            yaxis_title_text="Profit / Loss (₹)",
+            xaxis_title_font=dict(size=13, family="Arial, sans-serif"),
+            yaxis_title_font=dict(size=13, family="Arial, sans-serif"),
+            hovermode="x unified",
+            showlegend=False,
+            template='plotly_white',
+            xaxis=dict(
+                gridcolor='rgba(220, 220, 220, 0.7)',
+                zeroline=False,
+                tickformat=",.0f"
+            ),
+            yaxis=dict(
+                gridcolor='rgba(220, 220, 220, 0.7)',
+                zeroline=False,
+                tickprefix="₹",
+                tickformat=',.0f'
+            ),
+            # *** REDUCE MARGINS MORE SIGNIFICANTLY ***
+            margin=dict(l=45, r=25, t=20, b=40), # Smaller left, right, top, bottom margins
+            # *****************************************
+            # Set base font size slightly larger for ticks etc.
+            font=dict(family="Arial, sans-serif", size=12)
+            # *** Optionally disable autosize and rely solely on CSS container ***
+            # autosize=False, # Try adding this if aspect-ratio isn't working well
+        )
 
 
         # --- Generate JSON Output ---

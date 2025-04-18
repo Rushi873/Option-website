@@ -1491,8 +1491,63 @@ async function fetchPayoffChart() {
 
         // --- Display Metrics ---
         // (Keep improved logic from previous response)
-        const metricsContainer = data?.metrics; const metricsData = metricsContainer?.metrics;
-        if (metricsData) { displayMetric(metricsData.max_profit ?? "N/A", SELECTORS.maxProfitDisplay); displayMetric(metricsData.max_loss ?? "N/A", SELECTORS.maxLossDisplay); displayMetric(metricsData.reward_to_risk_ratio ?? "N/A", SELECTORS.rewardToRiskDisplay); let breakevens_text = "N/A"; if (Array.isArray(metricsData.breakeven_points)) {if (metricsData.breakeven_points.length > 0) {breakevens_text = metricsData.breakeven_points.join(', ');} else {const mp = metricsData.max_profit; const ml = metricsData.max_loss; if (ml === "0.00" || (ml !== "-∞" && parseFloat(ml) > 0)) { breakevens_text = "Always Profitable / BE";} else if (mp === "Loss" || mp === "0.00" || (mp !== "∞" && parseFloat(mp) < 0)) { breakevens_text = "Always Loss-Making";} else { breakevens_text = "None Found";}}} displayMetric(breakevens_text, SELECTORS.breakevenDisplay); const netPremiumValue = metricsData.net_premium; if (typeof netPremiumValue === 'number' && isFinite(netPremiumValue)) {const netPremiumPrefix = (netPremiumValue >= 0) ? "Net Credit: " : "Net Debit: "; displayMetric(Math.abs(netPremiumValue), SELECTORS.netPremiumDisplay, netPremiumPrefix, "", 2, true); } else { displayMetric("N/A", SELECTORS.netPremiumDisplay); } const warnings = metricsData?.warnings; const warningContainer = document.querySelector(SELECTORS.warningContainer); if (warningContainer) { if (warnings && Array.isArray(warnings) && warnings.length > 0) {warningContainer.textContent = "Warnings: " + warnings.join('; '); warningContainer.style.display = 'block'; warningContainer.style.color = 'orange';} else {warningContainer.style.display = 'none';} } } else { logger.warn("Metrics data object missing, displaying N/A."); displayMetric("N/A", SELECTORS.maxProfitDisplay); /* ... N/A for others ... */ displayMetric("N/A", SELECTORS.maxLossDisplay); displayMetric("N/A", SELECTORS.breakevenDisplay); displayMetric("N/A", SELECTORS.rewardToRiskDisplay); displayMetric("N/A", SELECTORS.netPremiumDisplay);}
+        const metricsContainer = data?.metrics; // Top-level object
+        const metricsData = metricsContainer?.metrics; // Nested actual metrics
+        const inputsData = metricsContainer?.calculation_inputs; // Inputs/counts
+
+        if (metricsData) {
+            logger.info("Displaying metrics:", metricsData);
+
+            // *** Use '∞' / '-∞' as fallback if backend sends null/undefined ***
+            displayMetric(metricsData.max_profit ?? "∞", SELECTORS.maxProfitDisplay);
+            displayMetric(metricsData.max_loss ?? "-∞", SELECTORS.maxLossDisplay);
+            // *****************************************************************
+
+            // Display R:R directly (backend should provide appropriate string)
+            displayMetric(metricsData.reward_to_risk_ratio ?? "N/A", SELECTORS.rewardToRiskDisplay);
+
+            // Display Breakeven Points with context
+            let breakevens_text = "N/A"; // Default
+            if (Array.isArray(metricsData.breakeven_points)) {
+                if (metricsData.breakeven_points.length > 0) {
+                    breakevens_text = metricsData.breakeven_points.join(', '); // Use backend formatted strings
+                } else { // Empty array: determine context from Max P/L strings
+                    const mp = metricsData.max_profit; const ml = metricsData.max_loss;
+                    // Use the actual strings ("∞", "-∞", "0.00", "Loss", number strings) for comparison
+                    if (ml === "0.00" || (ml !== "-∞" && parseFloat(ml) > 0)) { breakevens_text = "Always Profitable / BE"; }
+                    else if (mp === "Loss" || mp === "0.00" || (mp !== "∞" && parseFloat(mp) < 0)) { breakevens_text = "Always Loss-Making"; }
+                    else { breakevens_text = "None Found"; }
+                }
+            } else { logger.warn("BE points data is not an array:", metricsData.breakeven_points); }
+            displayMetric(breakevens_text, SELECTORS.breakevenDisplay);
+
+            // Display Net Premium
+            const netPremiumValue = metricsData.net_premium;
+            if (typeof netPremiumValue === 'number' && isFinite(netPremiumValue)) {
+                const netPremiumPrefix = (netPremiumValue >= 0) ? "Net Credit: " : "Net Debit: ";
+                displayMetric(Math.abs(netPremiumValue), SELECTORS.netPremiumDisplay, netPremiumPrefix, "", 2, true);
+            } else { displayMetric("N/A", SELECTORS.netPremiumDisplay); }
+
+            // Display warnings
+            const warnings = metricsData?.warnings;
+            const warningContainer = document.querySelector(SELECTORS.warningContainer);
+            if (warningContainer) {
+                if (warnings && Array.isArray(warnings) && warnings.length > 0) {
+                    logger.warn("Backend Calculation Warnings:", warnings);
+                    warningContainer.textContent = "Warnings: " + warnings.join('; ');
+                    warningContainer.style.display = 'block'; warningContainer.style.color = 'orange';
+                } else { warningContainer.style.display = 'none'; }
+            }
+
+        } else { // Handle missing metrics data (metricsData is null/undefined)
+             logger.warn("Metrics data object missing in response, displaying N/A/Infinity defaults.");
+             // Apply defaults here too if metricsData itself is missing
+             displayMetric("∞", SELECTORS.maxProfitDisplay);
+             displayMetric("-∞", SELECTORS.maxLossDisplay);
+             displayMetric("N/A", SELECTORS.breakevenDisplay);
+             displayMetric("N/A", SELECTORS.rewardToRiskDisplay);
+             displayMetric("N/A", SELECTORS.netPremiumDisplay);
+        }
 
         // --- Display Breakdown, Taxes, Greeks ---
         // (Keep rendering logic as before)
