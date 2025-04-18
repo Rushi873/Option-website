@@ -211,23 +211,23 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
    Payoff Chart & Results Sections
    =============================================================== */
 #payoff-chart-container {
-  max-width: 900px; /* Optional: Increase max-width slightly */
+  /* Increase max-width significantly */
+  max-width: 1200px; /* <<< Increased from 900px */
+
   width: 100%;
   min-height: 350px; /* Keep a reasonable minimum */
-  /* height: 450px; */ /* <<< REMOVE fixed height */
-  aspect-ratio: 1.8 / 1; /* <<< ADD aspect-ratio (e.g., 1.8:1 or 2:1 often looks good for payoff) */
-                         /* Experiment with values like 16 / 9, 2 / 1, 1.8 / 1 */
-  margin: 1em auto;
-  padding: 5px; /* Optional: Reduce padding slightly */
+  aspect-ratio: 1.8 / 1; /* Keep original aspect ratio for now */
+  margin: 1.5em auto; /* Optional: Add slightly more vertical margin */
+  padding: 5px;
   border: 1px solid #ccc;
   box-sizing: border-box;
   position: relative;
 }
 
-/* Add styles for loading/error states if setElementState uses classes */
+/* Keep the rest of the styles (.loading, .error, .plotly) the same */
 #payoff-chart-container.loading::before,
 #payoff-chart-container.error::before {
-  content: attr(data-message); /* Display message from data attribute */
+  content: attr(data-message);
   position: absolute;
   inset: 0;
   display: flex;
