@@ -215,7 +215,7 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
   max-width: 1200px; /* <<< Increased from 900px */
 
   width: 100%;
-  min-height: 350px; /* Keep a reasonable minimum */
+  min-height: 600px; /* Keep a reasonable minimum */
   aspect-ratio: 1.8 / 1; /* Keep original aspect ratio for now */
   margin: 1.5em auto; /* Optional: Add slightly more vertical margin */
   padding: 5px;
