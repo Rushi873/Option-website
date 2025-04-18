@@ -213,6 +213,7 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
 #payoff-chart-container { /* Or whatever your selector targets */
   max-width: 800px; /* Example: Limit width */
   width: 100%;     /* Allow shrinking */
+  min-height: 400px;
   height: 450px;    /* Example: Set a height, or use aspect-ratio */
   /* aspect-ratio: 16 / 9; /* Modern CSS for responsive aspect ratio */
   margin: 1em auto; /* Center the container */
