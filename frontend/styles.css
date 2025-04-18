@@ -210,13 +210,40 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
 /* ===============================================================
    Payoff Chart & Results Sections
    =============================================================== */
-#payoff-chart-container { /* Or your actual selector */
-    min-height: 450px; /* Ensure it has some height */
-    width: 100%;      /* Or a fixed width */
-    border: 1px solid red; /* TEMPORARY: Add a border to see the container */
-    display: block !important; /* Override potential hiding styles */
-    visibility: visible !important;
-    opacity: 1 !important;
+#payoff-chart-container { /* Or whatever your selector targets */
+  max-width: 800px; /* Example: Limit width */
+  width: 100%;     /* Allow shrinking */
+  height: 450px;    /* Example: Set a height, or use aspect-ratio */
+  /* aspect-ratio: 16 / 9; /* Modern CSS for responsive aspect ratio */
+  margin: 1em auto; /* Center the container */
+  padding: 10px;
+  border: 1px solid #ccc;
+  box-sizing: border-box;
+  position: relative; /* Needed for loading overlay */
+}
+
+/* Add styles for loading/error states if setElementState uses classes */
+#payoff-chart-container.loading::before,
+#payoff-chart-container.error::before {
+  content: attr(data-message); /* Display message from data attribute */
+  position: absolute;
+  inset: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background-color: rgba(255, 255, 255, 0.8);
+  font-style: italic;
+  color: #555;
+  z-index: 10;
+}
+#payoff-chart-container.error::before {
+    color: red;
+}
+
+/* Ensure Plotly chart inside fills container */
+#payoff-chart-container .plotly {
+    width: 100% !important;
+    height: 100% !important;
 }
 
 
