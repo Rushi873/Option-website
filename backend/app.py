@@ -16,6 +16,7 @@ from datetime import datetime, date, timedelta
 from typing import List, Dict, Any, Union, Optional, Tuple
 from contextlib2 import asynccontextmanager
 from collections import defaultdict
+from functools import partial
 
 # --- Environment & Config ---
 from dotenv import load_dotenv
@@ -1650,12 +1651,11 @@ async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
         return cached
 
     logger.info(f"[{stock_symbol}] Initiating async fetch.")
-    # ----- DEBUG LOG -----
     logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Starting fetch.")
 
     info = None
-    h1m, h5d, h50d, h200d = None, None, None, None # Renamed h1d to h1m for clarity
-    ticker_obj = None # Variable for ticker
+    h1m, h5d, h50d_data, h200d_data = None, None, None, None # Adjusted names for clarity
+    ticker_obj = None
 
     try:
         loop = asyncio.get_running_loop()
@@ -1674,16 +1674,14 @@ async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
         # --- Step 2: Fetch info (best effort) ---
         try:
             logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Attempting to fetch ticker.info...")
-            # Execute the synchronous info fetch in the executor
             info = await loop.run_in_executor(None, getattr, ticker_obj, 'info')
 
             if not info or (isinstance(info, dict) and not info):
                  logger.warning(f"[{stock_symbol}] fetch_stock_data_async: ticker.info dictionary is EMPTY or fetch returned None.")
-                 info = {} # Ensure info is an empty dict
+                 info = {}
             else:
-                 logger.debug(f"[{stock_symbol}] fetch_stock_data_async: ticker.info fetched. Type: {type(info)}. Keys: {list(info.keys()) if isinstance(info, dict) else 'Not a dict'}")
+                 logger.debug(f"[{stock_symbol}] fetch_stock_data_async: ticker.info fetched. Type: {type(info)}. Keys: {list(info.keys())[:10] if isinstance(info, dict) else 'Not a dict'}...")
                  if isinstance(info, dict):
-                     # Log key fields useful for debugging price/identity
                      dbg_info_fields = {k: info.get(k) for k in [
                          "regularMarketPrice", "currentPrice", "bid", "ask", "open", "previousClose",
                          "shortName", "longName", "quoteType", "exchange", "volume", "averageVolume"
@@ -1691,14 +1689,14 @@ async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
                      logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Key fields in ticker.info: {dbg_info_fields}")
                  else:
                       logger.warning(f"[{stock_symbol}] fetch_stock_data_async: ticker.info was not a dictionary. Type: {type(info)}")
-                      info = {} # Treat non-dict as empty
+                      info = {}
 
         except json.JSONDecodeError as json_err:
              logger.error(f"[{stock_symbol}] fetch_stock_data_async: JSONDecodeError fetching info: {json_err}. Symbol likely invalid/delisted or API issue.", exc_info=False)
-             info = {} # Treat as empty, try history
+             info = {}
         except Exception as info_err:
              logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Non-critical error fetching 'info': {info_err}", exc_info=False)
-             info = {} # Ensure info is an empty dict if fetch fails
+             info = {}
 
         # --- Step 3: Fetch history concurrently (best effort) ---
         # Fetch 1min data for most recent price/volume, daily for MAs
@@ -1711,27 +1709,30 @@ async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
         results = []
         try:
             logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Attempting history fetches...")
-            # Use functools.partial to avoid issues with method binding in executor
-            # This might not be strictly necessary but is safer
-            # from functools import partial
-            # tasks = [loop.run_in_executor(None, partial(ticker_obj.history, **params)) for params in hist_params]
-            # Simpler way often works fine:
-            tasks = [loop.run_in_executor(None, ticker_obj.history, None, None, **params) for params in hist_params]
+
+            # ===================== FIX APPLIED HERE =====================
+            # Create partial functions with arguments bound correctly
+            history_task_funcs = [
+                partial(ticker_obj.history, period=p.get("period"), interval=p.get("interval"))
+                for p in hist_params
+            ]
+            # Run the partial functions in the executor
+            tasks = [loop.run_in_executor(None, task_func) for task_func in history_task_funcs]
+            # ============================================================
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             # Assign results carefully, checking for Exceptions and empty DataFrames
-            h1m = results[0] if not isinstance(results[0], Exception) and not results[0].empty else None
-            h5d = results[1] if not isinstance(results[1], Exception) and not results[1].empty else None
-            # Use the longer histories for MA calculation robustness
-            h50d_data = results[2] if not isinstance(results[2], Exception) and not results[2].empty else None
-            h200d_data = results[3] if not isinstance(results[3], Exception) and not results[3].empty else None
+            h1m = results[0] if not isinstance(results[0], Exception) and results[0] is not None and not results[0].empty else None
+            h5d = results[1] if not isinstance(results[1], Exception) and results[1] is not None and not results[1].empty else None
+            h50d_data = results[2] if not isinstance(results[2], Exception) and results[2] is not None and not results[2].empty else None # Source data for MA50
+            h200d_data = results[3] if not isinstance(results[3], Exception) and results[3] is not None and not results[3].empty else None # Source data for MA200
 
             log_parts = [
                 f"1m: {'OK' if h1m is not None else 'Fail/Empty'}",
                 f"5d: {'OK' if h5d is not None else 'Fail/Empty'}",
-                f"50d_src: {'OK' if h50d_data is not None else 'Fail/Empty'}", # Source data for MA50
-                f"200d_src: {'OK' if h200d_data is not None else 'Fail/Empty'}" # Source data for MA200
+                f"50d_src: {'OK' if h50d_data is not None else 'Fail/Empty'}",
+                f"200d_src: {'OK' if h200d_data is not None else 'Fail/Empty'}"
             ]
             logger.debug(f"[{stock_symbol}] fetch_stock_data_async: History fetch results - {', '.join(log_parts)}")
 
@@ -1742,50 +1743,46 @@ async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
                  logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Latest Close from 5d history (fallback): {h5d['Close'].iloc[-1]}")
 
         except Exception as hist_err:
+             # This catch block might be less likely to be hit now with exceptions handled in gather
              logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Unexpected error during history fetch task setup or gathering: {hist_err}", exc_info=False)
              h1m, h5d, h50d_data, h200d_data = None, None, None, None
 
-
         # --- Step 4: Determine Price (CRITICAL) ---
+        # (Keep the existing robust price determination logic)
         cp = None
         price_source = "None"
-        # Ensure safe_info is a dict, even if info fetch failed
         safe_info = info if isinstance(info, dict) else {}
 
         logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Determining price. Info keys available: {list(safe_info.keys())}")
 
         # Check fields in preferred order from INFO dictionary
-        # Use .get() with checks for None and potentially non-numeric types if needed
         if safe_info.get("regularMarketPrice") is not None and isinstance(safe_info.get("regularMarketPrice"), (int, float)):
             cp = safe_info["regularMarketPrice"]
             price_source = "info.regularMarketPrice"
         elif safe_info.get("currentPrice") is not None and isinstance(safe_info.get("currentPrice"), (int, float)):
             cp = safe_info["currentPrice"]
             price_source = "info.currentPrice"
-        # Indices often have bid/ask as 0, only use if > 0
         elif safe_info.get("bid") is not None and isinstance(safe_info.get("bid"), (int, float)) and safe_info["bid"] > 0:
             cp = safe_info["bid"]
             price_source = "info.bid"
         elif safe_info.get("ask") is not None and isinstance(safe_info.get("ask"), (int, float)) and safe_info["ask"] > 0:
             cp = safe_info["ask"]
             price_source = "info.ask"
-        elif safe_info.get("open") is not None and isinstance(safe_info.get("open"), (int, float)): # Less ideal, but a fallback
+        elif safe_info.get("open") is not None and isinstance(safe_info.get("open"), (int, float)):
             cp = safe_info["open"]
             price_source = "info.open"
-        elif safe_info.get("previousClose") is not None and isinstance(safe_info.get("previousClose"), (int, float)): # Last resort from info
+        elif safe_info.get("previousClose") is not None and isinstance(safe_info.get("previousClose"), (int, float)):
             cp = safe_info["previousClose"]
             price_source = "info.previousClose"
 
         logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Price after checking info: {cp} (Source: {price_source})")
 
-        # Fallback to HISTORY if price not found in info OR info fetch failed
+        # Fallback to HISTORY if price not found in info OR info fetch failed OR history fetch succeeded
         if cp is None:
             logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Price not found in info, attempting fallback to history...")
-            # Try 1m history first (most recent close)
-            if h1m is not None and 'Close' in h1m.columns and not h1m.empty:
+            if h1m is not None and 'Close' in h1m.columns: # Check h1m exists and has 'Close'
                 try:
                     latest_close = h1m["Close"].iloc[-1]
-                    # Ensure it's a valid number
                     if isinstance(latest_close, (int, float, np.number)) and np.isfinite(latest_close):
                         cp = latest_close
                         price_source = "history.1m.Close"
@@ -1797,8 +1794,7 @@ async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
                 except Exception as hist_ex:
                     logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Error accessing 1m history Close: {hist_ex}")
 
-            # Fallback to 5d history if 1m failed or didn't yield price
-            if cp is None and h5d is not None and 'Close' in h5d.columns and not h5d.empty:
+            if cp is None and h5d is not None and 'Close' in h5d.columns: # Check h5d exists and has 'Close'
                  try:
                     latest_close = h5d["Close"].iloc[-1]
                     if isinstance(latest_close, (int, float, np.number)) and np.isfinite(latest_close):
@@ -1812,7 +1808,7 @@ async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
                  except Exception as hist_ex:
                     logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Error accessing 5d history Close: {hist_ex}")
 
-            if cp is None: # Log if fallbacks also failed
+            if cp is None:
                 logger.warning(f"[{stock_symbol}] fetch_stock_data_async: History fallbacks also failed to find a valid price.")
 
 
@@ -1822,23 +1818,20 @@ async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
              return None # CRITICAL FAILURE
 
 
-        # ----- INFO LOG -----
         logger.info(f"[{stock_symbol}] fetch_stock_data_async: Successfully determined price: {cp} (Source: {price_source})")
 
-
-        # --- Step 5: Get other fields (handle missing gracefully) ---
+        # --- Step 5: Get other fields ---
+        # (Keep the existing logic for volume, MAs, and other fields)
         logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Extracting other fields...")
 
-        # Volume: Prioritize info, fallback to history (recognizing info.volume might be 0 for indices)
         vol = safe_info.get("volume")
         vol_source = "info.volume"
-        avg_vol = safe_info.get("averageVolume") # Capture average volume from info
+        avg_vol = safe_info.get("averageVolume")
 
-        # Use history volume if info.volume is None or 0 (common for indices EOD)
         if vol is None or vol == 0:
             logger.debug(f"[{stock_symbol}] Info volume is {vol}, checking history...")
             vol_fallback_used = False
-            if h1m is not None and 'Volume' in h1m.columns and not h1m.empty:
+            if h1m is not None and 'Volume' in h1m.columns:
                 try:
                     latest_vol = h1m["Volume"].iloc[-1]
                     if isinstance(latest_vol, (int, float, np.number)) and np.isfinite(latest_vol) and latest_vol >= 0:
@@ -1850,8 +1843,7 @@ async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
                         logger.warning(f"[{stock_symbol}] fetch_stock_data_async: 1m history Volume value invalid: {latest_vol}")
                 except Exception as vol_ex: logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Error accessing 1m history Volume: {vol_ex}")
 
-            # Fallback to 5d daily volume if 1m didn't work
-            if not vol_fallback_used and h5d is not None and 'Volume' in h5d.columns and not h5d.empty:
+            if not vol_fallback_used and h5d is not None and 'Volume' in h5d.columns:
                 try:
                     latest_vol = h5d["Volume"].iloc[-1]
                     if isinstance(latest_vol, (int, float, np.number)) and np.isfinite(latest_vol) and latest_vol >= 0:
@@ -1859,10 +1851,9 @@ async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
                         vol_source = "history.5d.Volume"
                         logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Used 5d history volume: {vol}")
                     else:
-                        logger.warning(f"[{stock_symbol}] fetch_stock_data_async: 5d history Volume value invalid: {latest_vol}")
+                          logger.warning(f"[{stock_symbol}] fetch_stock_data_async: 5d history Volume value invalid: {latest_vol}")
                 except Exception as vol_ex: logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Error accessing 5d history Volume: {vol_ex}")
 
-        # Ensure volume is None if still not found or invalid
         if vol is not None and (not isinstance(vol, (int, float, np.number)) or not np.isfinite(vol) or vol < 0):
             logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Final volume value is invalid: {vol}. Setting to None.")
             vol = None
@@ -1870,63 +1861,54 @@ async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
         logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Final Volume: {vol} (Source: {vol_source})")
         logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Average Volume (from info): {avg_vol}")
 
-
-        # Moving Averages: Calculated from history data
+        # Moving Averages (Use h50d_data, h200d_data which were potentially fetched)
         ma50 = None
-        # Use h50d_data (fetched more than 50d)
         if h50d_data is not None and 'Close' in h50d_data.columns and len(h50d_data) >= 50:
              try:
-                 # Calculate on the most recent 50 periods available in the fetched data
                  ma50 = h50d_data["Close"].tail(50).mean()
-                 if not np.isfinite(ma50): ma50 = None # Ensure finite
+                 if not np.isfinite(ma50): ma50 = None
              except Exception as ma_ex: logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Error calculating MA50: {ma_ex}")
         elif h50d_data is not None: logger.warning(f"[{stock_symbol}] Not enough data points for MA50 calculation (need 50, got {len(h50d_data)}).")
 
         ma200 = None
-         # Use h200d_data (fetched more than 200d)
         if h200d_data is not None and 'Close' in h200d_data.columns and len(h200d_data) >= 200:
              try:
-                 # Calculate on the most recent 200 periods available in the fetched data
                  ma200 = h200d_data["Close"].tail(200).mean()
-                 if not np.isfinite(ma200): ma200 = None # Ensure finite
+                 if not np.isfinite(ma200): ma200 = None
              except Exception as ma_ex: logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Error calculating MA200: {ma_ex}")
         elif h200d_data is not None: logger.warning(f"[{stock_symbol}] Not enough data points for MA200 calculation (need 200, got {len(h200d_data)}).")
 
         logger.debug(f"[{stock_symbol}] fetch_stock_data_async: MA50 (calc): {ma50}, MA200 (calc): {ma200}")
 
-        # Other fields from info (often None for indices)
+        # Other fields from info
         mc = safe_info.get("marketCap")
         pe = safe_info.get("trailingPE")
         eps = safe_info.get("trailingEps")
         sec = safe_info.get("sector")
         ind = safe_info.get("industry")
-        # Name: Prioritize shortName, fallback to longName
-        name = safe_info.get("shortName", safe_info.get("longName", stock_symbol)) # Use symbol as last resort
-        # Index specific fields:
+        name = safe_info.get("shortName", safe_info.get("longName", stock_symbol))
         qtype = safe_info.get("quoteType")
         exch = safe_info.get("exchange")
 
         logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Info Fields - Name: {name}, MC: {mc}, P/E: {pe}, EPS: {eps}, Sector: {sec}, Industry: {ind}, QuoteType: {qtype}, Exchange: {exch}")
 
         # --- Step 6: Construct final data dictionary ---
-        # Convert numpy types to standard Python types for broad compatibility (e.g., JSON)
+        # (Keep the existing dictionary structure)
         data = {
-            "symbol": stock_symbol, # Include the requested symbol
+            "symbol": stock_symbol,
             "name": name,
-            "quote_type": qtype, # Explicitly add quote type
-            "exchange": exch,    # Explicitly add exchange
+            "quote_type": qtype,
+            "exchange": exch,
             "current_price": float(cp) if cp is not None else None,
             "volume": int(vol) if vol is not None and np.isfinite(vol) else None,
-            "average_volume": int(avg_vol) if avg_vol is not None and np.isfinite(avg_vol) else None, # Add avg volume from info
+            "average_volume": int(avg_vol) if avg_vol is not None and np.isfinite(avg_vol) else None,
             "moving_avg_50": float(ma50) if ma50 is not None and np.isfinite(ma50) else None,
             "moving_avg_200": float(ma200) if ma200 is not None and np.isfinite(ma200) else None,
-            # These fields are attempted but often None for indices
             "market_cap": int(mc) if mc is not None and np.isfinite(mc) else None,
             "pe_ratio": float(pe) if pe is not None and np.isfinite(pe) else None,
             "eps": float(eps) if eps is not None and np.isfinite(eps) else None,
             "sector": sec,
             "industry": ind,
-            # Add raw info fields that were observed for ^NSEI as potentially useful context
             "previous_close": float(safe_info['previousClose']) if safe_info.get('previousClose') is not None and np.isfinite(safe_info['previousClose']) else None,
             "open": float(safe_info['open']) if safe_info.get('open') is not None and np.isfinite(safe_info['open']) else None,
             "day_high": float(safe_info['dayHigh']) if safe_info.get('dayHigh') is not None and np.isfinite(safe_info['dayHigh']) else None,
@@ -1935,17 +1917,13 @@ async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
             "fifty_two_week_low": float(safe_info['fiftyTwoWeekLow']) if safe_info.get('fiftyTwoWeekLow') is not None and np.isfinite(safe_info['fiftyTwoWeekLow']) else None,
         }
 
-        # Store in cache before returning
         stock_data_cache[cache_key] = data
         logger.info(f"[{stock_symbol}] fetch_stock_data_async: Successfully processed data. Caching and returning.")
-        # logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Returning data: {data}") # Avoid logging full dict in production if large
         return data
 
     except Exception as e:
-        # Catch any unexpected error during the entire process
         logger.error(f"[{stock_symbol}] fetch_stock_data_async: UNEXPECTED error during overall process: {e}", exc_info=True)
-        return None  # Return None on any major unexpected failure
-
+        return None
 # ===============================================================
 # 6. Fetch News (Robust Scraping - FIX for Reliability)
 # ===============================================================
