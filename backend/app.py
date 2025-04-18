@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse
 import uvicorn
 
 # --- Pydantic Models ---
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator 
 
 # --- Data Sources ---
 from jugaad_data.nse import NSELive # For option chain source
@@ -816,9 +816,54 @@ class AssetUpdateRequest(BaseModel): asset: str
 class SpotPriceResponse(BaseModel): spot_price: float; timestamp: Optional[str] = None # Added timestamp
 class StockRequest(BaseModel): asset: str
 class PositionInput(BaseModel): symbol: str; strike: float; type: str = Field(pattern="^(CE|PE)$"); quantity: int; price: float
-class StrategyLegInputPayoff(BaseModel): option_type: str = Field(pattern="^(CE|PE)$"); strike_price: Union[float, str]; tr_type: str = Field(pattern="^(b|s)$"); option_price: Union[float, str]; expiry_date: str; lots: Union[int, str]; lot_size: Optional[Union[int, str]] = None
 class PayoffRequest(BaseModel): asset: str; strategy: List[StrategyLegInputPayoff]
 class DebugAssetSelectRequest(BaseModel): asset: str
+
+class StrategyLegInputPayoff(BaseModel):
+    # Match the keys sent by the corrected frontend
+    op_type: str
+    strike: str # Receive as string, convert later if needed
+    tr_type: str
+    op_pr: str   # Receive premium as string
+    lot: str     # Receive lots as string
+    lot_size: Optional[str] = None
+    iv: Optional[float] = None # Keep as Optional float
+    days_to_expiry: Optional[int] = None # Keep as Optional int
+    expiry_date: Optional[str] = None # Optional
+
+    # Optional: Add validators if you want Pydantic to convert/validate types further
+    # Example for Pydantic v2+
+    @field_validator('strike', 'op_pr', mode='before')
+    @classmethod
+    def check_numeric_string(cls, v):
+        try:
+            float(v)
+        except (ValueError, TypeError):
+            raise ValueError(f"Value must be convertible to a number: {v}")
+        return v # Return original string if needed later, or float(v)
+
+    @field_validator('lot', 'lot_size', mode='before')
+    @classmethod
+    def check_integer_string(cls, v):
+        if v is None: return v # Allow None for lot_size
+        try:
+            val = int(v)
+            if val <= 0: raise ValueError("Must be positive")
+        except (ValueError, TypeError):
+            raise ValueError(f"Value must be convertible to a positive integer: {v}")
+        return v # Return original string if needed later, or int(v)
+
+    @field_validator('op_type')
+    @classmethod
+    def check_op_type(cls, v):
+        if v.lower() not in ('c', 'p'): raise ValueError("op_type must be 'c' or 'p'")
+        return v.lower() # Standardize to lowercase
+
+    @field_validator('tr_type')
+    @classmethod
+    def check_tr_type(cls, v):
+        if v.lower() not in ('b', 's'): raise ValueError("tr_type must be 'b' or 's'")
+        return v.lower() # Standardize to lowercase
 
 
 # ===============================================================
