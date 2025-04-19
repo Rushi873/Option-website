@@ -1482,14 +1482,14 @@ function resetCalculationOutputsUI() {
          if (typeof Plotly !== 'undefined' && chartContainer.layout) {
              try { Plotly.purge(chartContainer.id); } catch (e) { logger.warn("Plotly purge failed during reset:", e); }
          }
-         chartContainer.innerHTML = '<div class="placeholder-text">Preparing calculation...</div>';
-         setElementState(SELECTORS.payoffChartContainer, 'content');
+         chartContainer.innerHTML = '<div class="placeholder-text">Preparing calculation...</div>'; // Placeholder text
+         setElementState(SELECTORS.payoffChartContainer, 'content'); // Use setElementState to manage class/state
      } else { logger.warn("Payoff chart container not found during output reset."); }
 
      // --- Reset Tax Container ---
      const taxContainer = document.querySelector(SELECTORS.taxInfoContainer);
      if (taxContainer) {
-         taxContainer.innerHTML = '<p class="placeholder-text">Update strategy to calculate charges.</p>'; // Use placeholder
+         taxContainer.innerHTML = '<p class="placeholder-text">Update strategy to calculate charges.</p>'; // Placeholder text
          setElementState(SELECTORS.taxInfoContainer, 'content');
      } else { logger.warn("Tax info container not found during output reset."); }
 
@@ -1497,10 +1497,10 @@ function resetCalculationOutputsUI() {
      const greeksTable = document.querySelector(SELECTORS.greeksTable);
      if (greeksTable) {
          const caption = greeksTable.querySelector('caption'); if (caption) caption.textContent = 'Portfolio Option Greeks';
-         const greekBody = greeksTable.querySelector('tbody'); if (greekBody) greekBody.innerHTML = `<tr><td colspan="9" class="placeholder-text">Update strategy to calculate Greeks.</td></tr>`;
+         const greekBody = greeksTable.querySelector('tbody'); if (greekBody) greekBody.innerHTML = `<tr><td colspan="9" class="placeholder-text">Update strategy to calculate Greeks.</td></tr>`; // Placeholder text
          const greekFoot = greeksTable.querySelector('tfoot'); if (greekFoot) greekFoot.innerHTML = "";
-         setElementState(SELECTORS.greeksTable, 'content'); // Reset table state
-         const greeksSection = document.querySelector(SELECTORS.greeksSection); if (greeksSection) setElementState(SELECTORS.greeksSection, 'content'); // Reset section state
+         setElementState(SELECTORS.greeksTable, 'content'); // Use setElementState
+         const greeksSection = document.querySelector(SELECTORS.greeksSection); if (greeksSection) setElementState(SELECTORS.greeksSection, 'content'); // Reset section too
      } else { logger.warn("Greeks table not found during output reset."); }
 
      // --- Reset Greeks Analysis Section ---
@@ -1510,15 +1510,27 @@ function resetCalculationOutputsUI() {
      if (greeksAnalysisContainer) { greeksAnalysisContainer.innerHTML = ''; setElementState(SELECTORS.greeksAnalysisResultContainer, 'content'); } else { logger.warn("Greeks Analysis result container not found during output reset."); }
 
      // --- Reset Metrics Display ---
-     displayMetric("N/A", SELECTORS.maxProfitDisplay); displayMetric("N/A", SELECTORS.maxLossDisplay); displayMetric("N/A", SELECTORS.breakevenDisplay); displayMetric("N/A", SELECTORS.rewardToRiskDisplay); displayMetric("N/A", SELECTORS.netPremiumDisplay);
-     const metricsList = document.querySelector(SELECTORS.metricsList); if (metricsList) setElementState(SELECTORS.metricsList, 'content');
+     const metricsList = document.querySelector(SELECTORS.metricsList);
+     if (metricsList) {
+         // ** FIX: Reset the innerHTML to the default state **
+         metricsList.innerHTML = `
+            <li id="maxProfit"><span class="metric-label">Max Profit:</span> <span class="metric-value">N/A</span></li>
+            <li id="maxLoss"><span class="metric-label">Max Loss:</span> <span class="metric-value">N/A</span></li>
+            <li id="breakeven"><span class="metric-label">Breakeven Points:</span> <span class="metric-value">N/A</span></li>
+            <li id="rewardToRisk"><span class="metric-label">Reward:Risk Ratio:</span> <span class="metric-value">N/A</span></li>
+            <li id="netPremium"><span class="metric-label">Net Premium:</span> <span class="metric-value">N/A</span></li>
+         `;
+         setElementState(SELECTORS.metricsList, 'content'); // Reset state for the container UL
+     } else { logger.warn("Metrics list container not found during output reset."); }
 
      // --- Reset Cost Breakdown ---
-     const breakdownList = document.querySelector(SELECTORS.costBreakdownList); if (breakdownList) { breakdownList.innerHTML = ""; setElementState(SELECTORS.costBreakdownList, 'content'); }
+     const breakdownList = document.querySelector(SELECTORS.costBreakdownList); if (breakdownList) { breakdownList.innerHTML = ""; setElementState(SELECTORS.costBreakdownList, 'content'); } else { logger.warn("Cost breakdown list not found during output reset."); }
      const detailsElement = document.querySelector(SELECTORS.costBreakdownContainer); if (detailsElement) { detailsElement.open = false; setElementState(SELECTORS.costBreakdownContainer, 'hidden'); detailsElement.style.display = 'none'; } else { logger.warn("Cost breakdown container not found during output reset."); }
 
      // --- Reset Warning Container ---
-      const warningContainer = document.querySelector(SELECTORS.warningContainer); if (warningContainer) { warningContainer.textContent = ''; warningContainer.style.display = 'none'; setElementState(SELECTORS.warningContainer, 'hidden'); }
+      const warningContainer = document.querySelector(SELECTORS.warningContainer); // Use correct selector
+      if (warningContainer) { warningContainer.textContent = ''; warningContainer.style.display = 'none'; setElementState(SELECTORS.warningContainer, 'hidden'); }
+      else { logger.warn("Warning container not found during output reset.");}
 
      // --- DO NOT Reset News or Stock Analysis Containers Here ---
      // --- DO NOT Clear strategyPositions or Strategy Table Here ---
@@ -1528,133 +1540,42 @@ function resetCalculationOutputsUI() {
 
 /** Resets the chart and results UI to initial state */
 function resetResultsUI() {
-    const logger = window.console; // Use console if no specific logger is set up
-    logger.info("Resetting calculation output UI elements..."); // Updated log message
+    const logger = window.console;
+    logger.info("Resetting results UI elements AND clearing strategy input...");
 
-    // --- DO NOT Clear Strategy Data and Table HERE ---
-    // The logic to clear strategyPositions and call updateStrategyTable
-    // should be handled separately where needed (e.g., in handleAssetChange, clearAllPositions).
-
-    // --- Reset Payoff Chart ---
-    const chartContainer = document.querySelector(SELECTORS.payoffChartContainer);
-    if (chartContainer) {
-        if (typeof Plotly !== 'undefined' && chartContainer.layout) {
-            try {
-                Plotly.purge(chartContainer.id);
-                logger.debug("Purged Plotly chart container during reset.");
-            } catch (e) {
-                logger.warn("Failed to purge Plotly chart during reset:", e);
-            }
+    // --- Clear Strategy Data and Table ---
+    if (typeof strategyPositions !== 'undefined' && Array.isArray(strategyPositions)) {
+        strategyPositions = [];
+        logger.debug("Strategy positions data array cleared.");
+        if (typeof updateStrategyTable === 'function') {
+            updateStrategyTable(); // Update the #strategyTable tbody
+            logger.debug("Strategy input table UI updated.");
+        } else {
+             logger.warn("updateStrategyTable function not found - cannot clear strategy table UI visually.");
+             const strategyTableBody = document.querySelector(SELECTORS.strategyTableBody);
+             if (strategyTableBody) { strategyTableBody.innerHTML = `<tr><td colspan="7">No positions added. Click option prices in the chain to add.</td></tr>`; }
         }
-        // Set placeholder text
-        chartContainer.innerHTML = '<div class="placeholder-text">Add positions and click "Update" to see the payoff chart.</div>'; // Placeholder reflects need for action
-        setElementState(SELECTORS.payoffChartContainer, 'content'); // Reset state
-    } else {
-        logger.warn("Payoff chart container not found during reset.");
-    }
+    } else { logger.warn("Cannot clear strategy positions: 'strategyPositions' array not found or not an array."); }
 
-    // --- Reset Tax Container ---
-    const taxContainer = document.querySelector(SELECTORS.taxInfoContainer);
-    if (taxContainer) {
-        // Set placeholder text
-        taxContainer.innerHTML = '<p class="placeholder-text">Update strategy to calculate charges.</p>';
-        setElementState(SELECTORS.taxInfoContainer, 'content'); // Reset state
-    } else {
-        logger.warn("Tax info container not found during reset.");
-    }
+    // --- Call the specific output reset function ---
+    resetCalculationOutputsUI(); // <<< CALL HELPER
 
-    // --- Reset Greeks Table ---
-    const greeksTable = document.querySelector(SELECTORS.greeksTable);
-    if (greeksTable) {
-        const caption = greeksTable.querySelector('caption');
-        if (caption) caption.textContent = 'Portfolio Option Greeks'; // Reset caption
+    // --- Reset News and Stock Analysis (specific to full reset) ---
+    const newsContainer = document.querySelector(SELECTORS.newsResultContainer);
+    if (newsContainer) { newsContainer.innerHTML = '<p class="placeholder-text">Select an asset to load news...</p>'; setElementState(SELECTORS.newsResultContainer, 'content'); }
+    else { logger.warn("News container not found during reset."); }
 
-        const greekBody = greeksTable.querySelector('tbody');
-        if (greekBody) greekBody.innerHTML = `<tr><td colspan="9" class="placeholder-text">Update strategy to calculate Greeks.</td></tr>`; // Placeholder
+    const analysisContainer = document.querySelector(SELECTORS.analysisResultContainer);
+    if (analysisContainer) { analysisContainer.innerHTML = '<p class="placeholder-text">Select an asset to load analysis...</p>'; setElementState(SELECTORS.analysisResultContainer, 'content'); }
+    else { logger.warn("Stock analysis container not found during reset."); }
 
-        const greekFoot = greeksTable.querySelector('tfoot');
-        if (greekFoot) greekFoot.innerHTML = ""; // Clear footer
+    // --- Reset Status/Warning Message Container (If applicable globally) ---
+     const messageContainer = document.querySelector(SELECTORS.statusMessageContainer);
+     if (messageContainer) { messageContainer.textContent = ''; messageContainer.className = 'status-message'; setElementState(messageContainer, 'hidden'); }
+     // Warning container is reset in resetCalculationOutputsUI
 
-        setElementState(SELECTORS.greeksTable, 'content'); // Reset state
-        const greeksSection = document.querySelector(SELECTORS.greeksSection);
-        if (greeksSection) setElementState(SELECTORS.greeksSection, 'content');
-    } else {
-        logger.warn("Greeks table not found during reset.");
-    }
-
-    // --- Reset Cost Breakdown ---
-    const breakdownList = document.querySelector(SELECTORS.costBreakdownList);
-    if (breakdownList) {
-        breakdownList.innerHTML = ""; // Clear list items
-        setElementState(SELECTORS.costBreakdownList, 'content');
-    } else {
-        logger.warn("Cost breakdown list not found during reset.");
-    }
-    const detailsElement = document.querySelector(SELECTORS.costBreakdownContainer);
-    if (detailsElement) {
-        detailsElement.open = false;
-        setElementState(SELECTORS.costBreakdownContainer, 'hidden');
-        detailsElement.style.display = 'none';
-    } else {
-         logger.warn("Cost breakdown container not found during reset.");
-    }
-
-    // --- Reset Metrics Display ---
-    // Use N/A as the default reset state for metrics
-    displayMetric("N/A", SELECTORS.maxProfitDisplay);
-    displayMetric("N/A", SELECTORS.maxLossDisplay);
-    displayMetric("N/A", SELECTORS.breakevenDisplay);
-    displayMetric("N/A", SELECTORS.rewardToRiskDisplay);
-    displayMetric("N/A", SELECTORS.netPremiumDisplay);
-    const metricsList = document.querySelector(SELECTORS.metricsList);
-    if (metricsList) setElementState(SELECTORS.metricsList, 'content');
-
-    // --- Reset News Container ---
-    // This function should focus on calculation results, so we *don't* reset news here.
-    // News container reset should happen in handleAssetChange or initializePage.
-    // const newsContainer = document.querySelector(SELECTORS.newsResultContainer);
-    // if (newsContainer) { /* ... */ }
-
-    // --- Reset Stock Analysis Container ---
-    // This function should focus on calculation results, so we *don't* reset analysis here.
-    // Analysis container reset should happen in handleAssetChange or initializePage.
-    // const analysisContainer = document.querySelector(SELECTORS.analysisResultContainer);
-    // if (analysisContainer) { /* ... */ }
-
-    // --- Reset Greeks Analysis Section ---
-    const greeksAnalysisSection = document.querySelector(SELECTORS.greeksAnalysisSection);
-    const greeksAnalysisContainer = document.querySelector(SELECTORS.greeksAnalysisResultContainer);
-    if (greeksAnalysisSection) {
-        setElementState(SELECTORS.greeksAnalysisSection, 'hidden');
-        logger.debug("Reset Greeks Analysis Section to hidden.");
-    } else {
-        logger.warn("Greeks Analysis section not found during reset.");
-    }
-    if (greeksAnalysisContainer) {
-         greeksAnalysisContainer.innerHTML = ''; // Clear content
-         setElementState(SELECTORS.greeksAnalysisResultContainer, 'content');
-         logger.debug("Reset Greeks Analysis Container content.");
-    } else {
-        logger.warn("Greeks Analysis result container not found during reset.");
-    }
-
-    // --- Reset Status/Warning Message Container ---
-    const messageContainer = document.querySelector(SELECTORS.statusMessageContainer);
-     if (messageContainer) {
-          messageContainer.textContent = '';
-          messageContainer.className = 'status-message';
-          setElementState(messageContainer, 'hidden');
-     }
-     const warningContainer = document.querySelector(SELECTORS.warningContainer);
-     if (warningContainer) {
-          warningContainer.textContent = '';
-          warningContainer.style.display = 'none';
-          setElementState(warningContainer, 'hidden');
-     }
-
-     logger.info("Calculation Results UI elements have been reset."); // Updated log
+     logger.info("Full UI reset (Strategy input AND Results) complete.");
 }
-
 // --- Define necessary variables and functions assumed by resetResultsUI ---
 
 
@@ -1722,44 +1643,43 @@ function renderCostBreakdown(listElement, costBreakdownData) {
 
 /** Fetches payoff chart data, metrics, taxes, greeks and triggers rendering */
 async function fetchPayoffChart() {
-    const logger = window.logger || window.console; // Use console if no specific logger is set up
+    const logger = window.logger || window.console;
     const updateButton = document.querySelector(SELECTORS.updateChartButton);
 
-    logger.info("--- [fetchPayoffChart] START ---"); // Debug Start
+    logger.info("--- [fetchPayoffChart] START ---");
 
     // 1. --- Get Asset and Strategy Legs FIRST ---
-    const asset = activeAsset; // Use the globally tracked activeAsset
-    logger.debug("[fetchPayoffChart] Step 1: Get Asset. Value:", asset); // Log asset value
+    const asset = activeAsset;
+    logger.debug("[fetchPayoffChart] Step 1: Get Asset. Value:", asset);
     if (!asset) {
         alert("Error: No asset is currently selected.");
-        logger.error("[fetchPayoffChart] Aborted: No active asset."); // Debug Log
+        logger.error("[fetchPayoffChart] Aborted: No active asset.");
         return;
     }
 
-    // Gather strategy legs from the *current state* using the helper
     logger.debug("[fetchPayoffChart] Step 1b: Gathering strategy legs...");
-    const currentStrategyLegs = gatherStrategyLegsFromTable(); // Assumes this reads UI/state
+    const currentStrategyLegs = gatherStrategyLegsFromTable(); // Use the VALIDATED gather function
     // *** DEBUG: Log the raw gathered legs ***
-    logger.debug("[fetchPayoffChart] Step 1c: Gathered legs raw data:", JSON.parse(JSON.stringify(currentStrategyLegs))); // Deep copy log
+    logger.debug("[fetchPayoffChart] Step 1c: Gathered legs raw data:", JSON.parse(JSON.stringify(currentStrategyLegs)));
 
     if (!currentStrategyLegs || currentStrategyLegs.length === 0) {
-        alert("Please add positions to the strategy first.");
-        logger.warn("[fetchPayoffChart] Aborted: No strategy legs gathered or returned empty array."); // Debug Log
+        // gatherStrategyLegsFromTable now handles logging/alert for invalid/empty data
+        logger.warn("[fetchPayoffChart] Aborted: No valid strategy legs gathered.");
         resetCalculationOutputsUI(); // Reset only outputs if trying to calc empty strategy
         return;
     }
-    logger.debug(`[fetchPayoffChart] Found ${currentStrategyLegs.length} legs in gathered data.`); // Changed log slightly
+    logger.debug(`[fetchPayoffChart] Found ${currentStrategyLegs.length} valid legs in gathered data.`);
 
-    // Check for chart container *early*
     const chartContainer = document.querySelector(SELECTORS.payoffChartContainer);
     if (!chartContainer) {
-        logger.error("[fetchPayoffChart] Aborted: Payoff chart container element not found."); // Debug Log
-        return; // Stop execution if container is missing
+        logger.error("[fetchPayoffChart] Aborted: Payoff chart container element not found.");
+        return;
     }
 
-    // 2. --- Set Loading States & Reset OUTPUT UI ---
-    logger.debug("[fetchPayoffChart] Step 2: Resetting outputs and setting loading states..."); // Debug Log
-    resetCalculationOutputsUI(); // <<< Call the OUTPUTS ONLY reset function here
+    // 2. --- Reset OUTPUT UI & Set Loading States ---
+    logger.debug("[fetchPayoffChart] Step 2: Resetting output UI sections...");
+    resetCalculationOutputsUI(); // <<< CALL THE OUTPUTS ONLY RESET
+    logger.debug("[fetchPayoffChart] Step 2b: Setting loading states...");
     setElementState(SELECTORS.payoffChartContainer, 'loading', 'Generating chart data...');
     setElementState(SELECTORS.taxInfoContainer, 'loading', 'Calculating charges...');
     setElementState(SELECTORS.greeksSection, 'loading', 'Calculating Greeks...');
@@ -1769,195 +1689,180 @@ async function fetchPayoffChart() {
     setElementState(SELECTORS.costBreakdownContainer, 'hidden');
     if (updateButton) updateButton.disabled = true;
 
-
-    // 3. --- Prepare Request Data (Map and Validate gathered legs) ---
-    logger.debug("[fetchPayoffChart] Step 3: Mapping and validating gathered legs..."); // Debug Log
-    let dataIsValid = true; // Flag to track overall validity
-    let mappingErrors = 0; // Count legs failing validation
-    const requestStrategy = currentStrategyLegs.map((pos, index) => {
-        const legNum = index + 1;
-        logger.debug(`[fetchPayoffChart] Mapping leg ${legNum}:`, JSON.parse(JSON.stringify(pos))); // Log raw leg data from gathered array
-
-        // Use the DTE already calculated in gatherStrategyLegsFromTable
-        const currentDTE = pos.days_to_expiry; // Assumes gather func added this
-        let legValidationMessages = [];
-
-        // --- Perform Local Validation ---
-        // Validate DTE existence first (should be added by gather function)
-        if (currentDTE === null || currentDTE === undefined || isNaN(parseInt(currentDTE)) || parseInt(currentDTE) < 0) {
-            legValidationMessages.push(`Invalid or missing DTE (${currentDTE})`); dataIsValid = false;
-        }
-        // Check other required fields (use || for checks, not &&)
-        if (!pos.strike_price || isNaN(parseFloat(pos.strike_price)) || parseFloat(pos.strike_price) <= 0) { legValidationMessages.push(`Invalid strike (${pos.strike_price})`); dataIsValid = false; }
-        if (pos.last_price === null || pos.last_price === undefined || isNaN(parseFloat(pos.last_price)) || parseFloat(pos.last_price) < 0) { legValidationMessages.push(`Invalid premium (${pos.last_price})`); dataIsValid = false; }
-        if (!pos.lots || isNaN(parseInt(pos.lots)) || parseInt(pos.lots) === 0) { legValidationMessages.push(`Invalid lots (${pos.lots})`); dataIsValid = false; }
-        // IV is optional, just log warning if missing/invalid
-        if (pos.iv === null || pos.iv === undefined || pos.iv === '' || isNaN(parseFloat(pos.iv))) { logger.warn(`[fetchPayoffChart] Leg ${legNum}: Missing/invalid IV.`); }
-        // Lot size is optional but validate if provided
-        if (pos.lot_size && (isNaN(parseInt(pos.lot_size)) || parseInt(pos.lot_size) <= 0)) { logger.warn(`[fetchPayoffChart] Leg ${legNum}: Invalid explicit lot size (${pos.lot_size}).`); }
-
-        // Determine backend op_type ('c' or 'p')
-        let backendOpType = '';
-        if (pos.option_type && typeof pos.option_type === 'string') {
-            const upperOptType = pos.option_type.toUpperCase();
-            if (upperOptType === 'CE') { backendOpType = 'c'; }
-            else if (upperOptType === 'PE') { backendOpType = 'p'; }
-            else { legValidationMessages.push(`Invalid option_type (${pos.option_type})`); dataIsValid = false; }
-        } else {
-            legValidationMessages.push(`Missing/invalid option_type`); dataIsValid = false;
-        }
-        // --- End Local Validation ---
-
-        // If leg failed validation, log and return null
-        if (legValidationMessages.length > 0) {
-            logger.error(`[fetchPayoffChart] Leg ${legNum} failed validation: ${legValidationMessages.join('; ')}`);
-            mappingErrors++;
-            // Ensure dataIsValid flag stays false if it was already set
-            dataIsValid = false;
-            return null; // Mark leg as invalid for filtering
-        }
-
-        // Return object matching backend Pydantic model if valid
-        const mappedLeg = {
-            op_type: backendOpType,
-            strike: String(pos.strike_price),
-            tr_type: parseInt(pos.lots) >= 0 ? "b" : "s",
-            op_pr: String(pos.last_price),
-            lot: String(Math.abs(parseInt(pos.lots))),
-            lot_size: pos.lot_size ? String(pos.lot_size) : null,
-            iv: (pos.iv !== null && pos.iv !== undefined && pos.iv !== '' && !isNaN(parseFloat(pos.iv))) ? parseFloat(pos.iv) : null,
-            days_to_expiry: currentDTE,
-            expiry_date: pos.expiry_date,
-        };
-        logger.debug(`[fetchPayoffChart] Leg ${legNum} mapped successfully:`, mappedLeg);
-        return mappedLeg;
-
-    }).filter(leg => leg !== null); // Filter out legs that failed validation
-
-    logger.debug(`[fetchPayoffChart] Mapping complete. ${requestStrategy.length} valid legs found, ${mappingErrors} legs failed validation.`);
-
-    // Abort if dataIsValid flag is false OR if filtering resulted in an empty array
-    if (!dataIsValid || requestStrategy.length === 0) {
-        const errorReason = !dataIsValid ? `Invalid data found in ${mappingErrors} leg(s)` : "No valid legs remained after mapping/filtering";
-        alert(`Error: ${errorReason}. Please check console for details or correct the strategy.`);
-        logger.error(`[fetchPayoffChart] Aborted before API call. Reason: ${errorReason}.`);
-        resetCalculationOutputsUI(); // Reset results UI only
-        if (updateButton) updateButton.disabled = false;
-        return;
-    }
-
-    // Prepare final request payload
-    const requestData = { asset: asset, strategy: requestStrategy }; // Use the filtered, validated legs
-    // *** DEBUG: Log the final payload EXACTLY as it will be sent ***
+    // 3. --- Prepare Request Data ---
+    // The gather function already prepared the legs in the correct format
+    const requestStrategy = currentStrategyLegs;
+    const requestData = { asset: asset, strategy: requestStrategy };
     logger.debug("[fetchPayoffChart] Step 4: Final requestData object:", JSON.parse(JSON.stringify(requestData)));
     logger.debug("[fetchPayoffChart] Step 4b: Body to be sent:", JSON.stringify(requestData));
 
-
-    // --- Fetch API and Handle Response ---
+    // 4. --- Fetch API and Handle Response ---
     logger.debug("[fetchPayoffChart] Step 5: Calling fetchAPI('/get_payoff_chart')...");
     try {
         const data = await fetchAPI('/get_payoff_chart', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(requestData) // Send the correctly built data
+            body: JSON.stringify(requestData)
         });
-
-        // *** DEBUG: Log the raw response data ***
-        logger.debug("[fetchPayoffChart] Step 6: Received response data from /get_payoff_chart:", JSON.parse(JSON.stringify(data))); // Deep copy log
+        logger.debug("[fetchPayoffChart] Step 6: Received response data from /get_payoff_chart:", JSON.parse(JSON.stringify(data)));
 
         // 5. Validate Backend Response
         if (!data || !data.success) {
-            const errorMessage = data?.message || "Calculation failed on the server.";
-            logger.error(`[fetchPayoffChart] Backend reported failure: ${errorMessage}`); // Log backend failure message
-            resetCalculationOutputsUI(); // Reset outputs to clear loading
-            setElementState(SELECTORS.payoffChartContainer, 'error', `Chart Error: ${errorMessage}`);
-            setElementState(SELECTORS.taxInfoContainer, 'error', 'Calculation Failed');
-            setElementState(SELECTORS.greeksSection, 'error', 'Calculation Failed');
-            setElementState(SELECTORS.greeksTable, 'error');
-            setElementState(SELECTORS.metricsList, 'error');
-            setElementState(SELECTORS.greeksAnalysisSection, 'hidden');
-            // Show global error for calculation failures reported by backend
-            setElementState(SELECTORS.globalErrorDisplay, 'error', `Calculation Error: ${errorMessage}`);
-            return; // Stop processing on backend failure
+             const errorMessage = data?.message || "Calculation failed on the server.";
+             logger.error(`[fetchPayoffChart] Backend reported failure: ${errorMessage}`);
+             resetCalculationOutputsUI(); // Reset outputs
+             setElementState(SELECTORS.payoffChartContainer, 'error', `Chart Error: ${errorMessage}`);
+             setElementState(SELECTORS.taxInfoContainer, 'error', 'Calculation Failed');
+             setElementState(SELECTORS.greeksSection, 'error', 'Calculation Failed');
+             setElementState(SELECTORS.greeksTable, 'error');
+             setElementState(SELECTORS.metricsList, 'error');
+             setElementState(SELECTORS.greeksAnalysisSection, 'hidden');
+             setElementState(SELECTORS.globalErrorDisplay, 'error', `Calculation Error: ${errorMessage}`);
+             return;
         }
-        logger.debug("[fetchPayoffChart] Backend response indicates success=true."); // Log success
+        logger.debug("[fetchPayoffChart] Backend response indicates success=true.");
 
         // 6. --- Render Results ---
         logger.debug("[fetchPayoffChart] Step 7: Rendering results...");
-
         // --- DEBUG: Log data sections before rendering ---
         logger.debug("[fetchPayoffChart] Metrics data:", data?.metrics);
         logger.debug("[fetchPayoffChart] Charges data:", data?.charges);
         logger.debug("[fetchPayoffChart] Greeks data:", data?.greeks);
         logger.debug("[fetchPayoffChart] Chart JSON present:", !!data?.chart_figure_json);
-        // --- End DEBUG ---
 
-        // ... (Keep the rest of the rendering logic as before) ...
-         // Metrics
-         const metricsContainer = data?.metrics;
-         const metricsData = metricsContainer?.metrics;
-         if (metricsData) { /* ... render metrics ... */ setElementState(SELECTORS.metricsList, 'content');}
-         else { logger.warn("[fetchPayoffChart] Metrics data missing from successful response."); /* ... handle missing metrics ... */ setElementState(SELECTORS.metricsList, 'content');}
+        // Render Metrics
+        const metricsContainer = data?.metrics; const metricsData = metricsContainer?.metrics;
+        if (metricsData) { /* ... render metrics ... */ setElementState(SELECTORS.metricsList, 'content'); }
+        else { /* ... handle missing metrics ... */ setElementState(SELECTORS.metricsList, 'content'); }
 
-         // Cost Breakdown
-         const costBreakdownData = metricsContainer?.cost_breakdown_per_leg;
-         const breakdownList = document.querySelector(SELECTORS.costBreakdownList);
-         const breakdownContainer = document.querySelector(SELECTORS.costBreakdownContainer);
-         if (breakdownList && breakdownContainer && Array.isArray(costBreakdownData) && costBreakdownData.length > 0) { renderCostBreakdown(breakdownList, costBreakdownData); setElementState(SELECTORS.costBreakdownContainer, 'content'); breakdownContainer.style.display = ""; breakdownContainer.open = false;}
-         else if (breakdownContainer) { logger.warn("[fetchPayoffChart] Cost breakdown data missing or empty."); setElementState(SELECTORS.costBreakdownContainer, 'hidden'); }
+        // Render Cost Breakdown
+        const costBreakdownData = metricsContainer?.cost_breakdown_per_leg; const breakdownList = document.querySelector(SELECTORS.costBreakdownList); const breakdownContainer = document.querySelector(SELECTORS.costBreakdownContainer);
+        if (breakdownList && breakdownContainer && Array.isArray(costBreakdownData) && costBreakdownData.length > 0) { renderCostBreakdown(breakdownList, costBreakdownData); setElementState(SELECTORS.costBreakdownContainer, 'content'); breakdownContainer.style.display = ""; breakdownContainer.open = false; }
+        else if (breakdownContainer) { setElementState(SELECTORS.costBreakdownContainer, 'hidden'); }
 
-         // Tax Table
-         const taxContainer = document.querySelector(SELECTORS.taxInfoContainer);
-         if (taxContainer) { if (data?.charges) { renderTaxTable(taxContainer, data.charges); setElementState(SELECTORS.taxInfoContainer, 'content'); } else { logger.warn("[fetchPayoffChart] Charges data missing from successful response."); taxContainer.innerHTML = "<p class='text-muted'>Charge data unavailable.</p>"; setElementState(SELECTORS.taxInfoContainer, 'content'); } }
+        // Render Tax Table
+        const taxContainer = document.querySelector(SELECTORS.taxInfoContainer);
+        if (taxContainer) { if (data?.charges) { renderTaxTable(taxContainer, data.charges); setElementState(SELECTORS.taxInfoContainer, 'content'); } else { taxContainer.innerHTML = "<p class='text-muted'>Charge data unavailable.</p>"; setElementState(SELECTORS.taxInfoContainer, 'content'); } }
 
-         // Chart
-         const chartContainer = document.querySelector(SELECTORS.payoffChartContainer);
-         const chartDataKey = "chart_figure_json";
-         if (chartContainer && data[chartDataKey]) { renderPayoffChart(chartContainer, data[chartDataKey]); setElementState(SELECTORS.payoffChartContainer, 'content'); }
-         else if (chartContainer) { logger.warn("[fetchPayoffChart] Chart JSON missing from successful response."); chartContainer.innerHTML = '<div class="placeholder-text">Chart could not be generated.</div>'; setElementState(SELECTORS.payoffChartContainer, 'error'); }
+        // Render Chart
+        const chartContainer = document.querySelector(SELECTORS.payoffChartContainer); const chartDataKey = "chart_figure_json";
+        if (chartContainer && data[chartDataKey]) { renderPayoffChart(chartContainer, data[chartDataKey]); setElementState(SELECTORS.payoffChartContainer, 'content'); }
+        else if (chartContainer) { chartContainer.innerHTML = '<div class="placeholder-text">Chart could not be generated.</div>'; setElementState(SELECTORS.payoffChartContainer, 'error'); }
 
-         // Greeks Table & Analysis Trigger
-         const greeksTableElement = document.querySelector(SELECTORS.greeksTable);
-         const greeksSectionElement = document.querySelector(SELECTORS.greeksSection);
-         if (greeksTableElement && greeksSectionElement && data.greeks && Array.isArray(data.greeks)) {
-             logger.debug("[fetchPayoffChart] Rendering Greeks table...");
-             const calculatedTotals = renderGreeksTable(greeksTableElement, data.greeks); // Capture totals
-             setElementState(greeksSectionElement, 'content');
-             if (calculatedTotals) {
-                 logger.info("[fetchPayoffChart] Greeks totals calculated, fetching Greeks analysis...", calculatedTotals);
-                 fetchAndDisplayGreeksAnalysis(asset, calculatedTotals); // Trigger analysis
-             } else {
-                 logger.warn("[fetchPayoffChart] Greeks table rendered, but totals were null/invalid. Skipping Greeks analysis fetch.");
-                 const greeksAnalysisSection = document.querySelector(SELECTORS.greeksAnalysisSection); const greeksAnalysisContainer = document.querySelector(SELECTORS.greeksAnalysisResultContainer); if(greeksAnalysisSection && greeksAnalysisContainer) { setElementState(greeksAnalysisSection, 'content'); greeksAnalysisContainer.innerHTML = '<p>Could not calculate portfolio totals needed for Greeks analysis.</p>'; setElementState(greeksAnalysisContainer, 'content'); }
-             }
-         } else {
-             logger.warn("[fetchPayoffChart] Greeks data missing/invalid or table element not found. Skipping Greeks table/analysis.");
-             if (greeksSectionElement) { greeksSectionElement.innerHTML = '<h3 class="section-subheader">Options Greeks</h3><p>Greeks data not available.</p>'; setElementState(greeksSectionElement, 'content'); }
-             const greeksAnalysisSection = document.querySelector(SELECTORS.greeksAnalysisSection); if(greeksAnalysisSection) setElementState(greeksAnalysisSection, 'hidden');
-         }
-         logger.debug("[fetchPayoffChart] Step 7: Rendering complete.");
+        // Render Greeks Table & Trigger Analysis
+        const greeksTableElement = document.querySelector(SELECTORS.greeksTable); const greeksSectionElement = document.querySelector(SELECTORS.greeksSection);
+        if (greeksTableElement && greeksSectionElement && data.greeks && Array.isArray(data.greeks)) {
+            const calculatedTotals = renderGreeksTable(greeksTableElement, data.greeks);
+            setElementState(greeksSectionElement, 'content');
+            if (calculatedTotals) { fetchAndDisplayGreeksAnalysis(asset, calculatedTotals); }
+            else { /* handle null totals */ const greeksAS = document.querySelector(SELECTORS.greeksAnalysisSection); const greeksAC = document.querySelector(SELECTORS.greeksAnalysisResultContainer); if(greeksAS && greeksAC) { setElementState(SELECTORS.greeksAnalysisSection, 'content'); greeksAC.innerHTML = '<p>Could not calculate totals for Greeks analysis.</p>'; setElementState(SELECTORS.greeksAnalysisResultContainer, 'content'); } }
+        } else { /* handle missing greeks data */ if (greeksSectionElement) { greeksSectionElement.innerHTML = '<h3 class="section-subheader">Options Greeks</h3><p>Greeks data not available.</p>'; setElementState(greeksSectionElement, 'content'); } const greeksAS = document.querySelector(SELECTORS.greeksAnalysisSection); if(greeksAS) setElementState(greeksAS, 'hidden'); }
+        logger.debug("[fetchPayoffChart] Step 7: Rendering complete.");
 
-    } catch (error) { // Catch errors from fetchAPI or rendering failures AFTER successful fetch
-        logger.error(`[fetchPayoffChart] Fatal error during API call or result processing: ${error.message}`, error); // Log full error
-        resetCalculationOutputsUI(); // Reset results UI fully on error
+    } catch (error) { // Catch errors from fetchAPI or rendering
+        logger.error(`[fetchPayoffChart] Fatal error during API call or result processing: ${error.message}`, error);
+        resetCalculationOutputsUI(); // Reset results UI
         let errorMsg = `Error: ${error.message || 'Failed to process calculation result.'}`;
-        // Update based on common error types caught by fetchAPI or thrown locally
-        if (error.message.includes("Invalid JSON response")) { errorMsg = "Error: Invalid response from server."; }
-        else if (error.message.includes("Failed to fetch")) { errorMsg = "Network Error: Could not reach calculation server."; }
-        // Display specific errors if needed, otherwise generic
-        setElementState(SELECTORS.payoffChartContainer, 'error', errorMsg);
-        setElementState(SELECTORS.taxInfoContainer, 'error', 'Error');
-        setElementState(SELECTORS.greeksSection, 'error', 'Error');
-        setElementState(SELECTORS.greeksTable, 'error');
-        setElementState(SELECTORS.metricsList, 'error');
-        setElementState(SELECTORS.greeksAnalysisSection, 'hidden');
+        // ... (keep specific error message handling) ...
+        setElementState(SELECTORS.payoffChartContainer, 'error', errorMsg); setElementState(SELECTORS.taxInfoContainer, 'error', 'Error'); setElementState(SELECTORS.greeksSection, 'error', 'Error'); setElementState(SELECTORS.greeksTable, 'error'); setElementState(SELECTORS.metricsList, 'error'); setElementState(SELECTORS.greeksAnalysisSection, 'hidden');
         setElementState(SELECTORS.globalErrorDisplay, 'error', `Calculation Error: ${error.message || 'Unknown processing error'}`);
 
     } finally {
         if (updateButton) updateButton.disabled = false; // Always re-enable button
-        logger.info("--- [fetchPayoffChart] END ---"); // Mark the end
+        logger.info("--- [fetchPayoffChart] END ---");
     }
 }
+
+// --- Make sure gatherStrategyLegsFromTable is also present ---
+/** Helper function to gather VALID strategy legs data from the strategyPositions state array */
+ function gatherStrategyLegsFromTable() { // Name is legacy, now reads state array
+      const logger = window.logger || window.console;
+      logger.debug("--- [gatherStrategyLegs] START ---");
+
+      if (!Array.isArray(strategyPositions)) { logger.error("[gatherStrategyLegs] Aborted: strategyPositions is not an array."); return []; }
+      if (strategyPositions.length === 0) { logger.warn("[gatherStrategyLegs] Aborted: strategyPositions array is empty."); return []; }
+
+      logger.debug("[gatherStrategyLegs] Source strategyPositions:", JSON.parse(JSON.stringify(strategyPositions)));
+
+      const validLegs = [];
+      let invalidLegCount = 0;
+
+      strategyPositions.forEach((pos, index) => {
+           logger.debug(`[gatherStrategyLegs] Processing index ${index}, raw pos object:`, JSON.parse(JSON.stringify(pos)));
+
+           let legIsValid = true;
+           let validationError = null;
+
+           // Validate essential data directly from the 'pos' object
+           if (!pos || typeof pos !== 'object') { validationError = "Pos is not an object."; legIsValid = false; }
+           else {
+                logger.debug(`[gatherStrategyLegs] Index ${index} Check - pos.option_type:`, pos.option_type);
+                logger.debug(`[gatherStrategyLegs] Index ${index} Check - pos.strike_price:`, pos.strike_price);
+                logger.debug(`[gatherStrategyLegs] Index ${index} Check - pos.expiry_date:`, pos.expiry_date);
+                logger.debug(`[gatherStrategyLegs] Index ${index} Check - pos.lots:`, pos.lots);
+                logger.debug(`[gatherStrategyLegs] Index ${index} Check - pos.last_price:`, pos.last_price);
+                logger.debug(`[gatherStrategyLegs] Index ${index} Check - pos.iv:`, pos.iv);
+                logger.debug(`[gatherStrategyLegs] Index ${index} Check - pos.lot_size:`, pos.lot_size);
+                logger.debug(`[gatherStrategyLegs] Index ${index} Check - pos.days_to_expiry:`, pos.days_to_expiry); // Check stored DTE
+
+                // Run Validation Checks
+                if (!pos.option_type || (pos.option_type !== 'CE' && pos.option_type !== 'PE')) { validationError = `Invalid option_type: ${pos.option_type}`; legIsValid = false; }
+                else if (!pos.strike_price || isNaN(parseFloat(pos.strike_price)) || parseFloat(pos.strike_price) <= 0) { validationError = `Invalid strike_price: ${pos.strike_price}`; legIsValid = false; }
+                else if (!pos.expiry_date || !/^\d{4}-\d{2}-\d{2}$/.test(pos.expiry_date)) { validationError = `Invalid expiry_date: ${pos.expiry_date}`; legIsValid = false; }
+                else if (pos.lots === undefined || pos.lots === null || isNaN(parseInt(pos.lots)) || parseInt(pos.lots) === 0) { validationError = `Invalid lots: ${pos.lots}`; legIsValid = false; }
+                else if (pos.last_price === undefined || pos.last_price === null || isNaN(parseFloat(pos.last_price)) || parseFloat(pos.last_price) < 0) { validationError = `Invalid last_price: ${pos.last_price}`; legIsValid = false; }
+                // Check stored DTE
+                else if (pos.days_to_expiry === undefined || pos.days_to_expiry === null || isNaN(parseInt(pos.days_to_expiry)) || parseInt(pos.days_to_expiry) < 0) { validationError = `Invalid/missing stored days_to_expiry: ${pos.days_to_expiry}`; legIsValid = false; }
+           }
+
+           // Determine Backend Option Type
+            let backendOpType = '';
+            if (legIsValid) {
+                const upperOptType = pos.option_type.toUpperCase();
+                if (upperOptType === 'CE') { backendOpType = 'c'; }
+                else if (upperOptType === 'PE') { backendOpType = 'p'; }
+                else { validationError = validationError || `Invalid stored option_type: ${pos.option_type}`; legIsValid = false; }
+            }
+
+            // Handle IV
+            let ivToSend = null;
+            if (legIsValid && pos.iv !== null && pos.iv !== undefined && pos.iv !== '') {
+                const parsedIV = parseFloat(pos.iv);
+                 if (!isNaN(parsedIV)) { ivToSend = parsedIV; }
+                 else { logger.warn(`[gatherStrategyLegs] Invalid IV found for leg ${index} ('${pos.iv}'), sending null.`); }
+            }
+
+           // If Leg is Valid, Add the formatted object for the backend
+           if (legIsValid) {
+                const formattedLeg = {
+                     op_type: backendOpType,
+                     strike: String(pos.strike_price),
+                     tr_type: parseInt(pos.lots) >= 0 ? 'b' : 's',
+                     op_pr: String(pos.last_price),
+                     lot: String(Math.abs(parseInt(pos.lots))),
+                     lot_size: pos.lot_size ? String(pos.lot_size) : null,
+                     iv: ivToSend,
+                     days_to_expiry: pos.days_to_expiry, // Use stored DTE
+                     expiry_date: pos.expiry_date,
+                };
+                logger.debug(`[gatherStrategyLegs] Pushing valid formatted leg ${index}:`, formattedLeg);
+                validLegs.push(formattedLeg);
+           } else {
+                logger.error(`[gatherStrategyLegs] Skipping invalid position data at index ${index}. Reason: ${validationError || 'Unknown validation failure'}. Raw Data:`, JSON.parse(JSON.stringify(pos)));
+                invalidLegCount++;
+           }
+      }); // End forEach
+
+      if (invalidLegCount > 0 && validLegs.length === 0) {
+           alert(`Error: ${invalidLegCount} invalid leg(s) found and NO valid legs remaining. Cannot calculate. Please check console.`);
+      } else if (invalidLegCount > 0) {
+           alert(`Warning: ${invalidLegCount} invalid leg(s) were ignored. Calculation based on remaining legs. Check console.`);
+      }
+
+      logger.debug(`[gatherStrategyLegs] Returning ${validLegs.length} valid formatted legs (ignored ${invalidLegCount}).`);
+      logger.debug("--- [gatherStrategyLegs] END ---");
+      return validLegs;
+ }
 
 // --- Rendering Helpers for Payoff Results ---
 
@@ -2364,10 +2269,11 @@ async function fetchAndDisplayGreeksAnalysis(asset, portfolioGreeksData) {
 // ===============================================================
 // Misc Helpers
 // ===============================================================
-function gatherStrategyLegsFromTable() {
+function gatherStrategyLegsFromTable() { // Name is legacy, now reads state array
       const logger = window.logger || window.console;
-      logger.debug("--- [gatherStrategyLegs] START ---"); // Mark start
+      logger.debug("--- [gatherStrategyLegs] START ---");
 
+      // 1. Check the source array itself
       if (!Array.isArray(strategyPositions)) {
           logger.error("[gatherStrategyLegs] Aborted: strategyPositions is not an array or not defined.");
           return [];
@@ -2377,100 +2283,93 @@ function gatherStrategyLegsFromTable() {
            return [];
       }
 
+      // *** DEBUG: Log the SOURCE array content ***
+      logger.debug("[gatherStrategyLegs] Source strategyPositions:", JSON.parse(JSON.stringify(strategyPositions)));
+
+
       const validLegs = [];
       let invalidLegCount = 0;
 
       strategyPositions.forEach((pos, index) => {
-           logger.debug(`[gatherStrategyLegs] Processing index ${index}, raw data:`, JSON.parse(JSON.stringify(pos))); // <<< Log raw pos data
+           logger.debug(`[gatherStrategyLegs] Processing index ${index}, raw pos object:`, JSON.parse(JSON.stringify(pos))); // Log RAW object
 
            let legIsValid = true;
            let validationError = null;
 
-           // --- DEBUG: Log each property value BEFORE validation ---
-           logger.debug(`[gatherStrategyLegs] Index ${index} - Checking option_type:`, pos?.option_type);
-           logger.debug(`[gatherStrategyLegs] Index ${index} - Checking strike_price:`, pos?.strike_price);
-           logger.debug(`[gatherStrategyLegs] Index ${index} - Checking expiry_date:`, pos?.expiry_date);
-           logger.debug(`[gatherStrategyLegs] Index ${index} - Checking lots:`, pos?.lots);
-           logger.debug(`[gatherStrategyLegs] Index ${index} - Checking last_price:`, pos?.last_price);
-           // --- End DEBUG logging ---
+           // 2. Validate essential data directly from the 'pos' object
+           if (!pos || typeof pos !== 'object') { validationError = "Pos is not an object."; legIsValid = false; }
+           else {
+                // *** DEBUG: Check individual properties BEFORE validation logic ***
+                logger.debug(`[gatherStrategyLegs] Index ${index} Check - pos.option_type:`, pos.option_type);
+                logger.debug(`[gatherStrategyLegs] Index ${index} Check - pos.strike_price:`, pos.strike_price);
+                logger.debug(`[gatherStrategyLegs] Index ${index} Check - pos.expiry_date:`, pos.expiry_date);
+                logger.debug(`[gatherStrategyLegs] Index ${index} Check - pos.lots:`, pos.lots);
+                logger.debug(`[gatherStrategyLegs] Index ${index} Check - pos.last_price:`, pos.last_price);
+                logger.debug(`[gatherStrategyLegs] Index ${index} Check - pos.iv:`, pos.iv);
+                logger.debug(`[gatherStrategyLegs] Index ${index} Check - pos.lot_size:`, pos.lot_size);
+                logger.debug(`[gatherStrategyLegs] Index ${index} Check - pos.days_to_expiry:`, pos.days_to_expiry); // DTE added by addPosition
 
-           // Validate essential data from the stored position object
-           if (!pos || typeof pos !== 'object') {
-                validationError = "Position data is not an object.";
-                legIsValid = false;
-           } else if (!pos.option_type || (pos.option_type !== 'CE' && pos.option_type !== 'PE')) {
-                validationError = `Invalid option_type: ${pos.option_type}`;
-                legIsValid = false;
-           } else if (!pos.strike_price || isNaN(parseFloat(pos.strike_price)) || parseFloat(pos.strike_price) <= 0) {
-                validationError = `Invalid strike_price: ${pos.strike_price}`;
-                legIsValid = false;
-           } else if (!pos.expiry_date || !/^\d{4}-\d{2}-\d{2}$/.test(pos.expiry_date)) {
-               validationError = `Invalid expiry_date: ${pos.expiry_date}`;
-               legIsValid = false;
-           } else if (pos.lots === undefined || pos.lots === null || isNaN(parseInt(pos.lots)) || parseInt(pos.lots) === 0) {
-                validationError = `Invalid lots: ${pos.lots}`;
-                legIsValid = false;
-           } else if (pos.last_price === undefined || pos.last_price === null || isNaN(parseFloat(pos.last_price)) || parseFloat(pos.last_price) < 0) {
-                validationError = `Invalid last_price: ${pos.last_price}`;
-                legIsValid = false;
-           }
-
-           // --- Recalculate DTE ---
-           const currentDTE = calculateDaysToExpiry(pos?.expiry_date); // Add safe access
-           if (currentDTE === null && legIsValid) {
-               validationError = `Could not calculate DTE for expiry ${pos?.expiry_date}.`;
-               legIsValid = false;
+                // --- Run Validation Checks ---
+                if (!pos.option_type || (pos.option_type !== 'CE' && pos.option_type !== 'PE')) { validationError = `Invalid option_type: ${pos.option_type}`; legIsValid = false; }
+                else if (!pos.strike_price || isNaN(parseFloat(pos.strike_price)) || parseFloat(pos.strike_price) <= 0) { validationError = `Invalid strike_price: ${pos.strike_price}`; legIsValid = false; }
+                else if (!pos.expiry_date || !/^\d{4}-\d{2}-\d{2}$/.test(pos.expiry_date)) { validationError = `Invalid expiry_date: ${pos.expiry_date}`; legIsValid = false; }
+                else if (pos.lots === undefined || pos.lots === null || isNaN(parseInt(pos.lots)) || parseInt(pos.lots) === 0) { validationError = `Invalid lots: ${pos.lots}`; legIsValid = false; }
+                else if (pos.last_price === undefined || pos.last_price === null || isNaN(parseFloat(pos.last_price)) || parseFloat(pos.last_price) < 0) { validationError = `Invalid last_price: ${pos.last_price}`; legIsValid = false; }
+                // DTE should have been calculated and stored by addPosition
+                else if (pos.days_to_expiry === undefined || pos.days_to_expiry === null || isNaN(parseInt(pos.days_to_expiry)) || parseInt(pos.days_to_expiry) < 0) { validationError = `Invalid/missing days_to_expiry: ${pos.days_to_expiry}`; legIsValid = false; }
            }
 
            // --- Determine Backend Option Type ---
-            let backendOpType = '';
-            if (legIsValid) {
-                // Use safe access again just in case
-                const upperOptType = pos?.option_type?.toUpperCase();
-                if (upperOptType === 'CE') { backendOpType = 'c'; }
-                else if (upperOptType === 'PE') { backendOpType = 'p'; }
-                else { validationError = `Invalid stored option_type: ${pos?.option_type}`; legIsValid = false; }
-            }
-
-            // --- Handle IV ---
-            let ivToSend = null;
-            if (legIsValid && pos.iv !== null && pos.iv !== undefined && pos.iv !== '') {
-                const parsedIV = parseFloat(pos.iv);
-                 if (!isNaN(parsedIV)) { ivToSend = parsedIV; }
-                 else { logger.warn(`[gatherStrategyLegs] Invalid IV found for leg ${index} ('${pos.iv}'), sending null.`); }
-            }
-
-           // --- If Leg is Valid, Add to Array ---
+           let backendOpType = '';
            if (legIsValid) {
-               validLegs.push({
-                    // Data needed by backend
-                    op_type: backendOpType,
-                    strike: String(pos.strike_price),
-                    tr_type: parseInt(pos.lots) >= 0 ? 'b' : 's',
-                    op_pr: String(pos.last_price),
-                    lot: String(Math.abs(parseInt(pos.lots))),
-                    lot_size: pos.lot_size ? String(pos.lot_size) : null,
-                    iv: ivToSend,
-                    days_to_expiry: currentDTE,
-                    expiry_date: pos.expiry_date,
-               });
+               const upperOptType = pos.option_type.toUpperCase();
+               if (upperOptType === 'CE') { backendOpType = 'c'; }
+               else if (upperOptType === 'PE') { backendOpType = 'p'; }
+               else { validationError = `Validation logic error: Invalid option_type slipped through: ${pos.option_type}`; legIsValid = false; }
+           }
+
+           // --- Handle IV ---
+           let ivToSend = null;
+           if (legIsValid && pos.iv !== null && pos.iv !== undefined && pos.iv !== '') {
+               const parsedIV = parseFloat(pos.iv);
+               if (!isNaN(parsedIV)) { ivToSend = parsedIV; }
+               else { logger.warn(`[gatherStrategyLegs] Invalid IV found for leg ${index} ('${pos.iv}'), sending null.`); }
+           }
+
+           // --- If Leg is Valid, Add the *formatted* object for the backend ---
+           if (legIsValid) {
+                const formattedLeg = { // Create the object expected by the backend
+                     op_type: backendOpType,
+                     strike: String(pos.strike_price),
+                     tr_type: parseInt(pos.lots) >= 0 ? 'b' : 's',
+                     op_pr: String(pos.last_price),
+                     lot: String(Math.abs(parseInt(pos.lots))),
+                     lot_size: pos.lot_size ? String(pos.lot_size) : null,
+                     iv: ivToSend,
+                     days_to_expiry: pos.days_to_expiry, // Use the stored DTE
+                     expiry_date: pos.expiry_date,
+                };
+                logger.debug(`[gatherStrategyLegs] Pushing valid formatted leg ${index}:`, formattedLeg);
+                validLegs.push(formattedLeg);
            } else {
-                // Log the first validation error found
-                logger.error(`[gatherStrategyLegs] Skipping invalid position data at index ${index}. Reason: ${validationError || 'Unknown validation failure'}. Data:`, JSON.parse(JSON.stringify(pos)));
+                logger.error(`[gatherStrategyLegs] Skipping invalid position data at index ${index}. Reason: ${validationError || 'Unknown validation failure'}. Raw Data:`, JSON.parse(JSON.stringify(pos)));
                 invalidLegCount++;
            }
       }); // End forEach
 
-      if (invalidLegCount > 0) {
-         // Alert moved to fetchPayoffChart to avoid multiple alerts if called elsewhere
-         // alert(`Error: ${invalidLegCount} invalid leg(s) found...`);
-         logger.warn(`[gatherStrategyLegs] Found ${invalidLegCount} invalid legs.`);
+      if (invalidLegCount > 0 && validLegs.length === 0) { // Only alert if NO valid legs remain
+           alert(`Error: ${invalidLegCount} invalid leg(s) found and NO valid legs remaining. Cannot calculate. Please check console.`);
+      } else if (invalidLegCount > 0) {
+           alert(`Warning: ${invalidLegCount} invalid leg(s) were ignored. Calculation based on remaining legs. Check console.`);
       }
 
-      logger.debug(`[gatherStrategyLegs] Returning ${validLegs.length} valid legs. (Ignored ${invalidLegCount})`);
+
+      logger.debug(`[gatherStrategyLegs] Returning ${validLegs.length} valid formatted legs (ignored ${invalidLegCount}).`);
       logger.debug("--- [gatherStrategyLegs] END ---");
-      return validLegs; // Return ONLY the valid legs
+      // Return ONLY the valid legs formatted for the backend
+      return validLegs;
  }
+
 const numericATMStrike = Number(atmStrikeObjectKey);
 logger.debug(`Attempting to find ATM row with data-strike="${numericATMStrike}". Tbody has ${currentTbody.rows.length} rows.`);
 const atmRow = currentTbody.querySelector(`tr[data-strike="${numericATMStrike}"]`);
