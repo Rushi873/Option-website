@@ -1141,6 +1141,37 @@ async function fetchOptionChain(scrollToATM = false, isRefresh = false) {
 // ===============================================================
 // Event Delegation Handlers
 // ===============================================================
+function findATMStrikeAsStringKey(strikeStringKeys = [], spotPrice) {
+    // Assume logger is defined globally or passed as an argument if needed
+    const logger = window.logger || window.console;
+
+    if (!Array.isArray(strikeStringKeys) || strikeStringKeys.length === 0 || typeof spotPrice !== 'number' || spotPrice <= 0) {
+         logger.warn("Cannot find ATM strike key: Invalid input.", { numKeys: strikeStringKeys?.length, spotPrice });
+         return null; // Return null if input is invalid
+    }
+
+    let closestKey = null;
+    let minDiff = Infinity;
+
+    for (const key of strikeStringKeys) {
+        // Convert string key to number for comparison
+        const numericStrike = Number(key);
+        if (!isNaN(numericStrike)) { // Ensure conversion is valid
+            const diff = Math.abs(numericStrike - spotPrice);
+            if (diff < minDiff) {
+                minDiff = diff;
+                closestKey = key; // Store the ORIGINAL STRING KEY
+            }
+        } else {
+             logger.warn(`Skipping non-numeric strike key '${key}' during ATM calculation.`);
+        }
+    }
+
+    // Log the result before returning
+    logger.debug(`Calculated ATM strike key: ${closestKey} (Min diff: ${minDiff.toFixed(4)}) for spot price: ${spotPrice.toFixed(4)}`);
+    return closestKey; // Return the STRING key
+}
+
 
 /** Handles clicks within the option chain table body */
 function handleOptionChainClick(event) {
