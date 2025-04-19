@@ -10,6 +10,7 @@ import threading
 import base64
 import io
 import json
+import aiohttp
 import functools # Import functools
 from pathlib import Path
 from datetime import datetime, date, timedelta

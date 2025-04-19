@@ -1919,8 +1919,15 @@ function renderTaxTable(containerElement, taxData) {
  * @param {Array | null | undefined} greeksList - The list of Greek results per leg like: [{leg_index: N, input_data: {...}, calculated_greeks_per_share: {...}}, ...].
  */
 function renderGreeksTable(tableElement, greeksList) {
-    const logger = window.console;
-    tableElement.innerHTML = ''; // Clear previous
+    const logger = window.console; // Use standard console if no custom logger
+    tableElement.innerHTML = ''; // Clear previous content (header, body, footer)
+
+    // Ensure tableElement is valid
+    if (!tableElement || !(tableElement instanceof HTMLTableElement)) {
+        logger.error("renderGreeksTable: Invalid tableElement provided.");
+        return null;
+    }
+
     const caption = tableElement.createCaption();
     caption.className = "table-caption";
     caption.textContent = "Portfolio Option Greeks";
@@ -1929,78 +1936,87 @@ function renderGreeksTable(tableElement, greeksList) {
     const totals = { delta: 0, gamma: 0, theta: 0, vega: 0, rho: 0 };
     let hasCalculatedGreeks = false; // Flag to check if any totals were calculated
 
+    // --- Input Validation ---
     if (!Array.isArray(greeksList)) {
         logger.error("renderGreeksTable: Input greeksList is not an array.");
-        caption.textContent = "Error: Invalid Greeks data received.";
-        setElementState(tableElement, 'error');
-        return null; // Return null or empty object on error
+        caption.textContent = "Error: Invalid Greeks data format received.";
+        // Use the CORRECTED setElementState call with a selector string
+        setElementState(SELECTORS.greeksTable, 'error'); // Pass selector string
+        return null; // Return null indicating failure
     }
-    const totalLegsProcessed = greeksList.length;
-    if (totalLegsProcessed === 0) {
-        caption.textContent = "Portfolio Option Greeks (No legs to process)";
-        // Add a row indicating no data
+
+    const totalLegsInput = greeksList.length;
+    if (totalLegsInput === 0) {
+        caption.textContent = "Portfolio Option Greeks (No legs in strategy)";
         const tbody = tableElement.createTBody();
-        tbody.innerHTML = `<tr><td colspan="9">No valid option legs found in the strategy.</td></tr>`;
-        setElementState(tableElement, 'content'); // It's content, just empty
+        // Use placeholder class for consistency
+        tbody.innerHTML = `<tr><td colspan="9" class="placeholder-text">No option legs found in the strategy.</td></tr>`;
+        // Use the CORRECTED setElementState call with a selector string
+        setElementState(SELECTORS.greeksTable, 'content'); // Pass selector string
         return totals; // Return zeroed totals
     }
 
-    caption.textContent = `Portfolio Option Greeks (${totalLegsProcessed} Leg${totalLegsProcessed > 1 ? 's' : ''} Processed)`;
+    caption.textContent = `Portfolio Option Greeks (${totalLegsInput} Leg${totalLegsInput > 1 ? 's' : ''} Input)`;
 
-    // Create Header
+    // --- Create Table Header ---
     const thead = tableElement.createTHead();
+    // Header shows per-share context in tooltips
     thead.innerHTML = `
         <tr>
             <th>Action</th>
             <th>Lots</th>
             <th>Type</th>
             <th>Strike</th>
-            <th title="Option Delta per Share">Δ Delta</th>
-            <th title="Option Gamma per Share">Γ Gamma</th>
-            <th title="Option Theta per Share (per Day)">Θ Theta</th>
-            <th title="Option Vega per Share (per 1% IV)">Vega</th>
-            <th title="Option Rho per Share (per 1% Rate)">Ρ Rho</th>
+            <th title="Delta per Share">Δ Delta</th>
+            <th title="Gamma per Share">Γ Gamma</th>
+            <th title="Theta per Share (per Day)">Θ Theta</th>
+            <th title="Vega per Share (per 1% IV)">Vega</th>
+            <th title="Rho per Share (per 1% Rate)">Ρ Rho</th>
         </tr>`;
 
+    // --- Populate Table Body ---
     const tbody = tableElement.createTBody();
     let skippedLegsCount = 0;
+    let processedLegsCount = 0;
 
-    greeksList.forEach((g, index) => { // Add index for logging
+    greeksList.forEach((g, index) => {
         const row = tbody.insertRow();
         const inputData = g?.input_data;
-        // Use PER-SHARE greeks for display in the row
-        const gv_per_share = g?.calculated_greeks_per_share;
+        const gv_per_share = g?.calculated_greeks_per_share; // Greeks per share for row display
 
-        // --- Validation for this specific leg ---
-        if (!inputData || !gv_per_share) {
-             logger.warn(`renderGreeksTable: Malformed data for leg ${index + 1}. Skipping.`);
+        // --- Validate data for this leg ---
+        if (!inputData || typeof inputData !== 'object' || !gv_per_share || typeof gv_per_share !== 'object') {
+             logger.warn(`renderGreeksTable: Malformed data structure for leg ${index + 1}. Skipping.`);
              skippedLegsCount++;
-             // Optionally add a visual indicator for the skipped row
-             row.innerHTML = `<td colspan="9" class="skipped-leg">Data missing for this leg</td>`;
+             // Add a row indicating skipped leg
+             row.innerHTML = `<td colspan="9" style="font-style: italic; color: #888;">Leg ${index + 1}: Invalid data received</td>`;
+             row.classList.add('skipped-leg'); // Add class for potential styling
              return; // Skip to next iteration
         }
 
-        // --- Extract details ---
+        // --- Extract and Format Leg Details ---
         const actionDisplay = (inputData.tr_type === 'b') ? 'BUY' : (inputData.tr_type === 's' ? 'SELL' : '?');
         const typeDisplay = (inputData.op_type === 'c') ? 'CE' : (inputData.op_type === 'p' ? 'PE' : '?');
+        // Ensure lots and lotSize are parsed correctly as integers
         const lots = parseInt(inputData.lots || '0', 10);
-        const lotSize = parseInt(inputData.lot_size || '0', 10); // Need lot size for totals calc!
-        const strike = inputData.strike || '?';
+        const lotSize = parseInt(inputData.lot_size || '0', 10); // Needed for totals calculation
+        const strike = inputData.strike; // Keep as number for formatting
         const lotsDisplay = (lots > 0) ? `${lots}` : 'N/A';
 
-        // --- Fill Cells (Per-Share Display) ---
+        // --- Fill Table Cells (Displaying Per-Share Greeks) ---
+        // Assume formatNumber helper exists: formatNumber(value, precision, fallback = 'N/A')
         row.insertCell().textContent = actionDisplay;
         row.insertCell().textContent = lotsDisplay;
         row.insertCell().textContent = typeDisplay;
-        row.insertCell().textContent = formatNumber(strike, 2); // Assuming formatNumber exists
+        row.insertCell().textContent = formatNumber(strike, 2);
         row.insertCell().textContent = formatNumber(gv_per_share.delta, 4, '-');
         row.insertCell().textContent = formatNumber(gv_per_share.gamma, 4, '-');
         row.insertCell().textContent = formatNumber(gv_per_share.theta, 4, '-');
         row.insertCell().textContent = formatNumber(gv_per_share.vega, 4, '-');
         row.insertCell().textContent = formatNumber(gv_per_share.rho, 4, '-');
 
-        // --- Accumulate PORTFOLIO totals (Using Per-Share * Lots * LotSize) ---
-        // Check if all required values are valid numbers
+        // --- Accumulate PORTFOLIO Totals (Using Per-Share * Quantity) ---
+        // Check if all required values are valid numbers for calculation
         const isValidForTotal = lots > 0 && lotSize > 0 &&
                                 typeof gv_per_share.delta === 'number' && isFinite(gv_per_share.delta) &&
                                 typeof gv_per_share.gamma === 'number' && isFinite(gv_per_share.gamma) &&
@@ -2009,52 +2025,76 @@ function renderGreeksTable(tableElement, greeksList) {
                                 typeof gv_per_share.rho === 'number' && isFinite(gv_per_share.rho);
 
         if (isValidForTotal) {
-            const quantity = lots * lotSize; // Total quantity for the leg
+            const quantity = lots * lotSize; // Total quantity (shares) for the leg
+            // Accumulate totals
             totals.delta += gv_per_share.delta * quantity;
             totals.gamma += gv_per_share.gamma * quantity;
             totals.theta += gv_per_share.theta * quantity;
             totals.vega += gv_per_share.vega * quantity;
             totals.rho += gv_per_share.rho * quantity;
-            hasCalculatedGreeks = true; // Mark that totals were calculated
-            row.classList.add('greeks-calculated'); // Optional styling
+            hasCalculatedGreeks = true; // Mark that totals were successfully updated at least once
+            processedLegsCount++;
+            row.classList.add('greeks-calculated'); // Optional styling for valid rows
         } else {
-            logger.warn(`renderGreeksTable: Skipping leg ${index + 1} from total calculation due to invalid data (lots=${lots}, lotSize=${lotSize}, greeks=${JSON.stringify(gv_per_share)})`);
+            // Log why calculation was skipped for this leg
+            logger.warn(`renderGreeksTable: Skipping leg ${index + 1} from total calculation due to invalid data (lots=${lots}, lotSize=${lotSize}, delta=${gv_per_share.delta}, etc.)`);
             skippedLegsCount++;
-            row.classList.add('greeks-skipped'); // Optional styling
+            row.classList.add('greeks-skipped'); // Optional styling for skipped rows
+            // You might want to visually indicate these rows differently (e.g., greyed out slightly)
+            row.style.opacity = '0.6';
+            row.style.fontStyle = 'italic';
         }
     }); // End forEach leg
 
-    // --- Create Footer with Totals ---
+    // Update caption with processed/skipped count
+    caption.textContent = `Portfolio Option Greeks (${processedLegsCount} Leg${processedLegsCount !== 1 ? 's' : ''} Processed, ${skippedLegsCount} Skipped)`;
+
+    // --- Create Table Footer with Totals ---
     const tfoot = tableElement.createTFoot();
     const footerRow = tfoot.insertRow();
-    footerRow.className = 'totals-row';
+    footerRow.className = 'totals-row'; // Class for styling totals
 
     if (hasCalculatedGreeks) { // Only show totals if at least one leg contributed
         const headerCell = footerRow.insertCell();
-        headerCell.colSpan = 4; // Span first 4 columns
-        // Clarify Total represents the entire portfolio value change
-        headerCell.textContent = 'Total Portfolio Exposure';
-        headerCell.style.textAlign = 'right'; headerCell.style.fontWeight = 'bold';
-        // Display the final rounded totals
+        headerCell.colSpan = 4; // Span first 4 columns (Action, Lots, Type, Strike)
+        // Clarify Total represents the entire portfolio value change / exposure
+        headerCell.textContent = 'Total Portfolio Exposure'; // Or "Portfolio Totals"
+        headerCell.style.textAlign = 'right';
+        headerCell.style.fontWeight = 'bold';
+
+        // Display the final calculated totals, rounded
         footerRow.insertCell().textContent = formatNumber(totals.delta, 4);
         footerRow.insertCell().textContent = formatNumber(totals.gamma, 4);
         footerRow.insertCell().textContent = formatNumber(totals.theta, 4);
         footerRow.insertCell().textContent = formatNumber(totals.vega, 4);
         footerRow.insertCell().textContent = formatNumber(totals.rho, 4);
-        setElementState(tableElement, 'content');
-    } else if (totalLegsProcessed > 0) { // Legs existed but none were valid for totals
+
+        // Use the CORRECTED setElementState call with a selector string
+        setElementState(SELECTORS.greeksTable, 'content'); // Pass selector string
+
+    } else if (totalLegsInput > 0) { // Legs existed, but none were valid for calculation
         const cell = footerRow.insertCell();
-        cell.colSpan = 9;
-        cell.textContent = 'Could not calculate portfolio totals due to invalid leg data.';
+        cell.colSpan = 9; // Span all columns
+        cell.textContent = 'Could not calculate portfolio totals due to invalid or missing leg data.';
         cell.style.textAlign = 'center';
         cell.style.fontStyle = 'italic';
-        setElementState(tableElement, 'content'); // Still content, just explaining lack of totals
+        // Use the CORRECTED setElementState call with a selector string
+        setElementState(SELECTORS.greeksTable, 'content'); // Still 'content', but showing message
     }
-    // If totalLegsProcessed was 0, the tbody already has the message.
+    // If totalLegsInput was 0, the tbody already has the message, and state was set earlier.
 
     // --- Return the calculated totals ---
-    logger.info(`renderGreeksTable: Rendered ${totalLegsProcessed - skippedLegsCount} valid legs. Totals calculated: ${JSON.stringify(totals)}`);
-    return totals; // Return the dictionary of calculated totals
+    // Round totals before returning for consistency if needed elsewhere
+    const finalTotals = {
+        delta: roundToPrecision(totals.delta, 4),
+        gamma: roundToPrecision(totals.gamma, 4),
+        theta: roundToPrecision(totals.theta, 4),
+        vega: roundToPrecision(totals.vega, 4),
+        rho: roundToPrecision(totals.rho, 4)
+    };
+
+    logger.info(`renderGreeksTable: Rendered ${processedLegsCount} valid legs. Totals: ${JSON.stringify(finalTotals)}`);
+    return finalTotals; // Return the dictionary of calculated totals
 }
 
 /**
@@ -2072,6 +2112,15 @@ function formatNumber(value, precision = 2, nanPlaceholder = '') {
         return nanPlaceholder;
     }
     return num.toFixed(precision);
+}
+
+
+function roundToPrecision(num, precision) {
+    if (typeof num !== 'number' || !isFinite(num)) {
+        return null; // Or 0 depending on how you want to handle invalid inputs
+    }
+    const factor = Math.pow(10, precision);
+    return Math.round(num * factor) / factor;
 }
 
 
