@@ -487,19 +487,44 @@ function resetCalculationOutputsUI() {
 }
 
 /** Updates the strategy table in the UI from the global `strategyPositions` array */
+/** Updates the strategy table in the UI from the global `strategyPositions` array */
 function updateStrategyTable() {
+    const logger = window.logger || console;
+    logger.debug("--- updateStrategyTable START ---"); // Log entry
     const tableBody = document.querySelector(SELECTORS.strategyTableBody);
-    if (!tableBody) { logger.error("Strategy table body not found for update."); return; }
+    if (!tableBody) {
+        logger.error("updateStrategyTable failed: Strategy table body not found.");
+        return;
+    }
+
+    // Log the array content *before* rendering
+    logger.debug("Rendering strategy table from strategyPositions:", JSON.parse(JSON.stringify(strategyPositions)));
+
     tableBody.innerHTML = ""; // Clear previous rows
-    if (strategyPositions.length === 0) { tableBody.innerHTML = '<tr><td colspan="7" class="placeholder-text">No positions added. Click prices in the chain.</td></tr>'; return; }
+
+    if (strategyPositions.length === 0) {
+        logger.debug("Strategy positions array is empty. Showing placeholder.");
+        tableBody.innerHTML = '<tr><td colspan="7" class="placeholder-text">No positions added. Click prices in the chain.</td></tr>';
+        return;
+    }
+
     strategyPositions.forEach((pos, index) => {
+        logger.debug(`Rendering row for index ${index}:`, pos); // Log each position being rendered
         const isLong = pos.lots >= 0; pos.tr_type = isLong ? 'b' : 's';
         const positionType = isLong ? "BUY" : "SELL"; const positionClass = isLong ? "long-position" : "short-position"; const buttonClass = isLong ? "button-buy" : "button-sell";
         const row = document.createElement("tr"); row.className = positionClass; row.dataset.index = index;
-        const formattedStrike = formatNumber(pos.strike_price, pos.strike_price % 1 === 0 ? 0 : 2, 'Invalid');
+        // Check strike_price before formatting
+        const formattedStrike = (pos.strike_price !== undefined && pos.strike_price !== null)
+                                ? formatNumber(pos.strike_price, pos.strike_price % 1 === 0 ? 0 : 2, 'Err')
+                                : 'Err';
         row.innerHTML = `<td>${pos.option_type || 'N/A'}</td><td>${formattedStrike}</td><td>${pos.expiry_date || 'N/A'}</td><td><input type="number" value="${pos.lots}" data-index="${index}" min="-100" max="100" step="1" class="lots-input number-input-small" aria-label="Lots for position ${index+1}"></td><td><button class="toggle-buy-sell ${buttonClass}" data-index="${index}" title="Toggle Buy/Sell">${positionType}</button></td><td>${formatCurrency(pos.last_price, 2)}</td><td><button class="remove-btn" data-index="${index}" aria-label="Remove position ${index+1}" title="Remove leg">×</button></td>`;
-        tableBody.appendChild(row);
+        try {
+            tableBody.appendChild(row);
+        } catch(e) {
+            logger.error(`Error appending row ${index} to strategy table body:`, e);
+        }
     });
+    logger.debug("--- updateStrategyTable END ---");
 }
 
 /** Resets the entire results area AND the strategy input table */
@@ -554,23 +579,58 @@ function gatherStrategyLegsFromTable() { // Keep name for compatibility
 }
 
 /** Adds a position to the global `strategyPositions` array */
+/** Adds a position to the global `strategyPositions` array */
 function addPosition(strike, type, price, iv) {
     const logger = window.logger || console;
+    logger.debug("--- addPosition START ---", { strike, type, price, iv }); // Log entry
+
     const expiry = document.querySelector(SELECTORS.expiryDropdown)?.value;
-    if (!expiry) { alert("Please select an expiry date first."); return; }
+    if (!expiry) {
+        logger.error("addPosition failed: No expiry selected.");
+        alert("Please select an expiry date first.");
+        return;
+    }
+    logger.debug("Expiry found:", expiry);
+
     const lastPrice = (typeof price === 'number' && !isNaN(price) && price >= 0) ? price : 0;
     const impliedVol = (typeof iv === 'number' && !isNaN(iv) && iv > 0) ? iv : null;
     const dte = calculateDaysToExpiry(expiry);
-    if (impliedVol === null) { logger.warn(`Adding ${type} ${strike} @ ${expiry} without valid IV (${iv}).`); }
+
+    if (impliedVol === null) { logger.warn(`Adding position ${type} ${strike} @ ${expiry} without valid IV.`); }
     if (dte === null) { logger.error(`Could not calculate DTE for ${expiry}.`); alert(`Error: Invalid expiry date.`); return; }
+
     const lotSize = null; // Placeholder
-    const newPosition = { strike_price: strike, expiry_date: expiry, option_type: type, lots: 1, tr_type: 'b', last_price: lastPrice, iv: impliedVol, days_to_expiry: dte, lot_size: lotSize };
-    logger.debug("Constructed newPosition:", JSON.parse(JSON.stringify(newPosition)));
-    logger.debug("strategyPositions BEFORE push:", JSON.parse(JSON.stringify(strategyPositions)));
-    strategyPositions.push(newPosition);
-    logger.debug("strategyPositions AFTER push:", JSON.parse(JSON.stringify(strategyPositions)));
-    logger.info(`Added position (${strategyPositions.length} total):`, {type, strike, price});
-    updateStrategyTable();
+
+    const newPosition = {
+        strike_price: strike, expiry_date: expiry, option_type: type,
+        lots: 1, tr_type: 'b', last_price: lastPrice,
+        iv: impliedVol, days_to_expiry: dte, lot_size: lotSize
+    };
+    logger.debug("Constructed newPosition object:", JSON.parse(JSON.stringify(newPosition)));
+
+    // --- CRITICAL DEBUG AREA ---
+    logger.debug("strategyPositions array BEFORE push:", JSON.parse(JSON.stringify(strategyPositions)));
+    try {
+        strategyPositions.push(newPosition); // Add to the global array
+        logger.debug("strategyPositions array AFTER push:", JSON.parse(JSON.stringify(strategyPositions))); // Check if it grew
+        logger.info(`Successfully pushed position. Total legs: ${strategyPositions.length}`);
+    } catch (e) {
+        logger.error("!!! ERROR DURING strategyPositions.push !!!", e);
+        alert("A critical error occurred while trying to store the position.");
+        return; // Stop if push fails
+    }
+    // --- END CRITICAL DEBUG AREA ---
+
+
+    // Ensure updateStrategyTable exists before calling
+    if(typeof updateStrategyTable === 'function') {
+        logger.debug("Calling updateStrategyTable...");
+        updateStrategyTable(); // Update UI table
+    } else {
+        logger.error("updateStrategyTable function is not defined! Cannot update strategy UI.");
+        alert("Internal Error: Cannot display updated strategy table.");
+    }
+    logger.debug("--- addPosition END ---");
 }
 
 /** Updates the number of lots for a position */
@@ -904,13 +964,58 @@ async function handleExpiryChange() {
 }
 
 /** Handles clicks within the option chain table body */
+/** Handles clicks within the option chain table body */
 function handleOptionChainClick(event) {
-    const targetCell = event.target.closest('td.clickable'); if (!targetCell) return;
+    logger.debug("--- handleOptionChainClick START ---"); // Log start
+    const targetCell = event.target.closest('td.clickable');
+    if (!targetCell) {
+        logger.debug("Click was not on a clickable TD cell. Exiting.");
+        return; // Ignore clicks elsewhere
+    }
+    logger.debug("Clicked Cell:", targetCell);
+
     const row = targetCell.closest('tr');
-    if (!row || row.dataset.strike === undefined || targetCell.dataset.type === undefined || targetCell.dataset.price === undefined) { logger.warn("Missing data attributes on clicked cell."); alert("Could not retrieve option details."); return; }
-    const strike = parseFloat(row.dataset.strike); const type = targetCell.dataset.type; const price = parseFloat(targetCell.dataset.price); const ivString = targetCell.dataset.iv; const iv = (ivString !== null && ivString !== '' && !isNaN(parseFloat(ivString))) ? parseFloat(ivString) : null;
-    if (!isNaN(strike) && type && !isNaN(price)) { logger.debug("Adding position from click:", { strike, type, price, iv }); addPosition(strike, type, price, iv); }
-    else { logger.error('Final parse failed in handleOptionChainClick', { strike, type, price, iv, raw: { strike: row?.dataset.strike, type: targetCell?.dataset.type, price: targetCell?.dataset.price, iv: targetCell?.dataset.iv } }); alert('Error retrieving details.'); }
+    logger.debug("Found Row:", row);
+
+    // Check existence of required data attributes
+    if (!row || row.dataset.strike === undefined || targetCell.dataset.type === undefined || targetCell.dataset.price === undefined) {
+        logger.error("CRITICAL: Missing required data attributes on clicked cell/row.", {
+            rowDataset: row?.dataset,
+            cellDataset: targetCell?.dataset
+        });
+        alert("Could not retrieve necessary option details (strike, type, price). Check console.");
+        return;
+    }
+    logger.debug("All required data attributes found.");
+
+    // Parse values carefully
+    const rawStrike = row.dataset.strike;
+    const rawType = targetCell.dataset.type;
+    const rawPrice = targetCell.dataset.price;
+    const rawIV = targetCell.dataset.iv;
+
+    logger.debug("Raw Data Attributes:", { rawStrike, rawType, rawPrice, rawIV });
+
+    const strike = parseFloat(rawStrike);
+    const type = rawType; // Type is already string 'CE' or 'PE'
+    const price = parseFloat(rawPrice);
+    const iv = (rawIV !== null && rawIV !== '' && !isNaN(parseFloat(rawIV))) ? parseFloat(rawIV) : null;
+
+    logger.debug("Parsed Values:", { strike, type, price, iv });
+
+    // Final validation of parsed numeric values
+    if (!isNaN(strike) && type && !isNaN(price)) {
+         logger.debug("Parsed values seem valid. Calling addPosition...");
+         addPosition(strike, type, price, iv); // Pass potentially null IV
+    } else {
+        // This should ideally not happen if the attributes are set correctly
+        logger.error('Final data parsing failed unexpectedly in handleOptionChainClick', {
+            strike, type, price, iv,
+            raw: { strike: rawStrike, type: rawType, price: rawPrice, iv: rawIV }
+        });
+        alert('An error occurred parsing valid option details after retrieval.');
+    }
+    logger.debug("--- handleOptionChainClick END ---");
 }
 
 /** Handles clicks within the strategy table body */
