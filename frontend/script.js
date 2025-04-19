@@ -571,25 +571,34 @@ function gatherStrategyLegsFromTable() { // Keep name for compatibility
 /** Adds a position to the global `strategyPositions` array */
 /** Adds a position to the global `strategyPositions` array */
 function addPosition(strike, type, price, iv) {
-    // ... (initial checks for expiry, dte etc.) ...
-    const newPosition = { /* ... create the object ... */ };
-    logger.debug("Constructed newPosition:", JSON.parse(JSON.stringify(newPosition)));
+    logger.debug("--- addPosition START ---", { strike, type, price, iv });
+    const expiry = document.querySelector(SELECTORS.expiryDropdown)?.value;
+    if (!expiry) { logger.error("addPosition failed: No expiry."); alert("Select expiry first."); return; }
 
-    // --- CRITICAL DEBUG AREA ---
+    const lastPrice = (typeof price === 'number' && !isNaN(price) && price >= 0) ? price : 0;
+    const impliedVol = (typeof iv === 'number' && !isNaN(iv) && iv > 0) ? iv : null; // IV must be positive number or null
+    const dte = calculateDaysToExpiry(expiry);
+
+    if (impliedVol === null) { logger.warn(`Adding position ${type} ${strike} @ ${expiry} without valid IV (${iv}).`); }
+    if (dte === null) { logger.error(`Could not calculate DTE for ${expiry}.`); alert(`Error: Invalid expiry date.`); return; }
+
+    const lotSize = null; // Placeholder - fetch later if needed
+
+    const newPosition = {
+        strike_price: strike, expiry_date: expiry, option_type: type,
+        lots: 1, tr_type: 'b', last_price: lastPrice,
+        iv: impliedVol, days_to_expiry: dte, lot_size: lotSize
+    };
+    logger.debug("Constructed newPosition:", JSON.parse(JSON.stringify(newPosition)));
     logger.debug("strategyPositions BEFORE push:", JSON.parse(JSON.stringify(strategyPositions)));
     try {
-        strategyPositions.push(newPosition); // THE CORE ACTION
-        logger.debug("strategyPositions AFTER push:", JSON.parse(JSON.stringify(strategyPositions))); // Check if it changed
-        logger.info(`Pushed position. New array length: ${strategyPositions.length}`);
-    } catch (e) {
-        logger.error("!!! ERROR DURING strategyPositions.push !!!", e); return;
-    }
-    // --- END CRITICAL DEBUG AREA ---
+        strategyPositions.push(newPosition);
+        logger.debug("strategyPositions AFTER push:", JSON.parse(JSON.stringify(strategyPositions)));
+        logger.info(`Position added. Total: ${strategyPositions.length}`);
+    } catch (e) { logger.error("ERROR during strategyPositions.push!", e); alert("Critical error storing position."); return; }
 
-    if (typeof updateStrategyTable === 'function') {
-        logger.debug("Calling updateStrategyTable...");
-        updateStrategyTable();
-    } else { /* error */ }
+    if (typeof updateStrategyTable === 'function') { logger.debug("Calling updateStrategyTable..."); updateStrategyTable(); }
+    else { logger.error("updateStrategyTable missing!"); alert("Internal Error: Cannot update strategy table."); }
     logger.debug("--- addPosition END ---");
 }
 
@@ -649,22 +658,37 @@ function triggerATMScroll(tbodyElement, atmKeyToUse) {
     setTimeout(() => {
         try {
             const numericATMStrike = parseFloat(atmKeyToUse);
-            logger.debug(`Scroll Timeout: Finding ATM row data-strike="${numericATMStrike}". Tbody valid:`, tbodyElement instanceof HTMLElement);
+            logger.debug(`Scroll Timeout: Finding ATM row data-strike="${numericATMStrike}". Tbody valid: ${tbodyElement instanceof HTMLElement}`);
             if (isNaN(numericATMStrike) || !(tbodyElement instanceof HTMLElement)) { logger.warn(`Invalid ATM key or tbody for scroll.`); return; }
+
+            // *** Key Fix: Query using the precise numeric value ***
             let atmRow = tbodyElement.querySelector(`tr[data-strike="${numericATMStrike}"]`);
-            if (!atmRow) { logger.debug(`Numeric match failed, trying key: ${atmKeyToUse}`); atmRow = tbodyElement.querySelector(`tr[data-strike-key="${atmKeyToUse}"]`); }
+
+            // Fallback to key if numeric match fails (less common now but safe)
             if (!atmRow) {
-                // Optional: Find closest if exact match fails (use with caution)
-                logger.debug(`Exact match failed, checking closest.`); const allRows = tbodyElement.querySelectorAll('tr[data-strike]'); let closestRow = null; let closestDiff = Infinity;
-                allRows.forEach(row => { const rowStrike = parseFloat(row.dataset.strike); if (!isNaN(rowStrike)) { const diff = Math.abs(rowStrike - numericATMStrike); if (diff < closestDiff) { closestDiff = diff; closestRow = row; } } });
-                if (closestRow && closestDiff < 0.01) { logger.debug(`Using closest match (diff ${closestDiff})`); atmRow = closestRow; }
+                logger.debug(`Numeric match failed, trying key: ${atmKeyToUse}`);
+                atmRow = tbodyElement.querySelector(`tr[data-strike-key="${atmKeyToUse}"]`);
             }
+
+            // Optional: Add closest match fallback if needed (commented out for now)
+            /*
+            if (!atmRow) {
+                // ... closest match logic ...
+            }
+            */
+
             if (atmRow) {
-                atmRow.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" }); logger.debug(`Scrolled to ATM: ${atmRow.dataset.strike}`);
-                atmRow.classList.add("highlight-atm"); setTimeout(() => { if (atmRow?.parentNode) atmRow.classList.remove("highlight-atm"); }, 2000);
-            } else { logger.warn(`ATM row (${atmKeyToUse} / ${numericATMStrike}) not found for scroll.`); }
+                logger.debug(`ATM Row Found:`, atmRow); // Log the found row
+                atmRow.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+                logger.debug(`Scrolled to ATM strike row: ${atmRow.dataset.strike}`);
+                atmRow.classList.add("highlight-atm"); setTimeout(() => { if(atmRow?.parentNode) atmRow.classList.remove("highlight-atm"); }, 2000);
+            } else {
+                // Log rows present if ATM not found
+                const rowsPresent = Array.from(tbodyElement.querySelectorAll('tr[data-strike]')).map(r => r.dataset.strike).join(', ');
+                logger.warn(`ATM row for key (${atmKeyToUse} / ${numericATMStrike}) not found for scrolling. Rows found: [${rowsPresent}]`);
+            }
         } catch (e) { logger.error("Error inside scroll timeout:", e); }
-    }, 250);
+    }, 350); // Increased delay slightly to ensure DOM is ready
 }
 
 /** Fetches and displays the spot price */
@@ -688,36 +712,87 @@ async function fetchNiftyPrice(asset, isRefresh = false) {
 
 /** Fetches and displays the option chain */
 async function fetchOptionChain(scrollToATM = false, isRefresh = false) {
-    const asset = activeAsset; const expiry = document.querySelector(SELECTORS.expiryDropdown)?.value;
+    const asset = activeAsset;
+    const expiry = document.querySelector(SELECTORS.expiryDropdown)?.value;
     const optionChainTable = document.getElementById('optionChainTable');
-    if (!optionChainTable) { logger.error("#optionChainTable not found."); return; }
-    let targetTbody = optionChainTable.querySelector('tbody'); // Find current/target tbody
-    if (!asset || !expiry) { if (targetTbody) { targetTbody.innerHTML = `<tr><td colspan="7" class="placeholder-text">Select Asset & Expiry</td></tr>`; if (!isRefresh) setElementState(targetTbody, 'content'); } previousOptionChainData = {}; return; }
-    if (!isRefresh && targetTbody) { setElementState(targetTbody, 'loading', 'Loading Chain...'); }
-    else if (!isRefresh && !targetTbody) { targetTbody = document.createElement('tbody'); optionChainTable.appendChild(targetTbody); setElementState(targetTbody, 'loading', 'Loading Chain...'); logger.warn("Initial tbody created."); }
+
+    if (!optionChainTable) { logger.error("Option chain table element not found."); return; }
+    let targetTbody = optionChainTable.querySelector('tbody');
+
+    if (!asset || !expiry) {
+        if (targetTbody) { targetTbody.innerHTML = `<tr><td colspan="7" class="placeholder-text">Select Asset & Expiry</td></tr>`; if (!isRefresh) setElementState(targetTbody, 'content'); }
+        previousOptionChainData = {}; return;
+    }
+
+    if (!isRefresh) {
+        if (!targetTbody) { targetTbody = document.createElement('tbody'); optionChainTable.appendChild(targetTbody); logger.warn("Created tbody for loading state."); }
+        setElementState(targetTbody, 'loading', 'Loading Chain...');
+    }
+
     try {
-        if (currentSpotPrice <= 0 && scrollToATM && !isRefresh) { logger.info("Fetching spot for ATM scroll..."); try { await fetchNiftyPrice(asset); } catch (spotError) { /* Ignore */ } if (currentSpotPrice <= 0) { logger.warn("Spot unavailable, cannot calc ATM."); scrollToATM = false; } }
-        const data = await fetchAPI(`/get_option_chain?asset=${encodeURIComponent(asset)}&expiry=${encodeURIComponent(expiry)}`); const currentChainData = data?.option_chain;
-        if (!currentChainData || typeof currentChainData !== 'object' || Object.keys(currentChainData).length === 0) {
-            logger.warn(`No chain data for ${asset}/${expiry}.`); if (targetTbody) { targetTbody.innerHTML = `<tr><td colspan="7" class="placeholder-text">No chain data found</td></tr>`; if (!isRefresh) setElementState(targetTbody, 'content'); } previousOptionChainData = {}; return;
+        if (currentSpotPrice <= 0 && scrollToATM && !isRefresh) {
+            logger.info("Spot price needed for ATM scroll, fetching...");
+            try { await fetchNiftyPrice(asset); } catch (e) { /* Logged by fetchNiftyPrice */ }
+            if (currentSpotPrice <= 0) { logger.warn("Spot unavailable, cannot calc ATM."); scrollToATM = false; }
         }
-        const strikeStringKeys = Object.keys(currentChainData).sort((a, b) => Number(a) - Number(b)); const atmStrikeObjectKey = currentSpotPrice > 0 ? findATMStrikeAsStringKey(strikeStringKeys, currentSpotPrice) : null;
+
+        const data = await fetchAPI(`/get_option_chain?asset=${encodeURIComponent(asset)}&expiry=${encodeURIComponent(expiry)}`);
+        const currentChainData = data?.option_chain;
+
+        if (!currentChainData || typeof currentChainData !== 'object' || Object.keys(currentChainData).length === 0) {
+            logger.warn(`No chain data for ${asset}/${expiry}.`);
+            const errorTbody = optionChainTable.querySelector('tbody');
+            if (errorTbody) { errorTbody.innerHTML = `<tr><td colspan="7" class="placeholder-text">No chain data found</td></tr>`; if (!isRefresh) setElementState(errorTbody, 'content'); }
+            previousOptionChainData = {}; return;
+        }
+
+        const strikeStringKeys = Object.keys(currentChainData).sort((a, b) => Number(a) - Number(b));
+        const atmStrikeObjectKey = currentSpotPrice > 0 ? findATMStrikeAsStringKey(strikeStringKeys, currentSpotPrice) : null;
         const newTbody = document.createElement('tbody');
+
         strikeStringKeys.forEach((strikeStringKey) => {
-            const optionData = currentChainData[strikeStringKey] || {}; const call = optionData.call || {}; const put = optionData.put || {}; const strikeNumericValue = parseFloat(strikeStringKey); if (isNaN(strikeNumericValue)) return;
-            const prevOptionData = previousOptionChainData[strikeStringKey] || {}; const prevCall = prevOptionData.call || {}; const prevPut = prevOptionData.put || {};
-            const tr = newTbody.insertRow(); tr.dataset.strike = strikeNumericValue; tr.dataset.strikeKey = strikeStringKey; if (atmStrikeObjectKey === strikeStringKey) tr.classList.add("atm-strike");
+            const optionData = currentChainData[strikeStringKey] || {};
+            const call = optionData.call || {}; const put = optionData.put || {};
+            const strikeNumericValue = parseFloat(strikeStringKey);
+            if (isNaN(strikeNumericValue)) { logger.warn(`Skipping non-numeric strike key: ${strikeStringKey}`); return; }
+
+            const prevOptionData = previousOptionChainData[strikeStringKey] || {};
+            const prevCall = prevOptionData.call || {}; const prevPut = prevOptionData.put || {};
+
+            const tr = newTbody.insertRow();
+            // *** Key Fix for ATM Scroll: Set data-strike reliably ***
+            tr.dataset.strike = strikeNumericValue; // Use the precise numeric value
+            tr.dataset.strikeKey = strikeStringKey; // Keep original key if needed
+
+            if (atmStrikeObjectKey === strikeStringKey) tr.classList.add("atm-strike");
+
             const columns = [
                 { class: 'call clickable price', type: 'CE', dataKey: 'last_price', format: val => formatNumber(val, 2, '-') }, { class: 'call oi', dataKey: 'open_interest', format: val => formatNumber(val, 0, '-') }, { class: 'call iv', dataKey: 'implied_volatility', format: val => `${formatNumber(val, 2, '-')} %` },
                 { class: 'strike', isStrike: true, format: val => formatNumber(val, val % 1 === 0 ? 0 : 2) },
                 { class: 'put iv', dataKey: 'implied_volatility', format: val => `${formatNumber(val, 2, '-')} %` }, { class: 'put oi', dataKey: 'open_interest', format: val => formatNumber(val, 0, '-') }, { class: 'put clickable price', type: 'PE', dataKey: 'last_price', format: val => formatNumber(val, 2, '-') },
             ];
+
             columns.forEach(col => {
                 try {
-                    const td = tr.insertCell(); td.className = col.class; let currentValue; let sourceObj = null; let prevDataObject = null;
-                    if (col.isStrike) { currentValue = strikeNumericValue; } else { sourceObj = col.class.includes('call') ? call : put; prevDataObject = col.class.includes('call') ? prevCall : prevPut; currentValue = sourceObj?.[col.dataKey]; }
+                    const td = tr.insertCell(); td.className = col.class;
+                    let currentValue; let sourceObj = null; let prevDataObject = null;
+                    if (col.isStrike) { currentValue = strikeNumericValue; }
+                    else { sourceObj = col.class.includes('call') ? call : put; prevDataObject = col.class.includes('call') ? prevCall : prevPut; currentValue = sourceObj?.[col.dataKey]; }
                     td.textContent = col.format(currentValue);
-                    if (col.type && sourceObj) { td.dataset.type = col.type; td.dataset.price = String(sourceObj['last_price'] ?? '0'); const ivValue = sourceObj['implied_volatility']; td.dataset.iv = (ivValue != null) ? String(ivValue) : ''; }
+
+                    // *** Key Fix for Adding Positions: Set data-* attributes robustly ***
+                    if (col.type && sourceObj) {
+                        td.dataset.type = col.type;
+                        // Ensure price is a string '0' if missing/null/undefined
+                        td.dataset.price = String(sourceObj['last_price'] ?? '0');
+                        // Ensure IV is an empty string '' if missing/null/undefined
+                        const ivValue = sourceObj['implied_volatility'];
+                        td.dataset.iv = (ivValue !== null && ivValue !== undefined) ? String(ivValue) : '';
+                        // Log the attributes being set for debugging
+                        // logger.debug(`Set data on TD: type=${td.dataset.type}, price=${td.dataset.price}, iv=${td.dataset.iv}`);
+                    }
+
+                    // Highlighting logic (Improved comparison)
                     if (isRefresh && !col.isStrike && prevDataObject) {
                         let previousValue = prevDataObject[col.dataKey]; let changed = false; const currentExists = currentValue != null; const previousExists = previousValue != null;
                         if (currentExists && previousExists) { changed = (typeof currentValue === 'number' && typeof previousValue === 'number') ? Math.abs(currentValue - previousValue) > 0.001 : String(col.format(currentValue)) !== String(col.format(previousValue)); }
@@ -726,13 +801,25 @@ async function fetchOptionChain(scrollToATM = false, isRefresh = false) {
                 } catch (cellError) { logger.error(`Error cell ${strikeStringKey}/${col.dataKey}:`, cellError); const errorTd = tr.insertCell(); errorTd.textContent = 'ERR'; errorTd.className = col.class + ' error-message'; }
             });
         });
-        const oldTbody = optionChainTable.querySelector('tbody'); if (oldTbody) { optionChainTable.replaceChild(newTbody, oldTbody); } else { logger.warn("Old tbody not found, appending new."); optionChainTable.appendChild(newTbody); }
-        if (!isRefresh) { setElementState(newTbody, 'content'); } previousOptionChainData = currentChainData;
-        if (scrollToATM && atmStrikeObjectKey !== null && !isRefresh) { triggerATMScroll(newTbody, atmStrikeObjectKey); }
+
+        const oldTbody = optionChainTable.querySelector('tbody');
+        if (oldTbody) { optionChainTable.replaceChild(newTbody, oldTbody); }
+        else { logger.warn("Old tbody not found, appending new."); optionChainTable.appendChild(newTbody); }
+
+        if (!isRefresh) { setElementState(newTbody, 'content'); }
+        previousOptionChainData = currentChainData;
+
+        if (scrollToATM && atmStrikeObjectKey !== null && !isRefresh) {
+             // *** Pass the correct tbody (newTbody) to the scroll function ***
+             triggerATMScroll(newTbody, atmStrikeObjectKey);
+        }
+
     } catch (error) {
-        logger.error(`Error fetchOptionChain ${asset}/${expiry}:`, error); const errorTbody = optionChainTable.querySelector('tbody');
+        logger.error(`Error fetchOptionChain ${asset}/${expiry}:`, error);
+        const errorTbody = optionChainTable.querySelector('tbody');
         if (errorTbody) { errorTbody.innerHTML = `<tr><td colspan="7" class="error-message">Chain Error: ${error.message}</td></tr>`; if (!isRefresh) setElementState(errorTbody, 'error'); }
-        if (isRefresh) { logger.warn(`Chain refresh failed: ${error.message}`); } previousOptionChainData = {};
+        if (isRefresh) { logger.warn(`Chain refresh failed: ${error.message}`); }
+        previousOptionChainData = {};
     }
 }
 
@@ -924,40 +1011,44 @@ async function handleExpiryChange() {
 }
 
 /** Handles clicks within the option chain table body */
-/** Handles clicks within the option chain table body */
 function handleOptionChainClick(event) {
-    logger.debug("--- handleOptionChainClick START ---"); // Check if it runs
+    logger.debug("--- handleOptionChainClick START ---");
     const targetCell = event.target.closest('td.clickable');
-    if (!targetCell) {
-        logger.debug("Click not on clickable cell.");
-        return;
-    }
+    if (!targetCell) { logger.debug("Click not on clickable cell."); return; }
     const row = targetCell.closest('tr');
 
-    // --- DEBUG: Log the raw datasets ---
     logger.debug("Clicked Cell Dataset:", JSON.stringify(targetCell.dataset));
-    logger.debug("Clicked Row Dataset:", JSON.stringify(row?.dataset)); // Use optional chaining
+    logger.debug("Clicked Row Dataset:", JSON.stringify(row?.dataset));
 
-    if (!row || row.dataset.strike === undefined || targetCell.dataset.type === undefined || targetCell.dataset.price === undefined) {
-        logger.error("MISSING Data Attributes!"); // Highlight missing attributes
+    // *** Key Fix: Check attributes more carefully ***
+    if (!row || row.dataset.strike === undefined || targetCell.dataset.type === undefined || targetCell.dataset.price === undefined /* IV is optional */) {
+        logger.error("MISSING Data Attributes on cell/row!");
         alert("Error: Could not read option details from table cell.");
         return;
     }
-    // ... rest of the extraction logic ...
-    const strike = parseFloat(row.dataset.strike);
-    const type = targetCell.dataset.type;
-    const price = parseFloat(targetCell.dataset.price);
-    const ivString = targetCell.dataset.iv;
-    const iv = (ivString !== null && ivString !== '' && !isNaN(parseFloat(ivString))) ? parseFloat(ivString) : null;
 
-    // --- DEBUG: Log parsed values ---
+    const rawStrike = row.dataset.strike;
+    const rawType = targetCell.dataset.type;
+    const rawPrice = targetCell.dataset.price;
+    const rawIV = targetCell.dataset.iv; // Might be empty string ''
+
+    logger.debug("Raw Data Attributes:", { rawStrike, rawType, rawPrice, rawIV });
+
+    // Parse values, handle potential NaN
+    const strike = parseFloat(rawStrike);
+    const type = rawType; // Should be 'CE' or 'PE'
+    const price = parseFloat(rawPrice); // Should parse '0' correctly
+    // Parse IV only if rawIV is not null/empty and is a valid number representation
+    const iv = (rawIV && !isNaN(parseFloat(rawIV))) ? parseFloat(rawIV) : null;
+
     logger.debug("Parsed Values:", { strike, type, price, iv });
 
-    if (!isNaN(strike) && type && !isNaN(price)) {
-         logger.debug("Values seem valid, calling addPosition...");
-         addPosition(strike, type, price, iv);
+    // Final validation
+    if (!isNaN(strike) && (type === 'CE' || type === 'PE') && !isNaN(price)) {
+         logger.debug("Values valid, calling addPosition...");
+         addPosition(strike, type, price, iv); // IV can be null here
     } else {
-        logger.error('Final parsing failed!', { strike, type, price, iv });
+        logger.error('Final data parsing failed!', { strike, type, price, iv });
         alert('Error parsing retrieved option details.');
     }
     logger.debug("--- handleOptionChainClick END ---");
