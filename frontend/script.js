@@ -1160,32 +1160,38 @@ function renderNews(containerElement, newsData) {
 /** Handles clicks within the option chain table body */
 function handleOptionChainClick(event) {
     const targetCell = event.target.closest('td.clickable'); // Target only clickable cells
-    if (!targetCell) return; // Ignore clicks elsewhere
+    if (!targetCell) return;
 
     const row = targetCell.closest('tr');
-    // Ensure row and necessary data attributes exist
-    if (!row || !row.dataset.strike || !targetCell.dataset.type || !targetCell.dataset.price) {
+    // --- FIX: Check dataset more robustly ---
+    if (!row || !row.dataset.strike || !targetCell.dataset.type || targetCell.dataset.price === undefined) { // Check price existence
         logger.warn("Could not get required data from clicked option cell.", { rowDataset: row?.dataset, cellDataset: targetCell?.dataset });
         alert("Could not retrieve necessary option details (strike, type, price).");
         return;
     }
 
+    // --- FIX: Parse numeric values carefully ---
     const strike = parseFloat(row.dataset.strike);
     const type = targetCell.dataset.type; // 'CE' or 'PE'
-    // Safely parse price, default to 0 if invalid/missing (though check above should prevent)
-    const price = parseFloat(targetCell.dataset.price ?? '0');
-    // Safely parse IV, default to null if invalid/missing/empty string
-    const ivString = targetCell.dataset.iv;
-    const iv = (ivString && !isNaN(parseFloat(ivString))) ? parseFloat(ivString) : null;
+    const price = parseFloat(targetCell.dataset.price); // Already defaults to '0' string if null
+    const ivString = targetCell.dataset.iv; // Can be empty string
+    const iv = (ivString && ivString !== '' && !isNaN(parseFloat(ivString))) ? parseFloat(ivString) : null;
 
+    // --- FIX: Check parsed values are valid numbers (except IV which can be null) ---
     if (!isNaN(strike) && type && !isNaN(price)) {
+         logger.debug("Adding position from click:", { strike, type, price, iv }); // Log data being passed
          addPosition(strike, type, price, iv); // Pass potentially null IV
     } else {
-        // This case should be rare due to checks above
-        logger.error('Data parsing failed AFTER initial check in handleOptionChainClick', { strike, type, price, iv });
-        alert('An error occurred retrieving option details.');
+        logger.error('Data parsing failed AFTER initial check in handleOptionChainClick', {
+            rawStrike: row?.dataset.strike, strike,
+            rawType: targetCell?.dataset.type, type,
+            rawPrice: targetCell?.dataset.price, price,
+            rawIV: targetCell?.dataset.iv, iv
+        });
+        alert('An error occurred retrieving valid option details.');
     }
 }
+
 
 /** Handles clicks within the strategy table body (remove/toggle buttons) */
 function handleStrategyTableClick(event) {
@@ -1219,7 +1225,8 @@ function handleStrategyTableChange(event) {
 // ===============================================================
 
 /** Adds a position (called by handleOptionChainClick) */
-function addPosition(strike, type, price, iv) {
+function addPosition(strike, type, price, iv) { // Added iv parameter
+    const logger = window.logger || console; // Ensure logger is available
     const expiry = document.querySelector(SELECTORS.expiryDropdown)?.value;
     if (!expiry) { alert("Please select an expiry date first."); return; }
 
@@ -1231,35 +1238,38 @@ function addPosition(strike, type, price, iv) {
 
     if (impliedVol === null) {
         logger.warn(`Adding position ${type} ${strike} @ ${expiry} without valid IV (${iv}). Greeks calculation may fail or be inaccurate for this leg.`);
-        // Consider a non-blocking notification instead of alert
-        // showNotification(`Warning: IV missing for ${type} ${strike}. Greeks may be inaccurate.`);
     }
      if (dte === null) {
         logger.error(`Could not calculate Days to Expiry for ${expiry}. Cannot add position.`);
         alert(`Error: Invalid expiry date ${expiry} provided.`);
-        return; // Critical error, stop
+        return;
     }
 
-    // TODO: Fetch Lot Size from backend? Or assume a default?
-    // For now, we'll add it as null and expect the backend/prepare_strategy_data to handle it.
-    const lotSize = null; // Placeholder - Ideally fetch this when asset changes
+    // Placeholder for lot size (needs implementation if required by backend validation)
+    const lotSize = null;
 
     const newPosition = {
         strike_price: strike,
         expiry_date: expiry,
-        option_type: type, // 'CE' or 'PE'
-        lots: 1,           // Default to 1 lot (BUY)
-        tr_type: 'b',      // Default to buy ('b') - This might be redundant if lots dictates it
+        option_type: type,
+        lots: 1,           // Default BUY 1 lot
+        tr_type: 'b',
         last_price: lastPrice,
-        iv: impliedVol,    // Store fetched or null IV
-        days_to_expiry: dte, // Store calculated DTE
-        lot_size: lotSize  // Store lot size (currently null)
+        iv: impliedVol,
+        days_to_expiry: dte,
+        lot_size: lotSize
     };
-    strategyPositions.push(newPosition);
-    updateStrategyTable(); // Update UI
-    logger.info("Added position:", newPosition);
-    // Automatically update chart/calculations after adding a leg?
-    // fetchPayoffChart(); // Uncomment if desired
+
+    // --- FIX: Log BEFORE push and AFTER push ---
+    logger.debug("Constructed newPosition object:", JSON.parse(JSON.stringify(newPosition)));
+    logger.debug("strategyPositions array BEFORE push:", JSON.parse(JSON.stringify(strategyPositions)));
+
+    strategyPositions.push(newPosition); // Add to the global array
+
+    logger.debug("strategyPositions array AFTER push:", JSON.parse(JSON.stringify(strategyPositions)));
+    logger.info(`Added position (${strategyPositions.length} total):`, newPosition);
+
+    updateStrategyTable(); // Update UI table
 }
 
 /** Helper to calculate days to expiry from YYYY-MM-DD string */
@@ -1578,203 +1588,181 @@ function resetResultsUI() {
 // ===============================================================
 
 /** Fetches payoff chart data, metrics, taxes, greeks and triggers rendering */
-async function fetchPayoffChart() {
-    const logger = window.logger || console; // Ensure logger is accessible
-    const updateButton = document.querySelector(SELECTORS.updateChartButton);
+async function fetchOptionChain(scrollToATM = false, isRefresh = false) {
+    const asset = activeAsset; // Use global activeAsset
+    const expiry = document.querySelector(SELECTORS.expiryDropdown)?.value;
+    // --- MODIFICATION: Select the TABLE element, not the tbody directly initially ---
+    const optionChainTable = document.getElementById('optionChainTable'); // Use ID for direct access
 
-    logger.info("--- [fetchPayoffChart] START ---");
-
-    // 1. Get Asset and Strategy Legs
-    const asset = activeAsset;
-    if (!asset) {
-        alert("Please select an asset first.");
-        logger.error("[fetchPayoffChart] Aborted: No active asset.");
-        return;
+    if (!optionChainTable) {
+        logger.error("Option chain table element (#optionChainTable) not found.");
+        return; // Cannot proceed
     }
+    const currentTbody = optionChainTable.querySelector('tbody'); // Find current tbody
 
-    logger.debug("[fetchPayoffChart] Gathering strategy legs...");
-    // Ensure gatherStrategyLegsFromTable is defined
-    if (typeof gatherStrategyLegsFromTable !== 'function') {
-        logger.error("gatherStrategyLegsFromTable function is not defined!");
-        alert("Internal Error: Cannot gather strategy data.");
-        return;
-    }
-    const currentStrategyLegs = gatherStrategyLegsFromTable(); // Use the VALIDATED gather function
-
-    if (!currentStrategyLegs || currentStrategyLegs.length === 0) {
-        logger.warn("[fetchPayoffChart] Aborted: No valid strategy legs found.");
-        // Ensure resetCalculationOutputsUI is defined
-        if (typeof resetCalculationOutputsUI === 'function') {
-            resetCalculationOutputsUI();
-        } else {
-            logger.error("resetCalculationOutputsUI function not defined!");
+    // --- Initial Checks & Loading State ---
+    if (!asset || !expiry) {
+        if (currentTbody) { // Only update if tbody exists
+            currentTbody.innerHTML = `<tr><td colspan="7" class="placeholder-text">Select Asset and Expiry</td></tr>`;
+            if (!isRefresh) setElementState(currentTbody, 'content'); // Use tbody for state
         }
-        alert("Please add strategy legs from the option chain first.");
+        previousOptionChainData = {};
         return;
     }
-    logger.debug(`[fetchPayoffChart] Found ${currentStrategyLegs.length} valid legs.`);
-
-    // 2. Reset OUTPUT UI & Set Loading States
-    logger.debug("[fetchPayoffChart] Resetting output UI sections...");
-    // Ensure resetCalculationOutputsUI is defined
-     if (typeof resetCalculationOutputsUI === 'function') {
-        resetCalculationOutputsUI();
-    } else {
-        logger.error("resetCalculationOutputsUI function not defined!");
-        // Add fallback UI clearing if necessary
+    if (!isRefresh && currentTbody) { // Set loading state on current tbody if it exists
+        setElementState(currentTbody, 'loading', 'Loading Chain...');
+    } else if (!currentTbody && !isRefresh) {
+        // If tbody doesn't exist somehow, maybe create it? Or log error.
+        logger.error("Initial option chain tbody not found during loading state set.");
     }
-    logger.debug("[fetchPayoffChart] Setting loading states...");
-    // Ensure setElementState is defined
-    if (typeof setElementState !== 'function') {
-        logger.error("setElementState function not defined!");
-        return; // Cannot proceed without setting states
-    }
-    setElementState(SELECTORS.payoffChartContainer, 'loading', 'Calculating...');
-    setElementState(SELECTORS.taxInfoContainer, 'loading');
-    setElementState(SELECTORS.greeksTableContainer, 'loading');
-    setElementState(SELECTORS.greeksTable, 'loading');
-    setElementState(SELECTORS.greeksAnalysisSection, 'hidden');
-    setElementState(SELECTORS.metricsList, 'loading');
-    // Ensure displayMetric is defined
-    if (typeof displayMetric === 'function') {
-        displayMetric('...', SELECTORS.maxProfitDisplay);
-        displayMetric('...', SELECTORS.maxLossDisplay);
-        displayMetric('...', SELECTORS.breakevenDisplay);
-        displayMetric('...', SELECTORS.rewardToRiskDisplay);
-        displayMetric('...', SELECTORS.netPremiumDisplay);
-    } else { logger.error("displayMetric function not defined!"); }
-    setElementState(SELECTORS.costBreakdownContainer, 'hidden');
-    setElementState(SELECTORS.warningContainer, 'hidden');
 
-    if (updateButton) updateButton.disabled = true;
 
-    // 3. Prepare Request Data
-    const requestData = { asset: asset, strategy: currentStrategyLegs };
-    logger.debug("[fetchPayoffChart] Final requestData for backend:", JSON.parse(JSON.stringify(requestData)));
-
-    // 4. Fetch API and Handle Response
     try {
-        // Ensure fetchAPI is defined
-        if (typeof fetchAPI !== 'function') throw new Error("fetchAPI function not defined!");
-
-        const data = await fetchAPI('/get_payoff_chart', {
-            method: 'POST', body: JSON.stringify(requestData)
-        });
-        logger.debug("[fetchPayoffChart] Received response data:", JSON.parse(JSON.stringify(data)));
-
-        // 5. Validate Backend Response
-        if (!data || typeof data !== 'object') {
-            throw new Error("Invalid response format received from server.");
+        // --- Ensure Spot Price Available for ATM ---
+        if (currentSpotPrice <= 0 && scrollToATM && !isRefresh) {
+            logger.info("Spot price needed for ATM scroll, attempting fetch...");
+            try { await fetchNiftyPrice(asset); } catch (spotError) { /* Handled by fetchNiftyPrice */ }
+            if (currentSpotPrice <= 0) { logger.warn("Spot price unavailable, cannot calculate ATM strike."); scrollToATM = false; }
         }
-        if (!data.success) {
-             const errorMessage = data.message || "Calculation failed on the server. Check input legs.";
-             logger.error(`[fetchPayoffChart] Backend reported failure: ${errorMessage}`, data);
-             throw new Error(errorMessage);
+
+        // --- Fetch Option Chain Data ---
+        const data = await fetchAPI(`/get_option_chain?asset=${encodeURIComponent(asset)}&expiry=${encodeURIComponent(expiry)}`);
+        const currentChainData = data?.option_chain;
+
+        // --- Handle Empty/Invalid Data ---
+        if (!currentChainData || typeof currentChainData !== 'object' || Object.keys(currentChainData).length === 0) {
+            logger.warn(`No option chain data available for ${asset} on ${expiry}.`);
+             const targetTbody = optionChainTable.querySelector('tbody'); // Re-select tbody
+             if(targetTbody) {
+                 targetTbody.innerHTML = `<tr><td colspan="7" class="placeholder-text">No option chain data found for ${asset} on ${expiry}</td></tr>`;
+                 if (!isRefresh) setElementState(targetTbody, 'content');
+             }
+            previousOptionChainData = {}; // Clear previous data
+            return;
         }
-        logger.debug("[fetchPayoffChart] Backend response indicates success=true.");
 
-        // 6. Render Results
-        logger.debug("[fetchPayoffChart] Rendering results...");
+        // --- Render Table & Handle Highlights ---
+        const strikeStringKeys = Object.keys(currentChainData).sort((a, b) => Number(a) - Number(b));
+        const atmStrikeObjectKey = currentSpotPrice > 0 ? findATMStrikeAsStringKey(strikeStringKeys, currentSpotPrice) : null;
 
-        // Render Metrics & Warnings (ensure displayMetric is defined)
-        const metricsContainerData = data.metrics;
-         if (typeof displayMetric === 'function' && metricsContainerData && metricsContainerData.metrics) {
-            const metrics = metricsContainerData.metrics;
-            displayMetric(metrics.max_profit, SELECTORS.maxProfitDisplay);
-            displayMetric(metrics.max_loss, SELECTORS.maxLossDisplay);
-            const bePoints = Array.isArray(metrics.breakeven_points) ? metrics.breakeven_points.join(' / ') : metrics.breakeven_points;
-            displayMetric(bePoints || 'N/A', SELECTORS.breakevenDisplay);
-            displayMetric(metrics.reward_to_risk_ratio, SELECTORS.rewardToRiskDisplay);
-            displayMetric(metrics.net_premium, SELECTORS.netPremiumDisplay, '', '', 2, true);
-            setElementState(SELECTORS.metricsList, 'content');
+        const newTbody = document.createElement('tbody'); // Build in memory
 
-            const warnings = metrics.warnings;
-            const warningElement = document.querySelector(SELECTORS.warningContainer);
-            if (warningElement && Array.isArray(warnings) && warnings.length > 0) {
-                warningElement.innerHTML = `<strong>Calculation Warnings:</strong><ul>${warnings.map(w => `<li>${w}</li>`).join('')}</ul>`;
-                setElementState(warningElement, 'content'); warningElement.style.display = '';
-            } else if (warningElement) { setElementState(warningElement, 'hidden'); }
-         } else { /* Handle missing metrics - error state set below in catch or here */
-            logger.error("[fetchPayoffChart] Metrics data missing or displayMetric not defined.");
-            setElementState(SELECTORS.metricsList, 'error');
-            // Set individual metrics to Error
-            if(typeof displayMetric === 'function') {
-                displayMetric('Error', SELECTORS.maxProfitDisplay); /* ... and others ... */
+        strikeStringKeys.forEach((strikeStringKey) => {
+            const optionDataForStrike = currentChainData[strikeStringKey];
+            const optionData = (typeof optionDataForStrike === 'object' && optionDataForStrike !== null)
+                                ? optionDataForStrike : { call: null, put: null };
+            const call = optionData.call || {};
+            const put = optionData.put || {};
+            // --- FIX: Ensure strikeNumericValue is a reliable number ---
+            const strikeNumericValue = parseFloat(strikeStringKey);
+            if (isNaN(strikeNumericValue)) {
+                logger.warn(`Skipping row due to non-numeric strike key: ${strikeStringKey}`);
+                return; // Skip this iteration
             }
-         }
 
-        // Render Cost Breakdown (ensure renderCostBreakdown defined)
-        const costBreakdownData = metricsContainerData?.cost_breakdown_per_leg;
-        const breakdownList = document.querySelector(SELECTORS.costBreakdownList);
-        const breakdownContainer = document.querySelector(SELECTORS.costBreakdownContainer);
-        if (typeof renderCostBreakdown === 'function' && breakdownList && breakdownContainer && Array.isArray(costBreakdownData) && costBreakdownData.length > 0) {
-            renderCostBreakdown(breakdownList, costBreakdownData);
-            setElementState(breakdownContainer, 'content'); breakdownContainer.style.display = ''; breakdownContainer.open = false;
-        } else if (breakdownContainer) { setElementState(breakdownContainer, 'hidden'); }
-        else { logger.error("renderCostBreakdown function not defined!"); }
+            const prevOptionData = previousOptionChainData[strikeStringKey] || { call: {}, put: {} };
+            const prevCall = prevOptionData.call || {};
+            const prevPut = prevOptionData.put || {};
 
-        // Render Tax Table (ensure renderTaxTable defined)
-        const taxContainer = document.querySelector(SELECTORS.taxInfoContainer);
-        if (typeof renderTaxTable === 'function' && taxContainer) {
-            if (data.charges) { renderTaxTable(taxContainer, data.charges); setElementState(taxContainer, 'content'); }
-            else { taxContainer.innerHTML = "<p class='placeholder-text'>Charge data unavailable.</p>"; setElementState(taxContainer, 'content'); }
-        } else { logger.error("renderTaxTable function not defined!"); }
+            const tr = newTbody.insertRow();
+            // --- FIX: Set data-strike reliably with the numeric value ---
+            tr.dataset.strike = strikeNumericValue;
+            tr.dataset.strikeKey = strikeStringKey; // Keep original key too
 
+            if (atmStrikeObjectKey !== null && strikeStringKey === atmStrikeObjectKey) {
+                tr.classList.add("atm-strike");
+            }
 
-        // Render Chart (ensure renderPayoffChart defined)
-        const chartContainer = document.querySelector(SELECTORS.payoffChartContainer);
-        const chartDataKey = "chart_figure_json";
-        if (typeof renderPayoffChart === 'function' && chartContainer) {
-            if (data[chartDataKey]) { renderPayoffChart(chartContainer, data[chartDataKey]); }
-            else { setElementState(chartContainer, 'error', 'Chart could not be generated.'); }
-        } else { logger.error("renderPayoffChart function not defined!"); }
+            const columns = [ // Using dataKey for clarity
+                { class: 'call clickable price', type: 'CE', dataKey: 'last_price', format: val => formatNumber(val, 2, '-') },
+                { class: 'call oi', dataKey: 'open_interest', format: val => formatNumber(val, 0, '-') },
+                { class: 'call iv', dataKey: 'implied_volatility', format: val => `${formatNumber(val, 2, '-')} %` },
+                { class: 'strike', isStrike: true, format: val => formatNumber(val, val % 1 === 0 ? 0 : 2) },
+                { class: 'put iv', dataKey: 'implied_volatility', format: val => `${formatNumber(val, 2, '-')} %` },
+                { class: 'put oi', dataKey: 'open_interest', format: val => formatNumber(val, 0, '-') },
+                { class: 'put clickable price', type: 'PE', dataKey: 'last_price', format: val => formatNumber(val, 2, '-') },
+            ];
 
+            columns.forEach(col => {
+                try {
+                    const td = tr.insertCell();
+                    td.className = col.class;
+                    let currentValue;
+                    let sourceObj;
+                    let prevDataObject;
 
-        // Render Greeks Table & Trigger Analysis (ensure renderGreeksTable & fetchAndDisplayGreeksAnalysis defined)
-        const greeksTableElement = document.querySelector(SELECTORS.greeksTable);
-        const greeksSectionElement = document.querySelector(SELECTORS.greeksTableContainer);
-        if (typeof renderGreeksTable === 'function' && typeof fetchAndDisplayGreeksAnalysis === 'function' && greeksTableElement && greeksSectionElement) {
-             if (data.greeks && Array.isArray(data.greeks)) {
-                const calculatedTotals = renderGreeksTable(greeksTableElement, data.greeks);
-                setElementState(greeksSectionElement, 'content');
-                if (calculatedTotals) {
-                    const hasMeaningfulGreeks = Object.values(calculatedTotals).some(v => v !== null && Math.abs(v) > 1e-9);
-                    if (hasMeaningfulGreeks) { fetchAndDisplayGreeksAnalysis(asset, calculatedTotals); }
-                    else { /* Show placeholder for no greeks */
-                        const analysisSection = document.querySelector(SELECTORS.greeksAnalysisSection); const analysisContainer = document.querySelector(SELECTORS.greeksAnalysisResultContainer);
-                        if (analysisSection && analysisContainer) { analysisContainer.innerHTML = '<p class="placeholder-text">No net option exposure to analyze Greeks.</p>'; setElementState(analysisSection, 'content'); setElementState(analysisContainer, 'content'); }
+                    if (col.isStrike) {
+                        currentValue = strikeNumericValue; // Use validated numeric value
+                        sourceObj = null;
+                        prevDataObject = null;
+                    } else {
+                        sourceObj = col.class.includes('call') ? call : put;
+                        prevDataObject = col.class.includes('call') ? prevCall : prevPut;
+                        currentValue = (typeof sourceObj === 'object' && sourceObj !== null) ? sourceObj[col.dataKey] : undefined;
                     }
-                } else { /* Handle null totals */ const greeksAS = document.querySelector(SELECTORS.greeksAnalysisSection); if(greeksAS) setElementState(greeksAS, 'hidden'); }
-             } else { /* handle missing greeks data */ greeksSectionElement.innerHTML = '<h3 class="section-subheader">Options Greeks</h3><p class="placeholder-text">Greeks data not available.</p>'; setElementState(greeksSectionElement, 'content'); const greeksAS = document.querySelector(SELECTORS.greeksAnalysisSection); if(greeksAS) setElementState(greeksAS, 'hidden'); }
-        } else { logger.error("renderGreeksTable or fetchAndDisplayGreeksAnalysis function not defined!"); }
 
-        logger.info("[fetchPayoffChart] Successfully processed and rendered results.");
+                    td.textContent = col.format(currentValue);
 
-    } catch (error) { // Catch errors from fetchAPI or rendering logic
-        logger.error(`[fetchPayoffChart] Error during calculation/rendering: ${error.message}`, error);
-        // Ensure resetCalculationOutputsUI is defined
-        if (typeof resetCalculationOutputsUI === 'function') resetCalculationOutputsUI();
-        let errorMsg = `Calculation Error: ${error.message || 'Failed to process results.'}`;
-        // Ensure setElementState is defined
-        if (typeof setElementState === 'function') {
-            setElementState(SELECTORS.payoffChartContainer, 'error', errorMsg);
-            setElementState(SELECTORS.taxInfoContainer, 'error', 'Error');
-            setElementState(SELECTORS.greeksTableContainer, 'error', 'Error');
-            setElementState(SELECTORS.greeksTable, 'error');
-            setElementState(SELECTORS.metricsList, 'error');
-            // Ensure displayMetric defined before setting error states
-            if (typeof displayMetric === 'function') { /* Set metrics spans to Error */ }
-            setElementState(SELECTORS.greeksAnalysisSection, 'hidden');
-            setElementState(SELECTORS.costBreakdownContainer, 'hidden');
-            setElementState(SELECTORS.warningContainer, 'hidden');
-            setElementState(SELECTORS.globalErrorDisplay, 'error', errorMsg); // Show global error
+                    // Add data attributes for adding positions
+                    if (col.type && typeof sourceObj === 'object' && sourceObj !== null) {
+                        td.dataset.type = col.type;
+                        // --- FIX: Ensure price/IV datasets handle null/undefined safely ---
+                        td.dataset.price = String(sourceObj['last_price'] ?? '0'); // Default to '0' if null/undefined
+                        // Store IV as string or empty, handle null/undefined
+                        const ivValue = sourceObj['implied_volatility'];
+                        td.dataset.iv = (ivValue !== null && ivValue !== undefined) ? String(ivValue) : '';
+                    }
+
+                    // Highlighting Logic (Keep as is, relies on currentValue/previousValue)
+                    if (isRefresh && !col.isStrike && typeof prevDataObject === 'object' && prevDataObject !== null) {
+                        let previousValue = prevDataObject[col.dataKey];
+                        let changed = false;
+                        const currentExists = currentValue !== null && typeof currentValue !== 'undefined';
+                        const previousExists = previousValue !== null && typeof previousValue !== 'undefined';
+                        if (currentExists && previousExists) {
+                            if (typeof currentValue === 'number' && typeof previousValue === 'number') { changed = Math.abs(currentValue - previousValue) > 0.001; }
+                            else { changed = String(currentValue) !== String(previousValue); } // Compare as strings if not numbers
+                        } else if (currentExists !== previousExists) { changed = true; }
+                        if (changed) { highlightElement(td); }
+                    } else if (isRefresh && !col.isStrike && currentValue !== undefined && currentValue !== null && !prevDataObject) {
+                        highlightElement(td);
+                    }
+
+                } catch (cellError) { /* Keep error handling */ }
+            });
+        }); // End strikeStringKeys.forEach
+
+        // --- FIX: Replace Table Body Safely ---
+        const oldTbody = optionChainTable.querySelector('tbody'); // Find the tbody currently in the DOM
+        if (oldTbody) {
+            optionChainTable.replaceChild(newTbody, oldTbody); // Replace using the table as parent
         } else {
-             alert("Critical Error: Cannot update UI state.");
+            // If no tbody exists, just append the new one
+            logger.warn("Old tbody not found during replacement, appending new tbody.");
+            optionChainTable.appendChild(newTbody);
         }
 
-    } finally {
-        if (updateButton) updateButton.disabled = false; // Always re-enable button
-        logger.info("--- [fetchPayoffChart] END ---");
+        if (!isRefresh) {
+             setElementState(newTbody, 'content'); // Set state on the NEW tbody
+        }
+        previousOptionChainData = currentChainData;
+
+        // --- Scroll to ATM (pass the NEW tbody) ---
+        if (scrollToATM && atmStrikeObjectKey !== null && !isRefresh) {
+             triggerATMScroll(newTbody, atmStrikeObjectKey); // Pass newTbody
+        }
+
+    } catch (error) { // Outer catch
+        logger.error(`Error during fetchOptionChain execution for ${asset}/${expiry}:`, error);
+        const targetTbody = optionChainTable.querySelector('tbody'); // Find tbody to display error
+        if (targetTbody) { // Check if tbody exists
+            targetTbody.innerHTML = `<tr><td colspan="7" class="error-message">Chain Error: ${error.message}</td></tr>`;
+            if (!isRefresh) { setElementState(targetTbody, 'error', `Chain Error`); }
+        } else {
+            logger.error("Cannot display chain error message: tbody not found.");
+        }
+        if (isRefresh) { logger.warn(`Option Chain refresh failed: ${error.message}`); }
+        previousOptionChainData = {};
     }
 }
 
