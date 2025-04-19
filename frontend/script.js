@@ -1639,7 +1639,7 @@ function resetResultsUI() {
 // --- Define necessary variables and functions assumed by resetResultsUI ---
 
 // Ensure 'strategyPositions' is declared in a scope accessible by resetResultsUI
-let strategyPositions = [];
+
 
 // Ensure SELECTORS object includes all needed IDs/classes
 const SELECTORS = {
