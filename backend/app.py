@@ -2156,18 +2156,107 @@ def build_stock_analysis_prompt_for_options(
          analyst_formatted = [f"- {r.get('provider','N/A')}: {r.get('rating','N/A')}" + (f" (Target: {fmt(r.get('target_price'))})" if r.get('target_price') is not None else "") + (f" [{r.get('action')}]" if r.get('action') else "") + (f" ({r['date'].strftime('%Y-%m-%d')})" if r.get('date') else "") for r in analyst_ratings]
          analyst_context = "\n".join(analyst_formatted)
 
-
+# ===============================================================
+# 7. Build Analysis Prompt (Updated w/ OptionsPlaybook Link)
+# ===============================================================
     # --- Construct the Structured Prompt (with new instructions) ---
+def build_stock_analysis_prompt_for_options( # <<< FUNCTION NAME RETAINED
+    stock_symbol_display: str,
+    stock_data: Optional[Dict[str, Any]],
+    latest_news: Optional[List[Dict[str, str]]]
+) -> str:
+    """
+    Generates a structured prompt for LLM analysis focused on Option Trader insights.
+    Requires the LLM to start with a specific bias heading, state the net bias,
+    suggest relevant strategy types, and link to OptionsPlaybook.com categories.
+    """
+    func_name = "build_stock_analysis_prompt_for_options" # Using original name for logging
+
+    # --- Handle potentially missing input data (Keep as is) ---
+    if not stock_data:
+        logger.error(f"[{func_name}] Critical error: stock_data is None for {stock_symbol_display}. Cannot build prompt.")
+        return f"Analysis for {stock_symbol_display} failed: Essential stock data is missing."
+    if latest_news is None:
+         logger.warning(f"[{func_name}] Warning: latest_news is None for {stock_symbol_display}. Proceeding without news.")
+         latest_news = [{"headline": "News data not available.", "summary": "", "link": "#"}]
+
+    logger.debug(f"[{func_name}] Building structured options-focused prompt for {stock_symbol_display}")
+
+    # --- Extract Data Safely (Keep as is) ---
+    # ... (keep all data extraction logic: name, price, ma50, etc.) ...
+    name = stock_data.get('name', stock_symbol_display)
+    price = stock_data.get('current_price')
+    prev_close = stock_data.get('previous_close')
+    day_open = stock_data.get('open')
+    day_high = stock_data.get('day_high')
+    day_low = stock_data.get('day_low')
+    ma50 = stock_data.get('moving_avg_50')
+    ma200 = stock_data.get('moving_avg_200')
+    volume = stock_data.get('volume')
+    avg_volume = stock_data.get('average_volume')
+    week_52_high = stock_data.get('fifty_two_week_high')
+    week_52_low = stock_data.get('fifty_two_week_low')
+    market_cap = stock_data.get('market_cap')
+    pe_ratio = stock_data.get('pe_ratio')
+    eps = stock_data.get('eps')
+    sector = stock_data.get('sector')
+    industry = stock_data.get('industry')
+    qtype = stock_data.get('quote_type', 'Unknown')
+    analyst_ratings = stock_data.get('analyst_ratings', [])
+
+    display_title = f"{stock_symbol_display}" + (f" ({name})" if name and name != stock_symbol_display else "")
+    is_index = qtype == 'INDEX'
+
+
+    # --- Prepare Context Strings (Keep as is) ---
+    # ... (keep tech_context, fund_context, news_context, analyst_context calculations) ...
+    # Technical Context Calculation
+    trend = "N/A"; support_str = "N/A"; resistance_str = "N/A"
+    ma_available = ma50 is not None and ma200 is not None and price is not None
+    if ma_available: support_levels = sorted([lvl for lvl in [ma50, ma200] if lvl is not None and lvl < price], reverse=True); resistance_levels = sorted([lvl for lvl in [ma50, ma200] if lvl is not None and lvl >= price]); support_str = " / ".join([fmt(lvl) for lvl in support_levels]) if support_levels else "Below Key MAs"; resistance_str = " / ".join([fmt(lvl) for lvl in resistance_levels]) if resistance_levels else "Above Key MAs"; # Trend description
+    if ma_available:
+        if price > ma50 > ma200: trend = "Strong Uptrend (Price > 50MA > 200MA)"
+        elif price < ma50 < ma200: trend = "Strong Downtrend (Price < 50MA < 200MA)"
+        elif ma50 > price > ma200 : trend = "Sideways/Testing Support (Below 50MA, Above 200MA)"
+        elif ma200 > price > ma50 : trend = "Sideways/Testing Resistance (Below 200MA, Above 50MA) - Caution"
+        elif price > ma50 and price > ma200: trend = "Uptrend (Price > Both MAs)"
+        elif price < ma50 and price < ma200: trend = "Downtrend (Price < Both MAs)"
+        else: trend = "Indeterminate (MAs crossing)"
+    elif price and ma50: trend = "Above 50MA" if price > ma50 else "Below 50MA"; resistance_str = fmt(ma50) if price <= ma50 else "N/A (Above 50MA)"; support_str = fmt(ma50) if price > ma50 else "N/A (Below 50MA)"; resistance_str += " (200MA N/A)"; support_str += " (200MA N/A)"
+    else: trend = "Trend Unknown (MA data insufficient)"
+    # Volume context
+    vol_str = fmt(volume, p='', pr=0, na='N/A'); avg_vol_str = fmt(avg_volume, p='', pr=0, na='N/A'); vol_comment = f"Volume: {vol_str}."
+    if avg_volume is not None and volume is not None and avg_volume > 0: vol_ratio = volume / avg_volume; vol_comment += f" vs Avg: {avg_vol_str} ({'Above' if vol_ratio > 1.2 else 'Below' if vol_ratio < 0.8 else 'Near'})";
+    elif avg_volume is not None: vol_comment += f" Average Volume: {avg_vol_str}."
+    else: vol_comment += f" Average Volume N/A."
+    # Assemble Technical Context
+    tech_context = ( f"Price: {fmt(price)} (Open: {fmt(day_open)}, Day Range: {fmt(day_low)} - {fmt(day_high)}, Prev Close: {fmt(prev_close)}). " f"52wk Range: {fmt(week_52_low)} - {fmt(week_52_high)}. " f"MAs: 50D={fmt(ma50)}, 200D={fmt(ma200)}. " f"{vol_comment} " f"Trend Context: {trend}. " f"Key Levels (from MAs): Support near {support_str}, Resistance near {resistance_str}." )
+    # Fundamental Context String
+    fund_context = ""; pe_comparison_note = "Note: P/E data likely unavailable."
+    if is_index: fund_context = "N/A (Index)"
+    else: fund_context = ( f"Market Cap: {fmt(market_cap, p='', na='N/A')}, P/E: {fmt(pe_ratio, p='', s='x', na='N/A')}, EPS: {fmt(eps, p='', na='N/A')}, Sector: {fmt(sector, p='', na='N/A')}, Industry: {fmt(industry, p='', na='N/A')}" )
+    if pe_ratio is not None: pe_comparison_note = f"Note: P/E ({fmt(pe_ratio, p='', s='x')}) requires context."
+    # News Context String
+    news_formatted = []; is_news_error_or_empty = not latest_news or any(err in latest_news[0].get("headline","").lower() for err in ["error", "no recent", "no relevant", "timeout", "not available"])
+    if not is_news_error_or_empty: news_context = "\n".join([f'- "{n.get("headline","N/A")}" ({n.get("link","#")}): {n.get("summary","N/A").replace("`","").replace("{","(").replace("}",")")}' for n in latest_news[:3]])
+    else: news_context = f"- {latest_news[0].get('headline', 'No recent news summaries available.')}" if latest_news else "- No recent news summaries available."
+    # Analyst Ratings Context
+    analyst_context = "No recent analyst ratings found or fetch failed."
+    if analyst_ratings: analyst_formatted = [f"- {r.get('provider','N/A')}: {r.get('rating','N/A')}" + (f" (Target: {fmt(r.get('target_price'))})" if r.get('target_price') is not None else "") + (f" [{r.get('action')}]" if r.get('action') else "") + (f" ({r['date'].strftime('%Y-%m-%d')})" if r.get('date') else "") for r in analyst_ratings]; analyst_context = "\n".join(analyst_formatted)
+
+    # --- Construct the Structured Prompt (with OptionsPlaybook link instruction) ---
     prompt = f"""
 **IMPORTANT:** Start your response with ONLY ONE of the following Level 2 Markdown headings, reflecting your overall assessment based on the provided data: `## Bullish Outlook`, `## Bearish Outlook`, or `## Neutral Outlook`.
 Immediately after the heading, state the **Net Bias** on a new line, like this: `Net Bias: [Your Bias (e.g., Bullish, Moderately Bearish, Neutral, Range-bound)]`.
 
-Then, provide the detailed analysis for **{display_title}** from the perspective of an **Options Trader**. Use the subsequent headings and bullet points as outlined below. Focus on potential direction, volatility hints, and key levels, while explicitly acknowledging missing options-specific data (like Implied Volatility) and potential gaps in fundamental data from this API source.
+Then, provide the detailed analysis for **{display_title}** from the perspective of an **Options Trader**. Use the subsequent headings and bullet points as outlined below. Focus on potential direction, volatility hints, and key levels. Explicitly acknowledge missing options-specific data (like Implied Volatility) and potential gaps in fundamental data.
+
+**Crucially, in section 5 ("Options Strategy Angle"), suggest 1-2 general strategy types fitting your derived Net Bias and include a relevant general link to OptionsPlaybook.com.**
 
 **Provided Data Snapshots (Source: RapidAPI / Google News):**
 
 *   **Technical Context:** {tech_context}
-*   **Fundamental Context:** {fund_context} (Note: May have data gaps from this API)
+*   **Fundamental Context:** {fund_context} (Note: May have data gaps)
 *   **Analyst Ratings Summary (Max 2 Recent):**
 {analyst_context}
 *   **Recent News Snippets (Max 3):**
@@ -2179,38 +2268,40 @@ Then, provide the detailed analysis for **{display_title}** from the perspective
 **(Remember to place the `## [Bullish/Bearish/Neutral] Outlook` heading and `Net Bias:` statement BEFORE this section)**
 
 1.  **Overall Market Posture & Bias Rationale:**
-    *   *Explain* the reasoning behind the **Net Bias** you stated above, synthesizing the technical trend, price action vs MAs, volume, news sentiment, and analyst ratings.
-    *   Comment on potential **Volatility Hints** (e.g., Is news suggesting an event? Price near 52wk extremes? High volume move?). Acknowledge actual IV data is missing.
+    *   *Explain* the reasoning behind the **Net Bias** you stated above, synthesizing technicals (trend, MAs, price action), volume, news, and analyst ratings.
+    *   Comment on potential **Volatility Hints** (News? Extremes? Volume?). Acknowledge IV data is missing.
 
 2.  **Key Technical Levels & Observations:**
-    *   **Support & Resistance:** Reiterate key potential support/resistance levels based *only* on the provided MAs, 52-week levels, and recent day's range.
-    *   **Trend Strength & Volume:** Comment on the trend's conviction. Is volume confirming the price move or diverging? Is the price extended from MAs or consolidating near them?
-    *   **Significant Price Zones:** Note if the current price is near the 52-week high/low, suggesting potential breakout or breakdown zones relevant for strike selection.
+    *   **Support & Resistance:** Reiterate key levels based *only* on provided MAs, 52-week range, and recent day's range.
+    *   **Trend Strength & Volume:** Comment on trend conviction. Is volume confirming or diverging? Is price extended or consolidating?
+    *   **Significant Price Zones:** Note if near 52-week high/low relevant for potential breakouts/downs.
 
 3.  **News & Analyst Sentiment Impact:**
-    *   **Sentiment:** Elaborate on the assessed sentiment (Positive, Negative, Neutral, Mixed, N/A) from the combined news and analyst data.
-    *   **Volatility/Catalyst Potential:** How might this news or analyst action potentially influence near-term price **volatility** (increase or decrease uncertainty) or act as a catalyst?
+    *   **Sentiment:** Elaborate on combined sentiment (Positive, Negative, Neutral, Mixed, N/A).
+    *   **Volatility/Catalyst Potential:** How might news/analyst action influence volatility or act as catalysts?
 
 4.  **Fundamental Considerations (if applicable):**
-    *   Briefly explain if the available fundamentals provide any notable context (e.g., valuation hints, sector trends) or risk indication. {pe_comparison_note} State if N/A for index or data missing.
+    *   Briefly explain if available fundamentals provide context (valuation hints, sector trends) or risk indication. {pe_comparison_note} State if N/A for index or data missing.
 
 5.  **Options Strategy Angle & Considerations (Based on Net Bias):**
     *   **CRITICAL CAVEAT:** State clearly: "**Implied Volatility (IV) data is MISSING.** IV is crucial for option pricing and strategy selection. The following are *general conceptual ideas only* based on the derived directional bias and ignore the current IV environment."
-    *   **General Strategy Types (Conceptual):**
-        *   *If Net Bias is Bullish:* Suggest considering strategies like Long Calls, Bull Call Spreads, or Put Credit Spreads. Mention suitability depends on conviction and desired risk/reward.
-        *   *If Net Bias is Bearish:* Suggest considering strategies like Long Puts, Bear Put Spreads, or Call Credit Spreads. Mention suitability depends on conviction.
-        *   *If Net Bias is Neutral/Range-Bound:* Suggest considering strategies like Iron Condors, Iron Butterflies, or Calendar Spreads. Mention aim is typically to profit from time decay if price stays stable.
-        *   *If Bias is Uncertain/Expecting High Volatility (Less Common based on instructions):* Briefly mention Long Straddles/Strangles as high-risk plays IF high volatility is strongly suspected from context (e.g., major news pending), but reiterate high cost and need for significant move.
-    *   **Key Factors Ignored:** Remind the user that this analysis **ignores IV, risk tolerance, specific expiry selection, strike selection, option liquidity, and time decay (theta) implications**, all critical for actual trading.
+    *   **General Strategy Types & Link:**
+        *   *Based on your derived Net Bias*, suggest **one or two appropriate conceptual strategy types** (e.g., "Long Call / Bull Call Spread", "Iron Condor", "Long Put / Bear Put Spread").
+        *   **Then, provide ONE relevant general link from the list below corresponding to your Net Bias:**
+            *   If Bullish: Learn more about bullish strategies: https://www.optionsplaybook.com/option-strategies/#bullish-strategies
+            *   If Bearish: Learn more about bearish strategies: https://www.optionsplaybook.com/option-strategies/#bearish-strategies
+            *   If Neutral/Range-Bound: Learn more about neutral strategies: https://www.optionsplaybook.com/option-strategies/#neutral-strategies
+            *   (Do not link if bias is very uncertain).
+    *   **Key Factors Ignored:** Remind the user that this analysis **ignores IV, risk tolerance, specific expiry/strike selection, option liquidity, and theta implications.**
 
 6.  **Identified Risks & Data Limitations:**
-    *   Summarize key risks suggested *only* by the provided data (e.g., Price below key MAs, negative news/analyst rating, technical divergence, 52wk low proximity).
-    *   Explicitly list major **Data Limitations**: **No Implied Volatility (IV), No Historical Volatility (HV), No Option Chain Data (Greeks, OI, Volume), No Upcoming Event Calendar, Potential gaps in Fundamental data (P/E, EPS, Sector likely missing).**
+    *   Summarize risks suggested *only* by the provided data (e.g., Price vs MAs, negative news/ratings, divergence, 52wk proximity).
+    *   Explicitly list major **Data Limitations**: **No Implied Volatility (IV), No Historical Volatility (HV), No Option Chain Data (Greeks, OI, Volume), No Event Calendar, Potential gaps in Fundamental data.**
 
 ---
-**Disclaimer:** This analysis is auto-generated based on limited data. It is NOT financial advice. Data accuracy depends on sources. Crucial options data (IV) and potentially key fundamental data are missing. Always conduct thorough independent research, understand risks, consider your risk tolerance, and consult a qualified financial advisor before trading. Market conditions are dynamic.
+**Disclaimer:** This analysis is auto-generated based on limited data. It is NOT financial advice. Data accuracy depends on sources. Crucial options data (IV) and potentially key fundamental data are missing. Always conduct independent research, understand risks, consider your risk tolerance, and consult a qualified financial advisor before trading. Market conditions are dynamic.
 """
-    logger.debug(f"[{func_name}] Generated options-focused prompt for {stock_symbol_display} (v2 - specific heading)")
+    logger.debug(f"[{func_name}] Generated options-focused prompt for {stock_symbol_display} (v3 - OptionsPlaybook link)")
     return prompt
 
         
