@@ -322,10 +322,115 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 async function initializePage() {
-    logger.info("Initializing page data...");
-    resetResultsUI(); // Start with clean results area
-    await loadAssets(); // This will trigger subsequent data loads
+    logger.info("Initializing page: Setting loading states...");
+    // Set initial loading states for everything that gets loaded eventually
+    setElementState(SELECTORS.assetDropdown, 'loading');
+    setElementState(SELECTORS.expiryDropdown, 'loading');
+    setElementState(SELECTORS.optionChainTableBody, 'loading');
+    setElementState(SELECTORS.analysisResultContainer, 'loading'); // Loading initially
+    setElementState(SELECTORS.newsResultContainer, 'loading');     // Loading initially
+    setElementState(SELECTORS.spotPriceDisplay, 'loading', 'Spot Price: ...');
+
+    resetResultsUI(); // Reset all result areas initially (clears strategy too)
+    setupEventListeners(); // Setup button clicks, dropdown changes etc.
+
+    try {
+        // Load assets into dropdown and get the default asset value
+        const defaultAsset = await loadAssets(); // loadAssets now returns the default asset
+
+        if (defaultAsset) {
+            logger.info(`Fetching initial News & Analysis for default asset: ${defaultAsset}`);
+            // Set loading states specifically for news/analysis before fetching
+             setElementState(SELECTORS.analysisResultContainer, 'loading', 'Loading analysis...');
+             setElementState(SELECTORS.newsResultContainer, 'loading', 'Loading news...');
+
+             // Fetch initial News & Analysis concurrently
+             const initialFetches = await Promise.allSettled([
+                 fetchAnalysis(defaultAsset),
+                 fetchNews(defaultAsset)
+             ]);
+
+             // Log initial fetch errors (handled within fetch functions visually)
+             if (initialFetches[0].status === 'rejected') {
+                 logger.error(`Initial analysis fetch failed: ${initialFetches[0].reason?.message || initialFetches[0].reason}`);
+             }
+             if (initialFetches[1].status === 'rejected') {
+                 logger.error(`Initial news fetch failed: ${initialFetches[1].reason?.message || initialFetches[1].reason}`);
+             }
+
+            // Now, explicitly trigger handleAssetChange for the default asset
+            // to load Spot, Expiry, and Chain data. Since activeAsset is still null,
+            // the check at the start of handleAssetChange won't prevent it from running.
+            logger.info(`Triggering handleAssetChange for default asset ${defaultAsset} to load market data...`);
+            await handleAssetChange();
+
+        } else {
+            logger.warn("No default asset set. Waiting for user selection.");
+            // Set placeholders if no assets were loaded at all
+            setElementState(SELECTORS.analysisResultContainer, 'content');
+            document.querySelector(SELECTORS.analysisResultContainer).innerHTML = '<p class="placeholder-text">Select an asset to load analysis...</p>';
+            setElementState(SELECTORS.newsResultContainer, 'content');
+            document.querySelector(SELECTORS.newsResultContainer).innerHTML = '<p class="placeholder-text">Select an asset to load news...</p>';
+            setElementState(SELECTORS.expiryDropdown, 'content');
+             populateDropdown(SELECTORS.expiryDropdown, [], "-- Select Asset First --");
+             setElementState(SELECTORS.optionChainTableBody, 'content');
+             document.querySelector(SELECTORS.optionChainTableBody).innerHTML = `<tr><td colspan="7">Select an Asset</td></tr>`;
+             setElementState(SELECTORS.spotPriceDisplay, 'content');
+             document.querySelector(SELECTORS.spotPriceDisplay).textContent = 'Spot Price: -';
+        }
+
+    } catch (error) {
+        logger.error("Page Initialization failed:", error);
+        setElementState(SELECTORS.globalErrorDisplay, 'error', `Page Initialization Failed: ${error.message}`);
+        // Set error states for core elements
+        setElementState(SELECTORS.assetDropdown, 'error', 'Failed');
+        setElementState(SELECTORS.expiryDropdown, 'error', 'Failed');
+        setElementState(SELECTORS.optionChainTableBody, 'error', 'Init failed');
+        setElementState(SELECTORS.analysisResultContainer, 'error', 'Init failed');
+        setElementState(SELECTORS.newsResultContainer, 'error', 'Init failed');
+    }
+     logger.info("Initialization sequence complete.");
 }
+
+/** Loads assets, populates dropdown, sets default, and returns the default asset value. */
+async function loadAssets() {
+    logger.info("Loading assets...");
+    setElementState(SELECTORS.assetDropdown, 'loading');
+    let defaultAsset = null; // Variable to store the default asset
+
+    try {
+        const data = await fetchAPI("/get_assets"); // Your endpoint to get assets
+        const assets = data?.assets || [];
+        const defaultSelection = assets.includes("NIFTY") ? "NIFTY" : (assets[0] || null);
+
+        populateDropdown(SELECTORS.assetDropdown, assets, "-- Select Asset --", defaultSelection);
+        setElementState(SELECTORS.assetDropdown, 'content');
+
+        const assetDropdown = document.querySelector(SELECTORS.assetDropdown);
+        if (assetDropdown && assetDropdown.value) {
+             defaultAsset = assetDropdown.value; // Get the actual selected default value
+             logger.info(`Assets loaded. Default selected: ${defaultAsset}`);
+        } else if (assets.length === 0) {
+             logger.warn("No assets found in database.");
+             setElementState(SELECTORS.assetDropdown, 'error', 'No assets');
+        } else {
+            logger.warn("Asset dropdown populated, but no default value could be determined.");
+            // Keep defaultAsset as null
+        }
+
+    } catch (error) {
+        logger.error("Failed to load assets:", error);
+        populateDropdown(SELECTORS.assetDropdown, [], "-- Error Loading --");
+        setElementState(SELECTORS.assetDropdown, 'error', `Error`);
+        // Don't set global error here, let initializePage handle it
+        throw error; // Re-throw error to be caught by initializePage
+    }
+    return defaultAsset; // Return the determined default asset
+}
+
+
+// Make sure initializePage is called on DOM ready
+document.addEventListener('DOMContentLoaded', initializePage);
 
 function setupEventListeners() {
     logger.info("Setting up event listeners...");
@@ -372,16 +477,52 @@ function loadMarkdownParser() {
 // Auto-Refresh Logic
 // ===============================================================
 
+async function refreshLiveData() {
+    // Check if asset and expiry are selected before refreshing
+    if (!activeAsset) {
+        logger.warn("Auto-refresh called with no active asset. Stopping.");
+        stopAutoRefresh();
+        return;
+    }
+    const currentExpiry = document.querySelector(SELECTORS.expiryDropdown)?.value;
+    if (!currentExpiry) {
+        logger.debug("Auto-refresh skipped: No expiry selected.");
+        return; // Don't refresh chain if no expiry selected
+    }
+
+    logger.debug(`Auto-refreshing live data (Spot & Chain) for ${activeAsset}...`); // Clarify log
+
+    // Fetch ONLY dynamic data concurrently
+    const results = await Promise.allSettled([
+        fetchNiftyPrice(activeAsset, true), // Pass true for refresh call (handles spot display)
+        fetchOptionChain(false, true)       // No scroll, is refresh call (handles chain display)
+        // --- DO NOT FETCH NEWS OR ANALYSIS HERE ---
+    ]);
+
+    // Log errors from settled promises if any
+    results.forEach((result, index) => {
+        if (result.status === 'rejected') {
+            const source = index === 0 ? 'Spot price' : 'Option chain';
+             // Log as warning, as refresh might fail temporarily
+             logger.warn(`Auto-refresh: ${source} fetch failed: ${result.reason?.message || result.reason}`);
+             // Optionally display a subtle error indicator for the failing component
+        }
+    });
+     logger.debug(`Auto-refresh cycle finished for ${activeAsset}.`);
+}
+
+
 function startAutoRefresh() {
     stopAutoRefresh(); // Clear any existing timer first
     if (!activeAsset) {
         logger.info("No active asset, auto-refresh not started.");
         return;
     }
-    logger.info(`Starting auto-refresh every ${REFRESH_INTERVAL_MS}ms for ${activeAsset}`);
-    // Store previous data *before* starting the interval
+    // Assuming REFRESH_INTERVAL_MS is defined elsewhere (e.g., const REFRESH_INTERVAL_MS = 30000;)
+    logger.info(`Starting auto-refresh every ${REFRESH_INTERVAL_MS / 1000}s for ${activeAsset}`);
+    // Store previous data *before* starting the interval if needed by fetch functions
     previousSpotPrice = currentSpotPrice;
-    // previousOptionChainData should be populated by the initial fetchOptionChain call
+    // previousOptionChainData is likely updated within fetchOptionChain itself now
     autoRefreshIntervalId = setInterval(refreshLiveData, REFRESH_INTERVAL_MS);
 }
 
@@ -430,40 +571,52 @@ async function refreshLiveData() {
 async function handleAssetChange() {
     const assetDropdown = document.querySelector(SELECTORS.assetDropdown);
     const asset = assetDropdown?.value;
-    activeAsset = asset; // Update global state
-    stopAutoRefresh(); // Stop refresh when changing asset
 
-    // Clear previous data used for highlighting and state
-    previousOptionChainData = {};
-    previousSpotPrice = 0;
-    currentSpotPrice = 0; // Reset current spot price
-
-    if (!asset) {
-        // Reset dependent UI if no asset selected (Keep existing logic)
-        populateDropdown(SELECTORS.expiryDropdown, [], "-- Select Asset First --");
-        setElementState(SELECTORS.optionChainTableBody, 'content');
-        document.querySelector(SELECTORS.optionChainTableBody).innerHTML = `<tr><td colspan="7">Select an Asset</td></tr>`;
-        setElementState(SELECTORS.analysisResultContainer, 'content');
-        document.querySelector(SELECTORS.analysisResultContainer).innerHTML = 'Select an asset to load analysis...';
-        setElementState(SELECTORS.newsResultContainer, 'content'); // Ensure news is also reset
-        document.querySelector(SELECTORS.newsResultContainer).innerHTML = ''; // Clear news content
-        setElementState(SELECTORS.spotPriceDisplay, 'content');
-        document.querySelector(SELECTORS.spotPriceDisplay).textContent = 'Spot Price: -';
-        resetResultsUI();
-        setElementState(SELECTORS.globalErrorDisplay, 'hidden');
+    // Prevent running if asset hasn't actually changed or is empty
+    // This check prevents redundant fetches if the same asset is re-selected
+    if (!asset || asset === activeAsset) {
+        if (!asset) {
+            // Handle the case where the selection becomes empty (e.g., "-- Select --")
+             logger.info("Asset selection cleared.");
+             activeAsset = null; // Clear active asset
+             stopAutoRefresh();
+             // Reset UI completely
+             populateDropdown(SELECTORS.expiryDropdown, [], "-- Select Asset First --");
+             setElementState(SELECTORS.optionChainTableBody, 'content');
+             document.querySelector(SELECTORS.optionChainTableBody).innerHTML = `<tr><td colspan="7">Select an Asset</td></tr>`;
+             setElementState(SELECTORS.spotPriceDisplay, 'content');
+             document.querySelector(SELECTORS.spotPriceDisplay).textContent = 'Spot Price: -';
+             resetResultsUI(); // This clears strategy and all results including news/analysis
+             setElementState(SELECTORS.globalErrorDisplay, 'hidden');
+        } else {
+            logger.debug(`handleAssetChange skipped: Asset unchanged (${asset}).`);
+        }
         return;
     }
 
-    logger.info(`Asset changed to: ${asset}. Fetching data (Backend uses RapidAPI for stock/analysis)...`); // Updated log slightly
+
+    logger.info(`Asset changed to: ${asset}. Fetching Spot, Expiry, News, Analysis...`); // Updated log
+    activeAsset = asset; // Update global state
+    stopAutoRefresh(); // Stop refresh for the old asset
+
+    // Clear previous option chain interaction data
+    previousOptionChainData = {};
+    previousSpotPrice = 0;
+    currentSpotPrice = 0;
+
+    // Reset results UI AND strategy input table (using the combined function)
+    resetResultsUI();
+
+    // Set loading states for ALL sections being fetched for the new asset
     setElementState(SELECTORS.expiryDropdown, 'loading');
     setElementState(SELECTORS.optionChainTableBody, 'loading');
-    setElementState(SELECTORS.analysisResultContainer, 'loading');
-    setElementState(SELECTORS.newsResultContainer, 'loading'); // Set news loading state
+    setElementState(SELECTORS.analysisResultContainer, 'loading'); // Fetching Analysis
+    setElementState(SELECTORS.newsResultContainer, 'loading');    // Fetching News
     setElementState(SELECTORS.spotPriceDisplay, 'loading', 'Spot Price: ...');
-    resetResultsUI(); // Clear previous results on asset change
-    setElementState(SELECTORS.globalErrorDisplay, 'hidden'); // Clear global error on new asset load
+    setElementState(SELECTORS.globalErrorDisplay, 'hidden'); // Clear global error
 
-    // --- Optional Debug Endpoint Call ---
+    // --- Optional Debug Call ---
+    // (Keep as is)
     try {
         await fetchAPI('/debug/set_selected_asset', {
              method: 'POST', body: JSON.stringify({ asset: asset })
@@ -471,56 +624,61 @@ async function handleAssetChange() {
         logger.warn(`Sent debug request to set backend selected_asset to ${asset}`);
     } catch (debugErr) {
         logger.error("Failed to send debug asset selection:", debugErr.message);
-        // Non-critical error, maybe just log it or show temporary message
-        // setElementState(SELECTORS.globalErrorDisplay, 'error', `Debug Sync Failed: ${debugErr.message}`);
-        // setTimeout(() => setElementState(SELECTORS.globalErrorDisplay, 'hidden'), 5000);
     }
     // --- End Debug Call ---
 
     try {
-        // Fetch core data in parallel using allSettled
-        // Assuming fetchNiftyPrice and fetchExpiries remain separate calls
+        // Fetch Spot, Expiry, News, and Analysis concurrently for the NEW asset
         const [spotResult, expiryResult, analysisResult, newsResult] = await Promise.allSettled([
-            fetchNiftyPrice(asset), // Initial fetch (not refresh)
+            fetchNiftyPrice(asset), // Initial fetch for this asset
             fetchExpiries(asset),
-            fetchAnalysis(asset),   // Calls /get_stock_analysis
-            fetchNews(asset)        // Calls /get_news
+            fetchAnalysis(asset),   // <<< Fetch analysis for the new asset
+            fetchNews(asset)        // <<< Fetch news for the new asset
         ]);
 
         let hasCriticalError = false;
 
-        // Process results (Keep existing logic)
+        // Process critical results (Spot/Expiry)
         if (spotResult.status === 'rejected') {
-            logger.error(`Error fetching spot price: ${spotResult.reason?.message || spotResult.reason}`);
-            // fetchNiftyPrice should handle its own error display
+            logger.error(`Error fetching spot price for ${asset}: ${spotResult.reason?.message || spotResult.reason}`);
+            hasCriticalError = true;
+            setElementState(SELECTORS.spotPriceDisplay, 'error', 'Spot: Error'); // Show error on spot display
         }
         if (expiryResult.status === 'rejected') {
-            logger.error(`Error fetching expiries: ${expiryResult.reason?.message || expiryResult.reason}`);
-            hasCriticalError = true; // Can't load chain without expiries
-            setElementState(SELECTORS.expiryDropdown, 'error', 'Failed to load expiries');
+            logger.error(`Error fetching expiries for ${asset}: ${expiryResult.reason?.message || expiryResult.reason}`);
+            hasCriticalError = true;
+            setElementState(SELECTORS.expiryDropdown, 'error', 'Failed');
             setElementState(SELECTORS.optionChainTableBody, 'error', 'Failed to load expiries');
         }
+
+        // Log non-critical failures (News/Analysis) - errors are handled within their functions
         if (analysisResult.status === 'rejected') {
-            logger.error(`Error fetching analysis: ${analysisResult.reason?.message || analysisResult.reason}`);
-            // Error display is handled locally within fetchAnalysis
+            logger.error(`Error fetching analysis for ${asset} during asset change: ${analysisResult.reason?.message || analysisResult.reason}`);
         }
-        if (newsResult.status === 'rejected') {
-            logger.error(`Error fetching news: ${newsResult.reason?.message || newsResult.reason}`);
-            // Error display is handled locally within fetchNews
+         if (newsResult.status === 'rejected') {
+            logger.error(`Error fetching news for ${asset} during asset change: ${newsResult.reason?.message || newsResult.reason}`);
         }
 
-        // If initial load was okay (no critical errors), start auto-refresh
+        // Start auto-refresh ONLY if critical data loaded
         if (!hasCriticalError) {
-            startAutoRefresh(); // Assuming startAutoRefresh exists
+            logger.info(`Essential data loaded for ${asset}. Starting auto-refresh.`);
+            startAutoRefresh(); // Start refresh for the new asset
         } else {
-             setElementState(SELECTORS.globalErrorDisplay, 'error', `Failed to load essential data (expiries) for ${asset}. Analysis/News might be available.`);
+             logger.error(`Failed to load essential data (spot/expiries) for ${asset}. Auto-refresh NOT started.`);
+             setElementState(SELECTORS.globalErrorDisplay, 'error', `Failed to load essential market data for ${asset}. Option chain unavailable.`);
         }
 
     } catch (err) {
         // Catch unexpected errors during orchestration
-        logger.error(`Unexpected error fetching initial data for ${asset}:`, err);
-        setElementState(SELECTORS.globalErrorDisplay, 'error', `Failed to load page data for ${asset}. ${err.message}`);
-        stopAutoRefresh(); // Stop refresh on major initial load error
+        logger.error(`Unexpected error during handleAssetChange for ${asset}:`, err);
+        setElementState(SELECTORS.globalErrorDisplay, 'error', `Failed to load data for ${asset}. ${err.message}`);
+        stopAutoRefresh(); // Stop refresh on major load error
+        // Set multiple areas to error state
+        setElementState(SELECTORS.expiryDropdown, 'error', 'Failed');
+        setElementState(SELECTORS.optionChainTableBody, 'error', 'Failed');
+        setElementState(SELECTORS.spotPriceDisplay, 'error', 'Spot: Error');
+        setElementState(SELECTORS.analysisResultContainer, 'error', 'Failed to load'); // Also indicate error here
+        setElementState(SELECTORS.newsResultContainer, 'error', 'Failed to load'); // And here
     }
 }
 
@@ -1326,13 +1484,34 @@ function clearAllPositions() {
 
 /** Resets the chart and results UI to initial state */
 function resetResultsUI() {
-    const logger = window.console; // Use console if no specific logger
-    logger.debug("Resetting results UI elements...");
+    const logger = window.console; // Use console if no specific logger is set up
+    logger.info("Resetting results UI elements AND clearing strategy input..."); // Updated log
+
+    // --- Clear Strategy Data and Table (Incorporated from clearAllPositions logic) ---
+    if (typeof strategyPositions !== 'undefined' && Array.isArray(strategyPositions)) {
+        strategyPositions = []; // Clear the underlying data array
+        logger.debug("Strategy positions data array cleared.");
+        // Update the visual table to reflect the cleared data
+        if (typeof updateStrategyTable === 'function') {
+            updateStrategyTable(); // Call the function to update the #strategyTable tbody
+            logger.debug("Strategy input table UI updated.");
+        } else {
+            logger.warn("updateStrategyTable function not found - cannot clear strategy table UI visually.");
+            // As a fallback, try to manually clear the table body if the function is missing
+            const strategyTableBody = document.querySelector(SELECTORS.strategyTableBody); // Need selector for tbody
+             if (strategyTableBody) {
+                  strategyTableBody.innerHTML = `<tr><td colspan="7">No positions added. Click option prices in the chain to add.</td></tr>`;
+             }
+        }
+    } else {
+        logger.warn("Cannot clear strategy positions: 'strategyPositions' array not found or not an array.");
+    }
+    // --- End Incorporated section ---
+
 
     // --- Reset Payoff Chart ---
     const chartContainer = document.querySelector(SELECTORS.payoffChartContainer);
     if (chartContainer) {
-        // Purge existing Plotly chart
         if (typeof Plotly !== 'undefined' && chartContainer.layout) {
             try {
                 Plotly.purge(chartContainer.id);
@@ -1341,8 +1520,8 @@ function resetResultsUI() {
                 logger.warn("Failed to purge Plotly chart during reset:", e);
             }
         }
-        // Set placeholder text
-        chartContainer.innerHTML = '<div class="placeholder-text">Preparing calculation...</div>';
+        // Set placeholder text - reflects that strategy needs building again
+        chartContainer.innerHTML = '<div class="placeholder-text">Add positions and click "Update" to see the payoff chart.</div>';
         setElementState(SELECTORS.payoffChartContainer, 'content'); // Reset state
     } else {
         logger.warn("Payoff chart container not found during reset.");
@@ -1351,7 +1530,8 @@ function resetResultsUI() {
     // --- Reset Tax Container ---
     const taxContainer = document.querySelector(SELECTORS.taxInfoContainer);
     if (taxContainer) {
-        taxContainer.innerHTML = '<p class="loading-text">...</p>'; // Placeholder
+        // Set placeholder text
+        taxContainer.innerHTML = '<p class="placeholder-text">Update strategy to calculate charges.</p>';
         setElementState(SELECTORS.taxInfoContainer, 'content'); // Reset state
     } else {
         logger.warn("Tax info container not found during reset.");
@@ -1364,17 +1544,14 @@ function resetResultsUI() {
         if (caption) caption.textContent = 'Portfolio Option Greeks'; // Reset caption
 
         const greekBody = greeksTable.querySelector('tbody');
-        // Reset to a placeholder row indicating calculation needed
-        if (greekBody) greekBody.innerHTML = `<tr><td colspan="9" class="placeholder-text">Update strategy to calculate Greeks.</td></tr>`; // Placeholder, colspan=9
+        if (greekBody) greekBody.innerHTML = `<tr><td colspan="9" class="placeholder-text">Update strategy to calculate Greeks.</td></tr>`; // Placeholder
 
         const greekFoot = greeksTable.querySelector('tfoot');
         if (greekFoot) greekFoot.innerHTML = ""; // Clear footer
 
         setElementState(SELECTORS.greeksTable, 'content'); // Reset state
-        // Also reset the state of the containing section if needed
         const greeksSection = document.querySelector(SELECTORS.greeksSection);
         if (greeksSection) setElementState(SELECTORS.greeksSection, 'content');
-
     } else {
         logger.warn("Greeks table not found during reset.");
     }
@@ -1383,38 +1560,34 @@ function resetResultsUI() {
     const breakdownList = document.querySelector(SELECTORS.costBreakdownList);
     if (breakdownList) {
         breakdownList.innerHTML = ""; // Clear list items
-        setElementState(SELECTORS.costBreakdownList, 'content'); // Reset state if needed
+        setElementState(SELECTORS.costBreakdownList, 'content');
     } else {
         logger.warn("Cost breakdown list not found during reset.");
     }
     const detailsElement = document.querySelector(SELECTORS.costBreakdownContainer);
     if (detailsElement) {
-        detailsElement.open = false; // Ensure it's closed
-        setElementState(SELECTORS.costBreakdownContainer, 'hidden'); // Hide the details container
-        detailsElement.style.display = 'none'; // Ensure hidden visually
+        detailsElement.open = false;
+        setElementState(SELECTORS.costBreakdownContainer, 'hidden');
+        detailsElement.style.display = 'none';
     } else {
          logger.warn("Cost breakdown container not found during reset.");
     }
 
-
     // --- Reset Metrics Display ---
-    // Reset all metric values to '...' or 'N/A'
-    displayMetric("...", SELECTORS.maxProfitDisplay);
-    displayMetric("...", SELECTORS.maxLossDisplay);
-    displayMetric("...", SELECTORS.breakevenDisplay);
-    displayMetric("...", SELECTORS.rewardToRiskDisplay);
-    displayMetric("...", SELECTORS.netPremiumDisplay);
-    // Reset state of the metrics container if needed
+    // Use N/A as the default reset state for metrics
+    displayMetric("N/A", SELECTORS.maxProfitDisplay);
+    displayMetric("N/A", SELECTORS.maxLossDisplay);
+    displayMetric("N/A", SELECTORS.breakevenDisplay);
+    displayMetric("N/A", SELECTORS.rewardToRiskDisplay);
+    displayMetric("N/A", SELECTORS.netPremiumDisplay);
     const metricsList = document.querySelector(SELECTORS.metricsList);
-    if (metricsList) setElementState(SELECTORS.metricsList, 'content'); // Reset state
-
+    if (metricsList) setElementState(SELECTORS.metricsList, 'content');
 
     // --- Reset News Container ---
     const newsContainer = document.querySelector(SELECTORS.newsResultContainer);
     if (newsContainer) {
-        // Set to a placeholder relevant to news
         newsContainer.innerHTML = '<p class="placeholder-text">Select an asset to load news...</p>';
-        setElementState(SELECTORS.newsResultContainer, 'content'); // Reset state
+        setElementState(SELECTORS.newsResultContainer, 'content');
     } else {
         logger.warn("News container not found during reset.");
     }
@@ -1422,53 +1595,75 @@ function resetResultsUI() {
     // --- Reset Stock Analysis Container ---
     const analysisContainer = document.querySelector(SELECTORS.analysisResultContainer);
     if (analysisContainer) {
-         // Set to a placeholder relevant to stock analysis
          analysisContainer.innerHTML = '<p class="placeholder-text">Select an asset to load analysis...</p>';
-         setElementState(SELECTORS.analysisResultContainer, 'content'); // Reset state
+         setElementState(SELECTORS.analysisResultContainer, 'content');
      } else {
          logger.warn("Stock analysis container not found during reset.");
      }
 
-
-    // ===== ADD RESET FOR GREEKS ANALYSIS SECTION =====
+    // --- Reset Greeks Analysis Section ---
     const greeksAnalysisSection = document.querySelector(SELECTORS.greeksAnalysisSection);
     const greeksAnalysisContainer = document.querySelector(SELECTORS.greeksAnalysisResultContainer);
-
     if (greeksAnalysisSection) {
-        setElementState(SELECTORS.greeksAnalysisSection, 'hidden'); // Hide the section by default on reset
+        setElementState(SELECTORS.greeksAnalysisSection, 'hidden');
         logger.debug("Reset Greeks Analysis Section to hidden.");
     } else {
         logger.warn("Greeks Analysis section not found during reset.");
     }
     if (greeksAnalysisContainer) {
-         // Clear the content inside
-         greeksAnalysisContainer.innerHTML = '';
-         // Optional: Set back to loading/placeholder if section wasn't hidden
-         // greeksAnalysisContainer.innerHTML = '<p class="loading-text">...</p>';
-         setElementState(SELECTORS.greeksAnalysisResultContainer, 'content'); // Reset inner container state
+         greeksAnalysisContainer.innerHTML = ''; // Clear content
+         setElementState(SELECTORS.greeksAnalysisResultContainer, 'content');
          logger.debug("Reset Greeks Analysis Container content.");
     } else {
         logger.warn("Greeks Analysis result container not found during reset.");
     }
-    // ================================================
-
 
     // --- Reset Status/Warning Message Container ---
-    const messageContainer = document.querySelector(SELECTORS.statusMessageContainer); // Define this selector if needed
+    // (Assuming these selectors exist and are defined)
+    const messageContainer = document.querySelector(SELECTORS.statusMessageContainer);
      if (messageContainer) {
-          messageContainer.textContent = ''; // Clear previous messages
-          messageContainer.className = 'status-message'; // Reset classes
-          setElementState(messageContainer, 'hidden'); // Hide it
+          messageContainer.textContent = '';
+          messageContainer.className = 'status-message';
+          setElementState(messageContainer, 'hidden');
      }
-     const warningContainer = document.querySelector(SELECTORS.warningContainer); // Define this selector if needed
+     const warningContainer = document.querySelector(SELECTORS.warningContainer);
      if (warningContainer) {
           warningContainer.textContent = '';
-          warningContainer.style.display = 'none'; // Hide it
+          warningContainer.style.display = 'none';
           setElementState(warningContainer, 'hidden');
      }
 
-     logger.info("Results UI elements reset.");
+     logger.info("Strategy input AND Results UI elements have been reset.");
 }
+
+// --- Define necessary variables and functions assumed by resetResultsUI ---
+
+// Ensure 'strategyPositions' is declared in a scope accessible by resetResultsUI
+let strategyPositions = [];
+
+// Ensure SELECTORS object includes all needed IDs/classes
+const SELECTORS = {
+    payoffChartContainer: '#payoffChartContainer',
+    taxInfoContainer: '#taxInfo',
+    greeksSection: '#greeksSection', // The section containing the table
+    greeksTable: '#greeksTable',
+    greeksAnalysisSection: '#greeksAnalysisSection',
+    greeksAnalysisResultContainer: '#greeksAnalysisResult',
+    costBreakdownList: '#costBreakdownList',
+    costBreakdownContainer: '#costBreakdownContainer',
+    maxProfitDisplay: '#maxProfit .metric-value',
+    maxLossDisplay: '#maxLoss .metric-value',
+    breakevenDisplay: '#breakeven .metric-value',
+    rewardToRiskDisplay: '#rewardToRisk .metric-value',
+    netPremiumDisplay: '#netPremium .metric-value',
+    metricsList: '.metrics-list', // Assuming class selector for the UL
+    newsResultContainer: '#newsResult',
+    analysisResultContainer: '#analysisResult',
+    strategyTableBody: '#strategyTable tbody', // Selector for strategy table body needed
+    statusMessageContainer: '#statusMessage', // Example ID, replace if needed
+    warningContainer: '#warningMessage',   // Example ID, replace if needed
+    // ... other selectors used elsewhere ...
+};
 
 
 function renderCostBreakdown(listElement, costBreakdownData) {
