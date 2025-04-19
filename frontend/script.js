@@ -1441,33 +1441,68 @@ function clearAllPositions() {
     }
 }
 
+function resetCalculationOutputsUI() {
+     const logger = window.logger || window.console;
+     logger.debug("Resetting calculation output UI elements...");
+
+     // --- Reset Payoff Chart ---
+     const chartContainer = document.querySelector(SELECTORS.payoffChartContainer);
+     if (chartContainer) {
+         if (typeof Plotly !== 'undefined' && chartContainer.layout) {
+             try { Plotly.purge(chartContainer.id); } catch (e) { logger.warn("Plotly purge failed during reset:", e); }
+         }
+         chartContainer.innerHTML = '<div class="placeholder-text">Preparing calculation...</div>';
+         setElementState(SELECTORS.payoffChartContainer, 'content');
+     } else { logger.warn("Payoff chart container not found during output reset."); }
+
+     // --- Reset Tax Container ---
+     const taxContainer = document.querySelector(SELECTORS.taxInfoContainer);
+     if (taxContainer) {
+         taxContainer.innerHTML = '<p class="placeholder-text">Update strategy to calculate charges.</p>'; // Use placeholder
+         setElementState(SELECTORS.taxInfoContainer, 'content');
+     } else { logger.warn("Tax info container not found during output reset."); }
+
+     // --- Reset Greeks Table ---
+     const greeksTable = document.querySelector(SELECTORS.greeksTable);
+     if (greeksTable) {
+         const caption = greeksTable.querySelector('caption'); if (caption) caption.textContent = 'Portfolio Option Greeks';
+         const greekBody = greeksTable.querySelector('tbody'); if (greekBody) greekBody.innerHTML = `<tr><td colspan="9" class="placeholder-text">Update strategy to calculate Greeks.</td></tr>`;
+         const greekFoot = greeksTable.querySelector('tfoot'); if (greekFoot) greekFoot.innerHTML = "";
+         setElementState(SELECTORS.greeksTable, 'content'); // Reset table state
+         const greeksSection = document.querySelector(SELECTORS.greeksSection); if (greeksSection) setElementState(SELECTORS.greeksSection, 'content'); // Reset section state
+     } else { logger.warn("Greeks table not found during output reset."); }
+
+     // --- Reset Greeks Analysis Section ---
+     const greeksAnalysisSection = document.querySelector(SELECTORS.greeksAnalysisSection);
+     const greeksAnalysisContainer = document.querySelector(SELECTORS.greeksAnalysisResultContainer);
+     if (greeksAnalysisSection) { setElementState(SELECTORS.greeksAnalysisSection, 'hidden'); } else { logger.warn("Greeks Analysis section not found during output reset."); }
+     if (greeksAnalysisContainer) { greeksAnalysisContainer.innerHTML = ''; setElementState(SELECTORS.greeksAnalysisResultContainer, 'content'); } else { logger.warn("Greeks Analysis result container not found during output reset."); }
+
+     // --- Reset Metrics Display ---
+     displayMetric("N/A", SELECTORS.maxProfitDisplay); displayMetric("N/A", SELECTORS.maxLossDisplay); displayMetric("N/A", SELECTORS.breakevenDisplay); displayMetric("N/A", SELECTORS.rewardToRiskDisplay); displayMetric("N/A", SELECTORS.netPremiumDisplay);
+     const metricsList = document.querySelector(SELECTORS.metricsList); if (metricsList) setElementState(SELECTORS.metricsList, 'content');
+
+     // --- Reset Cost Breakdown ---
+     const breakdownList = document.querySelector(SELECTORS.costBreakdownList); if (breakdownList) { breakdownList.innerHTML = ""; setElementState(SELECTORS.costBreakdownList, 'content'); }
+     const detailsElement = document.querySelector(SELECTORS.costBreakdownContainer); if (detailsElement) { detailsElement.open = false; setElementState(SELECTORS.costBreakdownContainer, 'hidden'); detailsElement.style.display = 'none'; } else { logger.warn("Cost breakdown container not found during output reset."); }
+
+     // --- Reset Warning Container ---
+      const warningContainer = document.querySelector(SELECTORS.warningContainer); if (warningContainer) { warningContainer.textContent = ''; warningContainer.style.display = 'none'; setElementState(SELECTORS.warningContainer, 'hidden'); }
+
+     // --- DO NOT Reset News or Stock Analysis Containers Here ---
+     // --- DO NOT Clear strategyPositions or Strategy Table Here ---
+
+     logger.debug("Calculation output UI elements reset complete.");
+}
 
 /** Resets the chart and results UI to initial state */
 function resetResultsUI() {
     const logger = window.console; // Use console if no specific logger is set up
-    logger.info("Resetting results UI elements AND clearing strategy input..."); // Updated log
+    logger.info("Resetting calculation output UI elements..."); // Updated log message
 
-    // --- Clear Strategy Data and Table (Incorporated from clearAllPositions logic) ---
-    if (typeof strategyPositions !== 'undefined' && Array.isArray(strategyPositions)) {
-        strategyPositions = []; // Clear the underlying data array
-        logger.debug("Strategy positions data array cleared.");
-        // Update the visual table to reflect the cleared data
-        if (typeof updateStrategyTable === 'function') {
-            updateStrategyTable(); // Call the function to update the #strategyTable tbody
-            logger.debug("Strategy input table UI updated.");
-        } else {
-            logger.warn("updateStrategyTable function not found - cannot clear strategy table UI visually.");
-            // As a fallback, try to manually clear the table body if the function is missing
-            const strategyTableBody = document.querySelector(SELECTORS.strategyTableBody); // Need selector for tbody
-             if (strategyTableBody) {
-                  strategyTableBody.innerHTML = `<tr><td colspan="7">No positions added. Click option prices in the chain to add.</td></tr>`;
-             }
-        }
-    } else {
-        logger.warn("Cannot clear strategy positions: 'strategyPositions' array not found or not an array.");
-    }
-    // --- End Incorporated section ---
-
+    // --- DO NOT Clear Strategy Data and Table HERE ---
+    // The logic to clear strategyPositions and call updateStrategyTable
+    // should be handled separately where needed (e.g., in handleAssetChange, clearAllPositions).
 
     // --- Reset Payoff Chart ---
     const chartContainer = document.querySelector(SELECTORS.payoffChartContainer);
@@ -1480,8 +1515,8 @@ function resetResultsUI() {
                 logger.warn("Failed to purge Plotly chart during reset:", e);
             }
         }
-        // Set placeholder text - reflects that strategy needs building again
-        chartContainer.innerHTML = '<div class="placeholder-text">Add positions and click "Update" to see the payoff chart.</div>';
+        // Set placeholder text
+        chartContainer.innerHTML = '<div class="placeholder-text">Add positions and click "Update" to see the payoff chart.</div>'; // Placeholder reflects need for action
         setElementState(SELECTORS.payoffChartContainer, 'content'); // Reset state
     } else {
         logger.warn("Payoff chart container not found during reset.");
@@ -1544,22 +1579,16 @@ function resetResultsUI() {
     if (metricsList) setElementState(SELECTORS.metricsList, 'content');
 
     // --- Reset News Container ---
-    const newsContainer = document.querySelector(SELECTORS.newsResultContainer);
-    if (newsContainer) {
-        newsContainer.innerHTML = '<p class="placeholder-text">Select an asset to load news...</p>';
-        setElementState(SELECTORS.newsResultContainer, 'content');
-    } else {
-        logger.warn("News container not found during reset.");
-    }
+    // This function should focus on calculation results, so we *don't* reset news here.
+    // News container reset should happen in handleAssetChange or initializePage.
+    // const newsContainer = document.querySelector(SELECTORS.newsResultContainer);
+    // if (newsContainer) { /* ... */ }
 
     // --- Reset Stock Analysis Container ---
-    const analysisContainer = document.querySelector(SELECTORS.analysisResultContainer);
-    if (analysisContainer) {
-         analysisContainer.innerHTML = '<p class="placeholder-text">Select an asset to load analysis...</p>';
-         setElementState(SELECTORS.analysisResultContainer, 'content');
-     } else {
-         logger.warn("Stock analysis container not found during reset.");
-     }
+    // This function should focus on calculation results, so we *don't* reset analysis here.
+    // Analysis container reset should happen in handleAssetChange or initializePage.
+    // const analysisContainer = document.querySelector(SELECTORS.analysisResultContainer);
+    // if (analysisContainer) { /* ... */ }
 
     // --- Reset Greeks Analysis Section ---
     const greeksAnalysisSection = document.querySelector(SELECTORS.greeksAnalysisSection);
@@ -1579,7 +1608,6 @@ function resetResultsUI() {
     }
 
     // --- Reset Status/Warning Message Container ---
-    // (Assuming these selectors exist and are defined)
     const messageContainer = document.querySelector(SELECTORS.statusMessageContainer);
      if (messageContainer) {
           messageContainer.textContent = '';
@@ -1593,7 +1621,7 @@ function resetResultsUI() {
           setElementState(warningContainer, 'hidden');
      }
 
-     logger.info("Strategy input AND Results UI elements have been reset.");
+     logger.info("Calculation Results UI elements have been reset."); // Updated log
 }
 
 // --- Define necessary variables and functions assumed by resetResultsUI ---

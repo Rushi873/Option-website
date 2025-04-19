@@ -179,7 +179,7 @@ RAPIDAPI_BASE_URL = f"https://{RAPIDAPI_HOST}"
 # ===============================================================
 # Global State (Keep as is)
 # ===============================================================
-selected_asset: Optional[str] = None
+selected_asset: Optional[str] = "NIFTY"
 # strategy_positions: List[dict] = [] # Removed, as related endpoints were commented out
 shutdown_event = threading.Event()
 background_thread_instance: Optional[threading.Thread] = None
