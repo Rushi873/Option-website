@@ -15,7 +15,7 @@
 
     /* --- Neutrals --- */
     --light-bg: #f8f9fa;
-    --page-bg: #fdfdff;
+    --page-bg: #fdfdff; /* Slightly off-white page background */
     --card-bg: #ffffff;
     --dark-bg: #343a40;
     --text-light: #f8f9fa;
@@ -95,6 +95,9 @@ header h1 { margin: 0; font-size: 1.65rem; font-weight: 600; letter-spacing: 0.5
 .strategy-container {
     flex: 1 1 600px; /* Flex basis, allow shrinking/growing */
     min-width: 500px;
+    display: flex; /* Make strategy container a flex column */
+    flex-direction: column;
+    gap: 30px; /* Spacing between result sections within strategy container */
 }
 
 
@@ -104,7 +107,7 @@ header h1 { margin: 0; font-size: 1.65rem; font-weight: 600; letter-spacing: 0.5
     box-shadow: var(--card-shadow);
     border-radius: var(--card-radius);
     border: 1px solid var(--border-color);
-    display: flex;
+    display: flex; /* Make cards flex columns for easier internal spacing */
     flex-direction: column;
     gap: 20px; /* Inner spacing for card content */
 }
@@ -113,13 +116,6 @@ header h1 { margin: 0; font-size: 1.65rem; font-weight: 600; letter-spacing: 0.5
 .option-chain-container > .table-wrapper {
     max-height: calc(100vh - 250px); /* Adjust based on card padding, header, controls */
     overflow-y: auto;
-}
-
-
-.strategy-container {
-    display: flex;
-    flex-direction: column;
-    gap: 30px; /* Spacing between result sections */
 }
 
 /* Section Headers */
@@ -134,26 +130,36 @@ header h1 { margin: 0; font-size: 1.65rem; font-weight: 600; letter-spacing: 0.5
 h2, h3, .section-subheader { color: var(--text-dark); margin: 0; font-weight: 600; }
 h2 { font-size: 1.35rem; }
 h3, .section-subheader { font-size: 1.15rem; color: #495057; }
-/* Slightly reduced margin/padding for subheaders */
+/* Slightly reduced margin/padding for subheaders within result sections */
 .results-section > h3.section-subheader {
     padding-bottom: 8px;
     margin-bottom: 15px;
     border-bottom: 1px solid #eee;
 }
 
-/* Global Error Bar */
-#globalError {
+/* Global Error/Status Bar */
+#globalError, #statusMessage, #warningMessage {
     border-radius: 4px;
-    margin: -15px 30px 20px 30px; /* Adjust margin to sit below header */
+    margin: -15px 30px 20px 30px; /* Sit below header */
     padding: 10px 20px;
-    background-color: #f8d7da;
-    color: #721c24;
-    border: 1px solid #f5c6cb;
     font-weight: 500;
 }
-#globalError.hidden { display: none; } /* Ensure hidden works */
-/* Use JS to set 'error' class, not hardcode .error-message */
-#globalError.error { display: block !important; text-align: center; }
+#globalError.hidden, #statusMessage.hidden, #warningMessage.hidden {
+    display: none;
+}
+/* Specific styles - JS will add text and remove 'hidden' class */
+#globalError {
+    background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb;
+}
+#statusMessage {
+    background-color: #e2e3e5; color: #383d41; border: 1px solid #d6d8db;
+}
+#statusMessage.success { /* Optional: Style for success status */
+     background-color: #d4edda; color: #155724; border-color: #c3e6cb;
+}
+#warningMessage {
+    color: orange; border: 1px solid orange; background-color: #fff3cd;
+}
 
 
 /* ===============================================================
@@ -164,8 +170,8 @@ label { font-weight: 500; font-size: 0.9rem; color: var(--text-secondary); margi
 select, input[type="number"], input[type="text"] { padding: 8px 12px; border: 1px solid #ced4da; border-radius: 4px; font-size: 0.9rem; background-color: #fff; transition: border-color .15s ease-in-out, box-shadow .15s ease-in-out; }
 select:focus, input:focus { border-color: var(--primary-color); outline: 0; box-shadow: 0 0 0 0.15rem rgba(74, 124, 89, 0.25); }
 select { min-width: 150px; cursor: pointer; }
-input[type="number"] { width: 75px; }
-input.lots-input { width: 70px; text-align: right; padding: 6px; font-size: 0.9rem; }
+input[type="number"] { width: 75px; } /* General number input */
+input.number-input-small { width: 70px; text-align: right; padding: 6px; font-size: 0.9rem; } /* Specific class for lots */
 
 /* ===============================================================
    Tables
@@ -202,52 +208,59 @@ input.lots-input { width: 70px; text-align: right; padding: 6px; font-size: 0.9r
 .greeks-table th:nth-child(n+5), .greeks-table td:nth-child(n+5) { width: 12%; } /* Greeks */
 
 
-/* Right-align numeric data */
+/* Right-align numeric data (Consider using a class like .text-right added by JS instead) */
 .data-table td.oi, /* Specific class for OI */
-.data-table td:nth-child(1), /* Call LTP */
-.data-table td:nth-child(3), /* Call IV */
-.data-table td:nth-child(5), /* Put IV */
-.data-table td:nth-child(7), /* Put LTP */
+#optionChainTable td:nth-child(1), /* Call LTP */
+#optionChainTable td:nth-child(3), /* Call IV */
+#optionChainTable td:nth-child(5), /* Put IV */
+#optionChainTable td:nth-child(7), /* Put LTP */
 #strategyTable td:nth-child(2), /* Strike */
 #strategyTable td:nth-child(4), /* Lots Input Container */
 #strategyTable td:nth-child(6), /* Premium */
-/* Don't apply to tax table notes */
-.charges-table td:not(.note),
+.charges-table td:not(.note), /* Tax table data cells */
 .greeks-table td:nth-child(n+4) /* Strike + Greeks */
  { text-align: right; font-feature-settings: "tnum"; /* Tabular nums */ }
 
-/* Align totals */
+/* Align totals in footers */
 .charges-table tfoot td, .greeks-table tfoot td { text-align: right; }
 .charges-table tfoot td:first-child, .greeks-table tfoot td:first-child { text-align: right; } /* Align first cell too */
 
 /* Option Chain Specific */
-.option-chain td { background-color: transparent; transition: background-color 0.3s ease-out; } /* Add transition for highlight */
+.option-chain td { background-color: transparent; transition: background-color 0.3s ease-out; }
 .option-chain td.call { background-color: rgba(95, 173, 86, 0.08); }
 .option-chain td.put { background-color: rgba(200, 85, 61, 0.08); }
-.option-chain td.clickable:hover { background-color: rgba(74, 124, 89, 0.15) !important; cursor: pointer; } /* Hover priority */
+.option-chain td.clickable:hover { background-color: rgba(74, 124, 89, 0.15) !important; cursor: pointer; }
 .option-chain td.oi { color: var(--text-muted); font-size: 0.82rem; }
 .option-chain .atm-strike td { background-color: #fefae0 !important; font-weight: bold !important; }
 .option-chain .atm-strike { border-top: 1px solid #faedcd; border-bottom: 1px solid #faedcd; }
+.option-chain .highlight-atm td { /* Temporary highlight for scrolled ATM row */
+    box-shadow: inset 0 0 0 2px var(--primary-color);
+    transition: box-shadow 0.3s ease-in-out;
+}
+
 
 /* Strategy Table Specific */
 #strategyTable td:nth-child(7) { padding: 5px; } /* Remove button cell */
-button.toggle-buy-sell { padding: 4px 8px; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; font-weight: bold; min-width: 55px; font-size: 0.78rem; }
+button.toggle-buy-sell { padding: 4px 8px; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; font-weight: bold; min-width: 55px; font-size: 0.78rem; transition: background-color 0.2s, border-color 0.2s, color 0.2s; }
 button.toggle-buy-sell.button-buy { background-color: rgba(95, 173, 86, 0.15); color: var(--success-color); border-color: rgba(95, 173, 86, 0.3); }
 button.toggle-buy-sell.button-buy:hover { background-color: rgba(95, 173, 86, 0.3); }
 button.toggle-buy-sell.button-sell { background-color: rgba(200, 85, 61, 0.15); color: var(--danger-color); border-color: rgba(200, 85, 61, 0.3); }
 button.toggle-buy-sell.button-sell:hover { background-color: rgba(200, 85, 61, 0.3); }
-#strategyTable button.remove-btn { font-size: 1.35em; color: var(--danger-color); background: none; border: none; padding: 0; width: 100%; height: 100%; line-height: 1; cursor: pointer; }
+#strategyTable button.remove-btn { font-size: 1.35em; color: var(--danger-color); background: none; border: none; padding: 0; width: 100%; height: 100%; line-height: 1; cursor: pointer; transition: color 0.2s, background-color 0.2s;}
 #strategyTable button.remove-btn:hover { color: var(--danger-hover); background-color: rgba(200, 85, 61, 0.05); }
+#strategyTable .long-position { border-left: 3px solid var(--success-color); }
+#strategyTable .short-position { border-left: 3px solid var(--danger-color); }
 
 /* Results Tables */
 .results-table tfoot tr, .totals-row { font-weight: 600; background-color: var(--table-total-bg); border-top: 2px solid #cdd4db; }
 /* Tax Table Specific */
 .charges-table caption { font-size: 0.9rem; color: var(--text-muted); padding-bottom: 10px; text-align: left; font-style: italic; }
-.charges-table td.note { max-width: 120px; font-size: 0.8rem; color: var(--text-muted); cursor: help; text-align: left !important; overflow: hidden; text-overflow: ellipsis; white-space: normal; /* Allow wrap */ line-height: 1.3; }
+.charges-table td.note { max-width: 120px; font-size: 0.8rem; color: var(--text-muted); cursor: help; text-align: left !important; overflow: hidden; text-overflow: ellipsis; white-space: normal; line-height: 1.3; }
 /* Greeks Table Specific */
 .greeks-table caption { font-size: 0.9rem; color: var(--text-muted); padding-bottom: 10px; caption-side: top; text-align: left; font-style: italic; }
 .greeks-table th[title], .greeks-table td[title] { cursor: help; }
 .greeks-table .totals-row td { background-color: var(--table-total-bg); font-weight: bold; }
+.greeks-table .greeks-skipped td { opacity: 0.6; font-style: italic; } /* Style skipped rows */
 
 
 /* ===============================================================
@@ -267,38 +280,17 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
    Payoff Chart & Results Sections
    =============================================================== */
 #payoffChartContainer {
-  max-width: 1200px;
+  max-width: 1200px; /* Limit chart width */
   width: 100%;
-  height: 450px;  /* Adjusted height */
-  margin: 1.5em auto;
+  height: 450px;
+  margin: 1.5em auto; /* Center chart */
   padding: 0;
   border: 1px solid var(--border-color);
   box-sizing: border-box;
-  position: relative;
+  position: relative; /* Needed for loading/error text */
   overflow: hidden;
   background-color: #fff; /* Ensure background */
-}
-
-/* Loading and error states overlay */
-#payoffChartContainer[data-state="loading"]::before,
-#payoffChartContainer[data-state="error"]::before {
-  content: attr(data-message); /* Get message from data attribute */
-  position: absolute;
-  inset: 0;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  background-color: rgba(255, 255, 255, 0.85); /* Slightly more opaque */
-  font-style: italic;
-  font-size: 1.1rem;
-  color: var(--text-muted);
-  text-align: center;
-  padding: 20px;
-  z-index: 10; /* Ensure overlay is on top */
-}
-#payoffChartContainer[data-state="error"]::before {
-  color: var(--danger-color); /* Use danger color for errors */
-  font-weight: 500;
+  border-radius: var(--card-radius); /* Match card radius */
 }
 
 /* Make Plotly completely fill the container */
@@ -313,13 +305,18 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
   height: 100% !important;
 }
 
-
 /* Result Sections (Metrics, Tax, Greeks, Analysis wrappers) */
-.results-section { background-color: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--card-radius); padding: 20px 25px; box-shadow: none; margin-bottom: 20px; /* Add consistent margin between sections */ }
-.results-section:last-child { margin-bottom: 0; } /* Remove margin from last section */
+.results-section { background-color: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--card-radius); padding: 20px 25px; box-shadow: none; } /* Removed margin-bottom, handled by container gap */
 
-.card-accent-warning { background-color: var(--accent-warning-bg); border-left: 4px solid var(--warning-color); }
-.card-accent-warning .section-subheader { color: var(--accent-warning-text); border-bottom-color: var(--accent-warning-border); }
+/* Tax section accent */
+#taxInfoSection { /* Use the section ID */
+    background-color: var(--accent-warning-bg);
+    border-left: 4px solid var(--warning-color);
+}
+#taxInfoSection h3.section-subheader { /* Style header within tax section */
+    color: var(--accent-warning-text);
+    border-bottom-color: var(--accent-warning-border);
+}
 
 /* Metrics Card */
 #strategyMetricsSection { border-top: 3px solid var(--primary-color); background-color: #f8f9fa; }
@@ -335,32 +332,42 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
     font-weight: 600;
     color: var(--text-secondary);
     cursor: pointer;
+    display: block; /* Allow full width click */
+    padding: 10px 0; /* Add some padding */
 }
-.breakdown-list { list-style: none; padding-left: 0; margin: 0; /* Reset margin */ font-size: 0.9rem; color: #444; }
+.breakdown-list { list-style: none; padding-left: 0; margin: 10px 0 0 0; /* Space above list */ font-size: 0.9rem; color: #444; }
 .breakdown-list li { padding: 3px 0 3px 15px; position: relative; }
 .breakdown-list li::before { content: '–'; position: absolute; left: 0; color: var(--primary-color); font-weight: bold; }
 
 /* Collapsible Sections Styling (<details>) */
-.results-details { border: 1px solid var(--border-color); border-radius: var(--card-radius); margin-bottom: 15px; background-color: #fff; overflow: hidden; /* Prevents content spill */ }
-.results-details summary { display: block; /* Needed for proper styling/arrow */ padding: 10px 15px; background-color: var(--table-header-bg); cursor: pointer; font-weight: 600; outline: none; border-bottom: 1px solid transparent; /* Hide border when closed */ transition: background-color 0.2s ease, border-color 0.2s ease; position: relative; /* For arrow positioning */ }
-.results-details[open] summary { border-bottom: 1px solid var(--border-color); /* Show border when open */ }
+.results-details { border: 1px solid var(--border-color); border-radius: var(--card-radius); margin-top: 15px; margin-bottom: 0; background-color: #fff; overflow: hidden; }
+.results-details summary { display: block; padding: 10px 15px; background-color: var(--table-header-bg); cursor: pointer; font-weight: 600; outline: none; border-bottom: 1px solid transparent; transition: background-color 0.2s ease, border-color 0.2s ease; position: relative; }
+.results-details[open] summary { border-bottom: 1px solid var(--border-color); }
 .results-details summary:hover { background-color: #e9ecef; }
-.results-details > *:not(summary) { padding: 15px; } /* Style content area */
+.results-details > *:not(summary) { padding: 15px; }
 /* Arrow for details/summary */
-.results-details summary::marker { content: ''; /* Hide default */ }
+.results-details summary::marker { content: ''; }
 .results-details summary::before { content: '►'; display: inline-block; margin-right: 8px; font-size: 0.8em; transition: transform 0.2s ease-in-out; }
 .results-details[open] summary::before { transform: rotate(90deg); }
 
 /* Specific Summary Styles */
 #taxInfoSection .results-details summary { color: var(--accent-warning-text); }
-#costBreakdownContainer summary { font-size: 0.95rem; color: var(--text-secondary); }
+#costBreakdownContainer summary { /* Style for cost breakdown */
+    font-size: 0.95rem;
+    color: var(--text-secondary);
+    padding: 10px 0;
+    border-bottom: 1px dashed #ddd; /* Simple separator */
+    margin-bottom: 10px;
+}
+#costBreakdownContainer[open] summary {
+    border-bottom-style: solid; /* Solid line when open */
+}
 
 /* ===============================================================
    Analysis Sections (Stock & Greeks)
    =============================================================== */
 #analysisSection, #greeksAnalysisSection {
-    background-color: #f8f9fa;
-    /* Ensure consistent padding */
+    background-color: #f8f9fa; /* Light background for contrast */
     padding: 20px 25px;
 }
 
@@ -368,12 +375,12 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
 .analysis-container {
     background-color: transparent;
     border: none;
-    padding: 0; /* Padding is on the parent section */
+    padding: 0; /* Padding is on parent */
     margin-top: 0;
     font-size: 0.95rem;
     line-height: 1.7;
     color: #333;
-    min-height: 100px; /* Ensure visibility when loading/error */
+    min-height: 100px; /* Ensure visibility */
 }
 /* Markdown Element Styling */
 .analysis-container h1, .analysis-container h2, .analysis-container h3, .analysis-container h4 { margin-top: 1.2em; margin-bottom: 0.6em; font-weight: 600; line-height: 1.3; color: #222; padding-bottom: 0.2em; border-bottom: 1px solid #eee; }
@@ -386,36 +393,31 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
 .analysis-container code { background-color: #e9ecef; padding: 0.2em 0.4em; margin: 0 2px; font-size: 85%; border-radius: 3px; font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; word-break: break-word; }
 .analysis-container pre { background-color: #e9ecef; padding: 15px; border-radius: 5px; overflow-x: auto; margin-bottom: 1em; } .analysis-container pre code { background-color: transparent; padding: 0; margin: 0; font-size: inherit; border-radius: 0; }
 .analysis-container blockquote { margin-left: 0; padding-left: 15px; border-left: 4px solid #ccc; color: #666; font-style: italic; margin-bottom: 1em; }
-/* Placeholder/Loading/Error inside analysis */
+/* Placeholder/Loading/Error inside analysis containers */
 .analysis-container .loading-text,
 .analysis-container .placeholder-text {
-    text-align: center;
-    padding: 30px 15px;
-    color: var(--text-muted);
-    font-style: italic;
+    text-align: center; padding: 30px 15px; color: var(--text-muted); font-style: italic;
 }
-.analysis-container .error-message {
-     padding: 20px;
-     text-align: center;
-     background-color: rgba(200, 85, 61, 0.05);
-     border: 1px dashed var(--danger-color);
-     border-radius: 4px;
-     color: var(--danger-color); /* Ensure text color matches */
-     font-weight: 500;
+/* Specific error style for analysis containers */
+.analysis-container > p.error-message { /* Target p added by JS */
+     padding: 20px; text-align: center; background-color: rgba(200, 85, 61, 0.05);
+     border: 1px dashed var(--danger-color); border-radius: 4px; color: var(--danger-color);
+     font-weight: 500; font-style: normal; /* Override italic */
 }
+
 
 /* ===============================================================
    News Section
    =============================================================== */
 #newsSection {
-    background-color: #ffffff; /* Match other cards or use light-bg */
+    background-color: #ffffff; /* Standard card background */
 }
 
 .news-container {
-    max-height: 400px; /* Example max height */
-    overflow-y: auto; /* Add scroll if content exceeds max height */
-    padding-right: 10px; /* Space for scrollbar */
-    min-height: 100px; /* Ensure visibility when loading/error */
+    max-height: 400px; /* Limit height */
+    overflow-y: auto;
+    padding-right: 10px;
+    min-height: 100px;
 }
 .news-list { list-style: none; padding-left: 0; margin: 0; }
 .news-item { padding: 12px 0; border-bottom: 1px dashed var(--border-color); }
@@ -424,20 +426,15 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
 .news-headline a { color: var(--primary-hover); text-decoration: none; font-size: 1.05rem; }
 .news-headline a:hover { text-decoration: underline; color: var(--primary-color); }
 .news-summary { font-size: 0.9rem; color: var(--text-secondary); line-height: 1.5; margin: 0; }
-/* Placeholder/Loading/Error inside news */
+/* Placeholder/Loading/Error inside news container */
 .news-container .loading-text,
 .news-container .placeholder-text {
-    text-align: center;
-    padding: 30px 15px;
-    color: var(--text-muted);
-    font-style: italic;
+    text-align: center; padding: 30px 15px; color: var(--text-muted); font-style: italic;
 }
-.news-container .error-message {
-    padding: 20px;
-    text-align: center;
-    color: var(--danger-color);
-    font-weight: 500;
+.news-container > p.error-message { /* Target p added by JS */
+    padding: 20px; text-align: center; color: var(--danger-color); font-weight: 500; font-style: normal;
 }
+
 
 /* ===============================================================
    Scrollbar (Optional Thin Scrollbar)
@@ -457,86 +454,103 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
    Utility & State Classes (Managed by JS via setElementState)
    =============================================================== */
 /* Hidden State */
-.hidden { display: none !important; }
+.hidden { display: none; } /* Removed !important */
 
 /* Loading State Placeholder Text*/
 .loading-text {
     color: var(--text-muted);
     font-style: italic;
     text-align: center;
-    width: 100%; /* Ensure spans full width */
+    width: 100%;
     padding: 25px;
 }
-/* Apply loading style to specific elements via JS */
-[data-state="loading"] select,
-[data-state="loading"] input {
+/* Apply loading style to specific elements via JS using .loading class */
+.loading select,
+.loading input { /* Style parent container when loading */
     opacity: 0.7;
     cursor: wait;
 }
-/* Style containers during loading */
-[data-state="loading"] > *:not(.loading-text):not(.section-subheader):not(.section-header):not(caption) {
-    /* Optionally hide content while loading text is shown */
-     /* display: none; */
-     opacity: 0.5; /* Or fade out */
-}
-/* Ensure loading text shows correctly in table bodies */
-tbody[data-state="loading"] tr:first-child td.loading-text {
-    display: table-cell; /* Make sure it displays */
+.loading select:disabled,
+.loading input:disabled { /* Style disabled elements during load */
+    background-color: #e9ecef;
 }
 
-/* Error State */
-/* Error message styling applied directly or via JS */
-.error-message { color: var(--danger-color) !important; font-weight: 500; }
-/* Style elements with error state */
-[data-state="error"] {
-    border-color: var(--danger-color) !important; /* Highlight border */
+/* Style containers during loading */
+.loading > *:not(.loading-text):not(.section-subheader):not(.section-header):not(caption) {
+     /* Let the JS handle replacing content with loading text */
+     /* Optionally add opacity: opacity: 0.5; */
 }
-[data-state="error"] select,
-[data-state="error"] input {
-     border-color: var(--danger-color) !important;
-     background-color: #fff0f0; /* Light red background */
+/* Ensure loading text shows correctly in table bodies */
+tbody.loading tr td.loading-text { /* Target TD inside loading tbody */
+    display: table-cell; /* Ensure it displays correctly */
 }
-/* Ensure error text shows correctly */
-td.error-message { background-color: rgba(200, 85, 61, 0.08); text-align: center; padding: 10px; }
-[data-state="error"] .error-message { display: block; } /* Ensure message is visible */
+
+/* Error State using .error class */
+.error { /* Applied to the container element by JS */
+    border-color: var(--danger-color) !important; /* Highlight border for containers, keep !important */
+}
+.error select,
+.error input { /* Style inputs inside error container */
+     border-color: var(--danger-color);
+     background-color: #fdeeee;
+}
+/* Error message styling - applied to the text content by JS */
+.error-message { color: var(--danger-color); font-weight: 500; }
+/* Ensure error message shows correctly in table cells */
+td.error-message {
+    background-color: rgba(200, 85, 61, 0.08);
+    text-align: center !important; /* Override default alignment */
+    padding: 15px;
+    color: var(--danger-color);
+    font-weight: 500;
+    white-space: normal; /* Allow error message to wrap */
+}
 
 
 /* Value Change Highlight */
 #spotPriceDisplay.value-changed,
 #optionChainTable td.value-changed {
-    /* Use animation for a fade-out effect */
-    animation: value-flash var(--highlight-duration) ease-out;
+    animation: value-flash var(--highlight-duration) ease-out forwards; /* Use forwards to hold end state if needed, or remove */
+    background-color: transparent; /* Start transparent */
 }
 @keyframes value-flash {
-    0%, 50% { background-color: var(--highlight-bg); } /* Hold highlight longer */
-    100% { background-color: transparent; } /* Rely on original cell background */
+    0% { background-color: var(--highlight-bg); }
+    70% { background-color: var(--highlight-bg); } /* Hold longer */
+    100% { background-color: transparent; } /* Fade back to original (set by cell class) */
 }
 
 /* Placeholder Text */
 .placeholder-text {
     text-align: center;
-    color: #777;
+    color: var(--text-muted); /* Use variable */
     padding: 40px 20px;
     border: 1px dashed #ccc;
     margin: 10px 0;
     width: 100%;
     font-style: italic;
     border-radius: var(--card-radius);
+    background-color: #fdfdfd; /* Slightly different background */
 }
 /* Remove placeholder border when inside specific containers */
 .analysis-container .placeholder-text,
 .news-container .placeholder-text,
-#payoffChartContainer .placeholder-text {
+#payoffChartContainer .placeholder-text,
+#taxInfo .placeholder-text /* Placeholder inside tax info div */
+ {
     border: none;
     margin: 0;
-    padding: 30px 15px; /* Adjust padding */
+    padding: 30px 15px;
+    background-color: transparent;
 }
-#greeksTable .placeholder-text { /* Placeholder inside greeks table body */
+#greeksTable .placeholder-text, /* Placeholder inside greeks table body */
+#strategyTable .placeholder-text /* Placeholder inside strategy table body */
+{
     border: none;
     padding: 20px;
     display: table-cell;
     text-align: center;
     width: 100%;
+    background-color: transparent;
 }
 
 
@@ -547,6 +561,7 @@ td.error-message { background-color: rgba(200, 85, 61, 0.08); text-align: center
     .container { flex-direction: column; gap: 25px; padding: 0 25px 25px 25px; }
     .option-chain-container { position: static; max-height: none; } /* Unstick option chain */
     .option-chain-container, .strategy-container { min-width: initial; }
+    .option-chain-container > .table-wrapper { max-height: 50vh; } /* Limit height when stacked */
 }
 @media screen and (max-width: 768px) {
     body { font-size: 14px; }
@@ -562,7 +577,8 @@ td.error-message { background-color: rgba(200, 85, 61, 0.08); text-align: center
     .button-wide { max-width: 220px; padding: 11px 0; }
     #payoffChartContainer { height: 350px; } /* Adjust chart height */
     .controls-row { gap: 12px; }
-    select, input { padding: 7px 10px; font-size: 0.9rem;}
+    select, input[type="number"], input[type="text"] { padding: 7px 10px; font-size: 0.9rem;} /* Adjust input padding */
+    #globalError, #statusMessage, #warningMessage { margin-left: 15px; margin-right: 15px;} /* Adjust margins */
 }
 @media screen and (max-width: 576px) {
     body { font-size: 13.5px; }
@@ -573,8 +589,12 @@ td.error-message { background-color: rgba(200, 85, 61, 0.08); text-align: center
     .data-table th, .data-table td { padding: 7px 8px; }
     button { font-size: 0.85rem; padding: 7px 10px; }
     #clearStrategyBtn { font-size: 0.8rem; padding: 5px 8px; }
-    .metrics-list li { font-size: 0.9rem; padding: 8px 0; }
+    .metrics-list li { font-size: 0.9rem; padding: 8px 0; flex-wrap: wrap; } /* Allow metrics to wrap */
+    .metrics-list .metric-label { margin-right: 8px; }
     .analysis-container { font-size: 0.9rem; }
     .table-wrapper { border-radius: 4px; }
     #payoffChartContainer { height: 300px; } /* Further adjust chart height */
+    .controls-row { flex-direction: column; align-items: stretch; gap: 10px; } /* Stack controls vertically */
+    select, input[type="number"].number-input-small { width: 100%; } /* Make controls full width */
+    #globalError, #statusMessage, #warningMessage { margin-left: 10px; margin-right: 10px;}
 }
