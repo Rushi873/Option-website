@@ -28,6 +28,9 @@ const SELECTORS = {
     greeksTable: "#greeksTable", // Selector for the entire table
     greeksTableBody: "#greeksTable tbody", // Added for direct access if needed
     globalErrorDisplay: "#globalError",
+    greeksAnalysisSection: '#greeksAnalysisSection',
+    greeksAnalysisResultContainer: '#greeksAnalysisResult',
+    greeksTableContainer: '#greeksSection', 
 };
 
 // Basic Logger
@@ -436,30 +439,31 @@ async function handleAssetChange() {
     currentSpotPrice = 0; // Reset current spot price
 
     if (!asset) {
-        // Reset dependent UI if no asset selected
+        // Reset dependent UI if no asset selected (Keep existing logic)
         populateDropdown(SELECTORS.expiryDropdown, [], "-- Select Asset First --");
         setElementState(SELECTORS.optionChainTableBody, 'content');
         document.querySelector(SELECTORS.optionChainTableBody).innerHTML = `<tr><td colspan="7">Select an Asset</td></tr>`;
         setElementState(SELECTORS.analysisResultContainer, 'content');
         document.querySelector(SELECTORS.analysisResultContainer).innerHTML = 'Select an asset to load analysis...';
-        setElementState(SELECTORS.spotPriceDisplay, 'content'); // Set state
+        setElementState(SELECTORS.newsResultContainer, 'content'); // Ensure news is also reset
+        document.querySelector(SELECTORS.newsResultContainer).innerHTML = ''; // Clear news content
+        setElementState(SELECTORS.spotPriceDisplay, 'content');
         document.querySelector(SELECTORS.spotPriceDisplay).textContent = 'Spot Price: -';
         resetResultsUI();
-        setElementState(SELECTORS.globalErrorDisplay, 'hidden'); // Hide global error
+        setElementState(SELECTORS.globalErrorDisplay, 'hidden');
         return;
     }
 
-    logger.info(`Asset changed to: ${asset}. Fetching data...`);
+    logger.info(`Asset changed to: ${asset}. Fetching data (Backend uses RapidAPI for stock/analysis)...`); // Updated log slightly
     setElementState(SELECTORS.expiryDropdown, 'loading');
     setElementState(SELECTORS.optionChainTableBody, 'loading');
     setElementState(SELECTORS.analysisResultContainer, 'loading');
-    // Ensure news container state is also set to loading
-    setElementState(SELECTORS.newsResultContainer, 'loading');
+    setElementState(SELECTORS.newsResultContainer, 'loading'); // Set news loading state
     setElementState(SELECTORS.spotPriceDisplay, 'loading', 'Spot Price: ...');
     resetResultsUI(); // Clear previous results on asset change
     setElementState(SELECTORS.globalErrorDisplay, 'hidden'); // Clear global error on new asset load
 
-    // --- Call Debug Endpoint ---
+    // --- Optional Debug Endpoint Call ---
     try {
         await fetchAPI('/debug/set_selected_asset', {
              method: 'POST', body: JSON.stringify({ asset: asset })
@@ -467,26 +471,28 @@ async function handleAssetChange() {
         logger.warn(`Sent debug request to set backend selected_asset to ${asset}`);
     } catch (debugErr) {
         logger.error("Failed to send debug asset selection:", debugErr.message);
-        setElementState(SELECTORS.globalErrorDisplay, 'error', `Debug Sync Failed: ${debugErr.message}`);
-        setTimeout(() => setElementState(SELECTORS.globalErrorDisplay, 'hidden'), 5000);
+        // Non-critical error, maybe just log it or show temporary message
+        // setElementState(SELECTORS.globalErrorDisplay, 'error', `Debug Sync Failed: ${debugErr.message}`);
+        // setTimeout(() => setElementState(SELECTORS.globalErrorDisplay, 'hidden'), 5000);
     }
     // --- End Debug Call ---
 
     try {
         // Fetch core data in parallel using allSettled
+        // Assuming fetchNiftyPrice and fetchExpiries remain separate calls
         const [spotResult, expiryResult, analysisResult, newsResult] = await Promise.allSettled([
             fetchNiftyPrice(asset), // Initial fetch (not refresh)
             fetchExpiries(asset),
-            fetchAnalysis(asset),
-            fetchNews(asset)
+            fetchAnalysis(asset),   // Calls /get_stock_analysis
+            fetchNews(asset)        // Calls /get_news
         ]);
 
         let hasCriticalError = false;
 
-        // Process results
+        // Process results (Keep existing logic)
         if (spotResult.status === 'rejected') {
             logger.error(`Error fetching spot price: ${spotResult.reason?.message || spotResult.reason}`);
-            // Let fetchNiftyPrice handle its own error display
+            // fetchNiftyPrice should handle its own error display
         }
         if (expiryResult.status === 'rejected') {
             logger.error(`Error fetching expiries: ${expiryResult.reason?.message || expiryResult.reason}`);
@@ -496,24 +502,24 @@ async function handleAssetChange() {
         }
         if (analysisResult.status === 'rejected') {
             logger.error(`Error fetching analysis: ${analysisResult.reason?.message || analysisResult.reason}`);
-            // Error display is handled within fetchAnalysis
+            // Error display is handled locally within fetchAnalysis
         }
         if (newsResult.status === 'rejected') {
             logger.error(`Error fetching news: ${newsResult.reason?.message || newsResult.reason}`);
-            // Error display is handled within fetchNews
-        } // ***** Closing brace was missing here - ADDED *****
+            // Error display is handled locally within fetchNews
+        }
 
         // If initial load was okay (no critical errors), start auto-refresh
         if (!hasCriticalError) {
-            startAutoRefresh();
+            startAutoRefresh(); // Assuming startAutoRefresh exists
         } else {
-             setElementState(SELECTORS.globalErrorDisplay, 'error', `Failed to load essential data (expiries) for ${asset}. Check console.`);
+             setElementState(SELECTORS.globalErrorDisplay, 'error', `Failed to load essential data (expiries) for ${asset}. Analysis/News might be available.`);
         }
 
     } catch (err) {
         // Catch unexpected errors during orchestration
         logger.error(`Unexpected error fetching initial data for ${asset}:`, err);
-        setElementState(SELECTORS.globalErrorDisplay, 'error', `Failed to load page data for ${asset}.`);
+        setElementState(SELECTORS.globalErrorDisplay, 'error', `Failed to load page data for ${asset}. ${err.message}`);
         stopAutoRefresh(); // Stop refresh on major initial load error
     }
 }
@@ -577,50 +583,76 @@ async function loadAssets() {
 
 /** Fetches stock analysis for the selected asset */
 async function fetchAnalysis(asset) {
-    if (!asset) return;
+    const analysisContainer = document.querySelector(SELECTORS.analysisResultContainer);
+    if (!analysisContainer) {
+         logger.warn("Analysis container element not found.");
+         return; // Exit if container doesn't exist
+    }
+    if (!asset) {
+         analysisContainer.innerHTML = 'Select an asset to load analysis...';
+         setElementState(SELECTORS.analysisResultContainer, 'content');
+         return; // Exit if no asset
+    }
+
     setElementState(SELECTORS.analysisResultContainer, 'loading', 'Fetching analysis...');
+    logger.debug(`Fetching analysis for ${asset}...`);
+
     try {
         // Ensure marked.js is loaded
         let attempts = 0;
         while (typeof marked === 'undefined' && attempts < 10) {
+            logger.debug("Waiting for marked.js...");
             await new Promise(resolve => setTimeout(resolve, 200)); // Wait 200ms
             attempts++;
         }
         if (typeof marked === 'undefined') {
-            throw new Error("Markdown parser (marked.js) failed to load in time.");
+            throw new Error("Markdown parser (marked.js) failed to load.");
         }
+        logger.debug("marked.js loaded.");
 
+        // Call backend endpoint (unchanged call structure)
         const data = await fetchAPI("/get_stock_analysis", {
             method: "POST", body: JSON.stringify({ asset })
         });
-        const analysisContainer = document.querySelector(SELECTORS.analysisResultContainer);
-        if (analysisContainer) {
-            const rawAnalysis = data?.analysis || "*No analysis content received.*";
-            // Basic sanitization (remove script tags) - consider more robust library if needed
-            const potentiallySanitized = rawAnalysis.replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '');
-            // Use marked.parse() which should be available now
-            analysisContainer.innerHTML = marked.parse(potentiallySanitized);
-            setElementState(SELECTORS.analysisResultContainer, 'content');
-        } else {
-             logger.warn("Analysis container not found in DOM.");
-        }
+        logger.debug(`Received analysis data for ${asset}`);
+
+        const rawAnalysis = data?.analysis || "*No analysis content received.*";
+        // Basic sanitization (consider a more robust library like DOMPurify if complex HTML is possible)
+        const potentiallySanitized = rawAnalysis.replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '');
+        // Use marked.parse()
+        analysisContainer.innerHTML = marked.parse(potentiallySanitized);
+        setElementState(SELECTORS.analysisResultContainer, 'content');
+        logger.info(`Successfully rendered analysis for ${asset}`);
+
     } catch (error) {
-        // Display error within the analysis container
-        setElementState(SELECTORS.analysisResultContainer, 'error', `Analysis Error: ${error.message}`);
-        // Log the full error for debugging
-        logger.error(`Error fetching analysis for ${asset}:`, error);
-        if (error.message.includes("Essential stock data not found")) {
-             setElementState(SELECTORS.analysisResultContainer, 'content'); // Set state to content
-             analysisContainer.innerHTML = `<p class="error-message" style="text-align: center; padding: 20px;">${error.message}</p>`; // Display message inside
-        } else {
-             // Display other errors locally too
-             setElementState(SELECTORS.analysisResultContainer, 'error', `Analysis Error: ${error.message}`);
+        logger.error(`Error fetching or rendering analysis for ${asset}:`, error);
+        let displayMessage = `Analysis Error: ${error.message}`;
+
+        // === UPDATED ERROR HANDLING ===
+        // Check specifically for the 404-like error message from the backend
+        // Use .includes() for flexibility as symbol/region might vary
+        if (error.message && error.message.includes("Essential stock data not found")) {
+            // Display the specific 404 message clearly inside the container
+            displayMessage = error.message; // Use the detailed message from backend
+            analysisContainer.innerHTML = `<p class="error-message" style="text-align: center; padding: 20px;">${displayMessage}</p>`;
+            setElementState(SELECTORS.analysisResultContainer, 'content'); // Set state to content, but show error message inside
+        } else if (error.message && error.message.includes("Analysis blocked by content filter")) {
+             // Handle content filter blocks specifically
+             displayMessage = `Analysis generation failed due to content restrictions.`;
+             analysisContainer.innerHTML = `<p class="error-message" style="text-align: center; padding: 20px;">${displayMessage}</p>`;
+             setElementState(SELECTORS.analysisResultContainer, 'content'); // Set state to content, but show error message inside
+        } else if (error.message && error.message.includes("Analysis generation failed")) {
+             // Handle other specific generation failures from the backend
+             displayMessage = error.message; // Show the specific failure reason
+             analysisContainer.innerHTML = `<p class="error-message" style="text-align: center; padding: 20px;">${displayMessage}</p>`;
+             setElementState(SELECTORS.analysisResultContainer, 'content'); // Set state to content, but show error message inside
         }
-        // Do not show global error here
-        // setElementState(SELECTORS.globalErrorDisplay, 'error', `Analysis Error: ${error.message}`); // REMOVE/COMMENT OUT
-        // ***** END CHANGE *****
-         // Re-throw error so handleAssetChange knows about the failure (optional)
-         // throw error;
+         else {
+            // For other errors (network, server 500s, JSON parse, etc.), show generic error message
+            setElementState(SELECTORS.analysisResultContainer, 'error', displayMessage);
+        }
+        // Avoid setting global error for analysis-specific issues
+        // throw error; // Do not re-throw unless handleAssetChange needs to react specifically
     }
 }
 
@@ -1300,8 +1332,8 @@ function resetResultsUI() {
     // --- Reset Payoff Chart ---
     const chartContainer = document.querySelector(SELECTORS.payoffChartContainer);
     if (chartContainer) {
-        // Purge existing Plotly chart to free resources and prevent conflicts
-        if (typeof Plotly !== 'undefined' && chartContainer.layout) { // Check if Plotly exists and plot is present
+        // Purge existing Plotly chart
+        if (typeof Plotly !== 'undefined' && chartContainer.layout) {
             try {
                 Plotly.purge(chartContainer.id);
                 logger.debug("Purged Plotly chart container during reset.");
@@ -1309,7 +1341,7 @@ function resetResultsUI() {
                 logger.warn("Failed to purge Plotly chart during reset:", e);
             }
         }
-        // Set placeholder text (will be quickly replaced by 'loading' state)
+        // Set placeholder text
         chartContainer.innerHTML = '<div class="placeholder-text">Preparing calculation...</div>';
         setElementState(SELECTORS.payoffChartContainer, 'content'); // Reset state
     } else {
@@ -1332,12 +1364,17 @@ function resetResultsUI() {
         if (caption) caption.textContent = 'Portfolio Option Greeks'; // Reset caption
 
         const greekBody = greeksTable.querySelector('tbody');
-        if (greekBody) greekBody.innerHTML = `<tr><td colspan="9" class="loading-text">...</td></tr>`; // Placeholder, colspan=9
+        // Reset to a placeholder row indicating calculation needed
+        if (greekBody) greekBody.innerHTML = `<tr><td colspan="9" class="placeholder-text">Update strategy to calculate Greeks.</td></tr>`; // Placeholder, colspan=9
 
         const greekFoot = greeksTable.querySelector('tfoot');
         if (greekFoot) greekFoot.innerHTML = ""; // Clear footer
 
         setElementState(SELECTORS.greeksTable, 'content'); // Reset state
+        // Also reset the state of the containing section if needed
+        const greeksSection = document.querySelector(SELECTORS.greeksSection);
+        if (greeksSection) setElementState(SELECTORS.greeksSection, 'content');
+
     } else {
         logger.warn("Greeks table not found during reset.");
     }
@@ -1361,33 +1398,76 @@ function resetResultsUI() {
 
 
     // --- Reset Metrics Display ---
-    // Use "..." as the placeholder, matching the loading state setup
+    // Reset all metric values to '...' or 'N/A'
     displayMetric("...", SELECTORS.maxProfitDisplay);
     displayMetric("...", SELECTORS.maxLossDisplay);
     displayMetric("...", SELECTORS.breakevenDisplay);
     displayMetric("...", SELECTORS.rewardToRiskDisplay);
     displayMetric("...", SELECTORS.netPremiumDisplay);
+    // Reset state of the metrics container if needed
+    const metricsList = document.querySelector(SELECTORS.metricsList);
+    if (metricsList) setElementState(SELECTORS.metricsList, 'content'); // Reset state
 
-    // --- Reset News Container (from your original function) ---
+
+    // --- Reset News Container ---
     const newsContainer = document.querySelector(SELECTORS.newsResultContainer);
     if (newsContainer) {
-        newsContainer.innerHTML = '<p class="loading-text">...</p>'; // Placeholder
+        // Set to a placeholder relevant to news
+        newsContainer.innerHTML = '<p class="placeholder-text">Select an asset to load news...</p>';
         setElementState(SELECTORS.newsResultContainer, 'content'); // Reset state
     } else {
         logger.warn("News container not found during reset.");
     }
 
+    // --- Reset Stock Analysis Container ---
+    const analysisContainer = document.querySelector(SELECTORS.analysisResultContainer);
+    if (analysisContainer) {
+         // Set to a placeholder relevant to stock analysis
+         analysisContainer.innerHTML = '<p class="placeholder-text">Select an asset to load analysis...</p>';
+         setElementState(SELECTORS.analysisResultContainer, 'content'); // Reset state
+     } else {
+         logger.warn("Stock analysis container not found during reset.");
+     }
+
+
+    // ===== ADD RESET FOR GREEKS ANALYSIS SECTION =====
+    const greeksAnalysisSection = document.querySelector(SELECTORS.greeksAnalysisSection);
+    const greeksAnalysisContainer = document.querySelector(SELECTORS.greeksAnalysisResultContainer);
+
+    if (greeksAnalysisSection) {
+        setElementState(SELECTORS.greeksAnalysisSection, 'hidden'); // Hide the section by default on reset
+        logger.debug("Reset Greeks Analysis Section to hidden.");
+    } else {
+        logger.warn("Greeks Analysis section not found during reset.");
+    }
+    if (greeksAnalysisContainer) {
+         // Clear the content inside
+         greeksAnalysisContainer.innerHTML = '';
+         // Optional: Set back to loading/placeholder if section wasn't hidden
+         // greeksAnalysisContainer.innerHTML = '<p class="loading-text">...</p>';
+         setElementState(SELECTORS.greeksAnalysisResultContainer, 'content'); // Reset inner container state
+         logger.debug("Reset Greeks Analysis Container content.");
+    } else {
+        logger.warn("Greeks Analysis result container not found during reset.");
+    }
+    // ================================================
+
+
     // --- Reset Status/Warning Message Container ---
-    const messageContainer = document.querySelector(SELECTORS.statusMessageContainer);
+    const messageContainer = document.querySelector(SELECTORS.statusMessageContainer); // Define this selector if needed
      if (messageContainer) {
           messageContainer.textContent = ''; // Clear previous messages
           messageContainer.className = 'status-message'; // Reset classes
+          setElementState(messageContainer, 'hidden'); // Hide it
      }
-     const warningContainer = document.querySelector(SELECTORS.warningContainer);
+     const warningContainer = document.querySelector(SELECTORS.warningContainer); // Define this selector if needed
      if (warningContainer) {
           warningContainer.textContent = '';
-          warningContainer.style.display = 'none';
+          warningContainer.style.display = 'none'; // Hide it
+          setElementState(warningContainer, 'hidden');
      }
+
+     logger.info("Results UI elements reset.");
 }
 
 
@@ -1840,23 +1920,39 @@ function renderTaxTable(containerElement, taxData) {
  */
 function renderGreeksTable(tableElement, greeksList) {
     const logger = window.console;
-    tableElement.innerHTML = '';
+    tableElement.innerHTML = ''; // Clear previous
     const caption = tableElement.createCaption();
     caption.className = "table-caption";
     caption.textContent = "Portfolio Option Greeks";
 
-    if (!Array.isArray(greeksList)) { /* ... error handling ... */ return; }
+    // Initialize totals
+    const totals = { delta: 0, gamma: 0, theta: 0, vega: 0, rho: 0 };
+    let hasCalculatedGreeks = false; // Flag to check if any totals were calculated
+
+    if (!Array.isArray(greeksList)) {
+        logger.error("renderGreeksTable: Input greeksList is not an array.");
+        caption.textContent = "Error: Invalid Greeks data received.";
+        setElementState(tableElement, 'error');
+        return null; // Return null or empty object on error
+    }
     const totalLegsProcessed = greeksList.length;
-    if (totalLegsProcessed === 0) { /* ... empty handling ... */ return; }
+    if (totalLegsProcessed === 0) {
+        caption.textContent = "Portfolio Option Greeks (No legs to process)";
+        // Add a row indicating no data
+        const tbody = tableElement.createTBody();
+        tbody.innerHTML = `<tr><td colspan="9">No valid option legs found in the strategy.</td></tr>`;
+        setElementState(tableElement, 'content'); // It's content, just empty
+        return totals; // Return zeroed totals
+    }
 
     caption.textContent = `Portfolio Option Greeks (${totalLegsProcessed} Leg${totalLegsProcessed > 1 ? 's' : ''} Processed)`;
 
-    // --- Create Header (Clarify Per Share) ---
+    // Create Header
     const thead = tableElement.createTHead();
     thead.innerHTML = `
         <tr>
             <th>Action</th>
-            <th>Lots</th> <!-- Changed from Quantity -->
+            <th>Lots</th>
             <th>Type</th>
             <th>Strike</th>
             <th title="Option Delta per Share">Δ Delta</th>
@@ -1867,40 +1963,45 @@ function renderGreeksTable(tableElement, greeksList) {
         </tr>`;
 
     const tbody = tableElement.createTBody();
-    let hasCalculatedGreeks = false;
-    const totals = { delta: 0, gamma: 0, theta: 0, vega: 0, rho: 0 };
     let skippedLegsCount = 0;
 
-    greeksList.forEach(g => {
+    greeksList.forEach((g, index) => { // Add index for logging
         const row = tbody.insertRow();
         const inputData = g?.input_data;
-        // *** Use calculated_greeks_per_share for leg display ***
+        // Use PER-SHARE greeks for display in the row
         const gv_per_share = g?.calculated_greeks_per_share;
 
-        if (!inputData || !gv_per_share) { /* ... malformed item handling ... */ skippedLegsCount++; return; }
+        // --- Validation for this specific leg ---
+        if (!inputData || !gv_per_share) {
+             logger.warn(`renderGreeksTable: Malformed data for leg ${index + 1}. Skipping.`);
+             skippedLegsCount++;
+             // Optionally add a visual indicator for the skipped row
+             row.innerHTML = `<td colspan="9" class="skipped-leg">Data missing for this leg</td>`;
+             return; // Skip to next iteration
+        }
 
-        // --- Extract Leg Details (Map Action/Type) ---
-        let actionDisplay = (inputData.tr_type === 'b') ? 'BUY' : (inputData.tr_type === 's' ? 'SELL' : '?');
-        let typeDisplay = (inputData.op_type === 'c') ? 'CE' : (inputData.op_type === 'p' ? 'PE' : '?');
-        const lots = parseInt(inputData.lots || '0', 10); // Read 'lots' key
+        // --- Extract details ---
+        const actionDisplay = (inputData.tr_type === 'b') ? 'BUY' : (inputData.tr_type === 's' ? 'SELL' : '?');
+        const typeDisplay = (inputData.op_type === 'c') ? 'CE' : (inputData.op_type === 'p' ? 'PE' : '?');
+        const lots = parseInt(inputData.lots || '0', 10);
+        const lotSize = parseInt(inputData.lot_size || '0', 10); // Need lot size for totals calc!
         const strike = inputData.strike || '?';
-        // Display only lots in the column
         const lotsDisplay = (lots > 0) ? `${lots}` : 'N/A';
 
-        // --- Fill Cell Data (Displaying Per-Share Greeks) ---
+        // --- Fill Cells (Per-Share Display) ---
         row.insertCell().textContent = actionDisplay;
-        row.insertCell().textContent = lotsDisplay; // Show only Lots
+        row.insertCell().textContent = lotsDisplay;
         row.insertCell().textContent = typeDisplay;
-        row.insertCell().textContent = formatNumber(strike, 2);
-        // Display per-share values
+        row.insertCell().textContent = formatNumber(strike, 2); // Assuming formatNumber exists
         row.insertCell().textContent = formatNumber(gv_per_share.delta, 4, '-');
         row.insertCell().textContent = formatNumber(gv_per_share.gamma, 4, '-');
         row.insertCell().textContent = formatNumber(gv_per_share.theta, 4, '-');
         row.insertCell().textContent = formatNumber(gv_per_share.vega, 4, '-');
         row.insertCell().textContent = formatNumber(gv_per_share.rho, 4, '-');
 
-        // --- Accumulate PORTFOLIO totals (Using Per-Share * Lots) ---
-        const isValidForTotal = lots > 0 &&
+        // --- Accumulate PORTFOLIO totals (Using Per-Share * Lots * LotSize) ---
+        // Check if all required values are valid numbers
+        const isValidForTotal = lots > 0 && lotSize > 0 &&
                                 typeof gv_per_share.delta === 'number' && isFinite(gv_per_share.delta) &&
                                 typeof gv_per_share.gamma === 'number' && isFinite(gv_per_share.gamma) &&
                                 typeof gv_per_share.theta === 'number' && isFinite(gv_per_share.theta) &&
@@ -1908,33 +2009,52 @@ function renderGreeksTable(tableElement, greeksList) {
                                 typeof gv_per_share.rho === 'number' && isFinite(gv_per_share.rho);
 
         if (isValidForTotal) {
-            // Multiply per-share greek by lots
-            totals.delta += gv_per_share.delta * lots;
-            totals.gamma += gv_per_share.gamma * lots;
-            totals.theta += gv_per_share.theta * lots;
-            totals.vega += gv_per_share.vega * lots;
-            totals.rho += gv_per_share.rho * lots;
-            hasCalculatedGreeks = true;
-            row.classList.add('greeks-calculated');
-        } else { /* ... skipped leg handling ... */ }
-    });
+            const quantity = lots * lotSize; // Total quantity for the leg
+            totals.delta += gv_per_share.delta * quantity;
+            totals.gamma += gv_per_share.gamma * quantity;
+            totals.theta += gv_per_share.theta * quantity;
+            totals.vega += gv_per_share.vega * quantity;
+            totals.rho += gv_per_share.rho * quantity;
+            hasCalculatedGreeks = true; // Mark that totals were calculated
+            row.classList.add('greeks-calculated'); // Optional styling
+        } else {
+            logger.warn(`renderGreeksTable: Skipping leg ${index + 1} from total calculation due to invalid data (lots=${lots}, lotSize=${lotSize}, greeks=${JSON.stringify(gv_per_share)})`);
+            skippedLegsCount++;
+            row.classList.add('greeks-skipped'); // Optional styling
+        }
+    }); // End forEach leg
 
-    // --- Create Footer with Totals (Based on Lots) ---
+    // --- Create Footer with Totals ---
     const tfoot = tableElement.createTFoot();
     const footerRow = tfoot.insertRow();
     footerRow.className = 'totals-row';
-    if (hasCalculatedGreeks) {
+
+    if (hasCalculatedGreeks) { // Only show totals if at least one leg contributed
         const headerCell = footerRow.insertCell();
         headerCell.colSpan = 4; // Span first 4 columns
-        // Clarify Total is per Portfolio (sum over lots)
-        headerCell.textContent = 'Total Portfolio Greeks (per Lot Basis)';
+        // Clarify Total represents the entire portfolio value change
+        headerCell.textContent = 'Total Portfolio Exposure';
         headerCell.style.textAlign = 'right'; headerCell.style.fontWeight = 'bold';
+        // Display the final rounded totals
         footerRow.insertCell().textContent = formatNumber(totals.delta, 4);
         footerRow.insertCell().textContent = formatNumber(totals.gamma, 4);
         footerRow.insertCell().textContent = formatNumber(totals.theta, 4);
         footerRow.insertCell().textContent = formatNumber(totals.vega, 4);
         footerRow.insertCell().textContent = formatNumber(totals.rho, 4);
-    } else { /* ... footer if no totals calculable ... */ }
+        setElementState(tableElement, 'content');
+    } else if (totalLegsProcessed > 0) { // Legs existed but none were valid for totals
+        const cell = footerRow.insertCell();
+        cell.colSpan = 9;
+        cell.textContent = 'Could not calculate portfolio totals due to invalid leg data.';
+        cell.style.textAlign = 'center';
+        cell.style.fontStyle = 'italic';
+        setElementState(tableElement, 'content'); // Still content, just explaining lack of totals
+    }
+    // If totalLegsProcessed was 0, the tbody already has the message.
+
+    // --- Return the calculated totals ---
+    logger.info(`renderGreeksTable: Rendered ${totalLegsProcessed - skippedLegsCount} valid legs. Totals calculated: ${JSON.stringify(totals)}`);
+    return totals; // Return the dictionary of calculated totals
 }
 
 /**
@@ -1953,6 +2073,76 @@ function formatNumber(value, precision = 2, nanPlaceholder = '') {
     }
     return num.toFixed(precision);
 }
+
+
+
+async function fetchAndDisplayGreeksAnalysis(asset, portfolioGreeksData) {
+    const container = document.querySelector(SELECTORS.greeksAnalysisResultContainer); // Define this selector
+    const section = document.querySelector(SELECTORS.greeksAnalysisSection); // Define this selector
+
+    if (!container || !section) {
+        logger.error("Greeks analysis container or section not found in DOM.");
+        return;
+    }
+    if (!asset || !portfolioGreeksData || typeof portfolioGreeksData !== 'object') {
+        logger.warn("Greeks analysis skipped: Missing asset or valid Greeks data.");
+        setElementState(section, 'hidden'); // Hide the section if no data
+        return;
+    }
+    // Check if all greek values are effectively zero or N/A (might happen if only stock is added)
+     const allZeroOrNull = Object.values(portfolioGreeksData).every(v => v === null || v === 0 || !isFinite(v));
+    if (allZeroOrNull) {
+        logger.info("Greeks analysis skipped: All portfolio Greeks are zero or N/A.");
+         container.innerHTML = '<p>No option Greeks to analyze for this position.</p>';
+         setElementState(section, 'content'); // Show the section with the message
+         setElementState(container, 'content');
+         return;
+    }
+
+
+    logger.info(`Fetching Greeks analysis for ${asset}...`);
+    setElementState(section, 'content'); // Show the section
+    setElementState(container, 'loading', 'Fetching Greeks analysis...');
+
+    try {
+        // Ensure marked.js is loaded (similar check as in fetchAnalysis)
+        let attempts = 0;
+        while (typeof marked === 'undefined' && attempts < 10) {
+            await new Promise(resolve => setTimeout(resolve, 200));
+            attempts++;
+        }
+        if (typeof marked === 'undefined') {
+            throw new Error("Markdown parser (marked.js) failed to load.");
+        }
+
+        const requestBody = {
+            asset_symbol: asset,
+            portfolio_greeks: portfolioGreeksData // Pass the totals dictionary
+        };
+
+        const data = await fetchAPI("/get_greeks_analysis", {
+            method: "POST",
+            body: JSON.stringify(requestBody)
+        });
+
+        const rawAnalysis = data?.greeks_analysis || "*No Greeks analysis content received.*";
+        const potentiallySanitized = rawAnalysis.replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '');
+        container.innerHTML = marked.parse(potentiallySanitized);
+        setElementState(container, 'content');
+        logger.info(`Successfully rendered Greeks analysis for ${asset}`);
+
+    } catch (error) {
+        logger.error(`Error fetching or rendering Greeks analysis for ${asset}:`, error);
+        // Display error within the Greeks analysis container
+        setElementState(container, 'error', `Greeks Analysis Error: ${error.message}`);
+        // Maybe hide the whole section on error? Or show the error message inline.
+        // Example: Keep section visible but show error in container
+        // setElementState(section, 'content');
+    }
+}
+
+
+
 
 
 // ===============================================================

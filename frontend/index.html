@@ -6,17 +6,18 @@
     <title>Option Strategy Builder</title>
     <!-- Load Markdown parser -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <script src="https://cdn.plot.ly/plotly-3.0.1.min.js" charset="utf-8"></script>
-    <link rel="icon" href="/favicon/favicon.ico" type="image/x-icon">
+    <!-- Load Plotly -->
+    <script src="https://cdn.plot.ly/plotly-latest.min.js" charset="utf-8"></script> <!-- Using latest Plotly -->
+    <!-- Favicon -->
+    <link rel="icon" type="image/png" sizes="16x16" href="favicon/better.png"> <!-- Update path if needed -->
     <!-- Defer script loading -->
     <script src="script.js" defer></script>
+    <!-- Stylesheet -->
     <link rel="stylesheet" href="styles.css">
     <!-- Optional: Link Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600&display=swap" rel="stylesheet">
-    <link rel="icon" href="/favicon.ico" type="image/x-icon"> <!-- Optional: Add a favicon link -->
-
 </head>
 <body>
 
@@ -24,19 +25,23 @@
         <h1>Option Strategy Builder</h1>
     </header>
 
+    <!-- Global Error Display Area -->
     <div id="globalError" class="error-message hidden"></div> <!-- Start hidden -->
 
     <div class="container">
 
-        <!-- Option Chain Section -->
+        <!-- Left Column: Option Chain -->
         <section class="option-chain-container card">
-            <!-- ***** ID CORRECTED to match JS selector ***** -->
             <h2 id="spotPriceDisplay">Spot Price: -</h2>
             <div class="controls-row">
                 <label for="asset">Asset:</label>
-                <select id="asset" aria-label="Select Asset"></select>
+                <select id="asset" aria-label="Select Asset">
+                    <!-- Options added by JS -->
+                </select>
                 <label for="expiry">Expiry:</label>
-                <select id="expiry" aria-label="Select Expiry Date"></select>
+                <select id="expiry" aria-label="Select Expiry Date">
+                    <!-- Options added by JS -->
+                </select>
             </div>
             <div class="table-wrapper thin-scrollbar">
                 <table id="optionChainTable" class="option-chain data-table">
@@ -59,14 +64,14 @@
             </div>
         </section>
 
-        <!-- Strategy Builder & Results Section -->
+        <!-- Right Column: Strategy Builder & Results -->
         <section class="strategy-container card">
 
+            <!-- Strategy Builder Input Table -->
             <div class="section-header">
                 <h2>Strategy Builder</h2>
                 <button id="clearStrategyBtn" class="button button-danger button-small">Clear</button>
             </div>
-
             <div class="table-wrapper thin-scrollbar">
                 <table id="strategyTable" class="data-table strategy-legs-table">
                     <thead>
@@ -87,36 +92,39 @@
                 </table>
             </div>
 
+            <!-- Payoff Chart -->
             <h2 class="section-subheader">Payoff Chart</h2>
             <div id="payoffChartContainer" class="chart-container">
                  <div class="placeholder-text">Add positions and click "Update" to see the payoff chart.</div>
             </div>
 
+            <!-- Update Button -->
             <div class="button-container">
                 <button id="updateChartBtn" class="button button-primary button-wide">Update & Calculate</button>
             </div>
 
-            <!-- Strategy Metrics -->
+            <!-- Strategy Metrics Section -->
             <section id="strategyMetricsSection" class="results-section card">
                 <h3 class="section-subheader">Strategy Metrics</h3>
                 <div id="strategyMetrics">
                      <ul class="metrics-list">
                         <li id="maxProfit"><span class="metric-label">Max Profit:</span> <span class="metric-value">N/A</span></li>
                         <li id="maxLoss"><span class="metric-label">Max Loss:</span> <span class="metric-value">N/A</span></li>
-                        <!-- ***** Breakeven Reinstated ***** -->
                         <li id="breakeven"><span class="metric-label">Breakeven Points:</span> <span class="metric-value">N/A</span></li>
                         <li id="rewardToRisk"><span class="metric-label">Reward:Risk Ratio:</span> <span class="metric-value">N/A</span></li>
                         <li id="netPremium"><span class="metric-label">Net Premium:</span> <span class="metric-value">N/A</span></li>
                     </ul>
-                     <!-- Cost Breakdown moved outside UL -->
+                     <!-- Cost Breakdown -->
                     <details id="costBreakdownContainer" class="results-details hidden" style="margin-top: 15px;">
                         <summary class="breakdown-header">Option Premium Breakdown</summary>
-                         <ul id="costBreakdownList" class="breakdown-list" style="padding: 10px;"></ul>
+                         <ul id="costBreakdownList" class="breakdown-list" style="padding: 10px;">
+                            <!-- Items added by JS -->
+                         </ul>
                     </details>
                 </div>
             </section>
 
-            <!-- Tax Info SECTION -->
+            <!-- Estimated Charges Section -->
             <section id="taxInfoSection" class="results-section card card-accent-warning">
                  <h3 class="section-subheader">Estimated Charges</h3>
                  <div id="taxInfo" >
@@ -125,7 +133,7 @@
                  </div>
             </section>
 
-            <!-- Option Greeks SECTION -->
+            <!-- Option Greeks Table Section -->
              <section id="greeksSection" class="results-section card">
                 <h3 class="section-subheader">Options Greeks</h3>
                  <div class="table-wrapper thin-scrollbar">
@@ -136,7 +144,7 @@
                          </thead>
                          <tbody>
                             <!-- Rows added by JS -->
-                            <tr><td colspan="9" class="loading-text">Update strategy to calculate Greeks.</td></tr>
+                            <tr><td colspan="9" class="placeholder-text">Update strategy to calculate Greeks.</td></tr> <!-- Updated placeholder -->
                          </tbody>
                          <tfoot>
                              <!-- Footer added by JS -->
@@ -145,22 +153,33 @@
                 </div>
             </section>
 
-            <!-- ***** ADD NEWS SECTION HERE ***** -->
+            <!-- Portfolio Greeks Analysis Section -->
+            <section id="greeksAnalysisSection" class="results-section card hidden"> <!-- Start hidden -->
+                <h3 class="section-subheader">Portfolio Greeks Analysis</h3>
+                <div id="greeksAnalysisResult" class="analysis-container">
+                    <!-- Greeks analysis content added by JS -->
+                    <p class="placeholder-text">Update strategy to load Greeks analysis...</p> <!-- Updated placeholder -->
+                </div>
+            </section>
+
+            <!-- Latest News Section -->
             <section id="newsSection" class="results-section card">
                 <h3 class="section-subheader">Latest News</h3>
                 <div id="newsResult" class="news-container">
                     <!-- News content added by JS -->
-                    <p class="loading-text">Select an asset to load news...</p>
+                    <p class="placeholder-text">Select an asset to load news...</p> <!-- Updated placeholder -->
                 </div>
             </section>
 
-            <!-- Stock Analysis SECTION -->
+            <!-- Stock Analysis Section -->
              <section id="analysisSection" class="results-section card">
-                <h2 class="section-subheader">Stock Analysis</h2>
+                <h2 class="section-subheader">Stock Analysis (Market Context)</h2> <!-- Clarified title -->
                 <div id="analysisResult" class="analysis-container">
-                    Select an asset to load analysis...
+                     <!-- Stock analysis content added by JS -->
+                    <p class="placeholder-text">Select an asset to load analysis...</p> <!-- Updated placeholder -->
                 </div>
             </section>
+
         </section> <!-- Close strategy-container -->
     </div> <!-- Close container -->
 

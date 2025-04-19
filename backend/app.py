@@ -118,7 +118,7 @@ API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 option_chain_cache = TTLCache(maxsize=50, ttl=60) # Increased TTL slightly
 option_chain_lock = threading.Lock()
 stock_data_cache = TTLCache(maxsize=100, ttl=600)
-news_cache = TTLCache(maxsize=100, ttl=900)
+news_cache = TTLCache(maxsize=100, ttl=60*15)
 analysis_cache = TTLCache(maxsize=50, ttl=1800)
 
 
@@ -163,7 +163,17 @@ except ValueError as ve:
     logger.error(str(ve))
 except Exception as e:
     logger.error(f"Failed to configure Gemini API: {e}. Analysis endpoint will fail.", exc_info=True)
+    # ===============================================================
 
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
+RAPIDAPI_HOST = os.getenv("RAPIDAPI_HOST")
+if not RAPIDAPI_KEY or RAPIDAPI_KEY == "YOUR_FALLBACK_KEY_IF_NEEDED_FOR_TESTING_ONLY":
+    logger.error("RAPIDAPI_KEY environment variable not set or is a placeholder.")
+RAPIDAPI_HEADERS = {
+    'x-rapidapi-key': RAPIDAPI_KEY,
+    'x-rapidapi-host': RAPIDAPI_HOST
+}
+RAPIDAPI_BASE_URL = f"https://{RAPIDAPI_HOST}"
 
 # ===============================================================
 # Global State (Keep as is)
@@ -689,6 +699,15 @@ def prepare_strategy_data(
     # --- Final Log ---
     logger.info(f"[{func_name}] Finished preparation. Prepared {len(prepared_data)} valid legs out of {len(strategy_dicts)} input legs for asset {asset}.")
     return prepared_data
+    # ===============================================================
+
+def format_greek(value: Optional[float], precision: int = 4) -> str:
+    """Formats a float nicely for display, handles None/NaN/Inf."""
+    if value is None or not isinstance(value, (int, float)) or not np.isfinite(value):
+        return "N/A"
+    # Add '+' sign for positive numbers for clarity in prompt
+    sign = '+' if value > 0 else ''
+    return f"{sign}{value:.{precision}f}"
 
 
 
@@ -800,6 +819,17 @@ class PayoffRequest(BaseModel):
     strategy: List[StrategyLegInput] 
     
 class DebugAssetSelectRequest(BaseModel): asset: str
+
+class GreeksData(BaseModel):
+    delta: Optional[float] = None
+    gamma: Optional[float] = None
+    theta: Optional[float] = None
+    vega: Optional[float] = None
+    rho: Optional[float] = None
+
+class GreeksAnalysisRequest(BaseModel):
+    asset_symbol: str = Field(..., min_length=1, description="Underlying asset symbol")
+    portfolio_greeks: GreeksData = Field(..., description="Dictionary of total portfolio Greeks")
 
 
 
@@ -1632,301 +1662,308 @@ def calculate_option_greeks(
 
 
 # ===============================================================
-# 5. Fetch Stock Data (Robust yfinance handling - FIX for 404)
+# 5. Fetch Stock Data (Rewritten for RapidAPI)
 # ===============================================================
-async def fetch_stock_data_async(stock_symbol: str) -> Optional[Dict[str, Any]]:
+async def fetch_stock_data_async(stock_symbol: str, region: str = "IN") -> Optional[Dict[str, Any]]:
     """
-    Fetches stock/index data using yfinance asynchronously.
+    Fetches stock/index data using RapidAPI (apidojo-yahoo-finance-v1) asynchronously.
 
-    Prioritizes ticker.info for current data, falls back to history.
-    Calculates moving averages from historical data.
-    Handles potential missing data for various fields gracefully.
-    Returns a dictionary containing fetched and calculated data, suitable
-    for both stocks and indices like ^NSEI.
+    - Gets metadata and historical data from '/stock/v3/get-chart'.
+    - Calculates moving averages and average volume from historical data.
+    - Fetches analyst ratings from '/stock/get-what-analysts-are-saying'.
+    - Handles potential API errors and missing data gracefully.
+    - Returns a dictionary containing fetched and calculated data.
     """
-    cache_key = f"stock_{stock_symbol}"
+    cache_key = f"stock_rapidapi_{stock_symbol}_{region}"
     cached = stock_data_cache.get(cache_key)
     if cached:
-        logger.debug(f"Cache hit for stock data: {stock_symbol}")
+        logger.debug(f"Cache hit for RapidAPI stock data: {stock_symbol}")
         return cached
 
-    logger.info(f"[{stock_symbol}] Initiating async fetch.")
-    logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Starting fetch.")
+    logger.info(f"[{stock_symbol}] Initiating RapidAPI async fetch (Region: {region}).")
 
-    info = None
-    h1m, h5d, h50d_data, h200d_data = None, None, None, None # Adjusted names for clarity
-    ticker_obj = None
+    chart_data = None
+    analyst_data = None
+    # We need daily data for MAs and avg volume, and preferably recent metadata
+    # Fetch ~1 year of daily data for calculations. More data can be requested if needed.
+    chart_url = f"{RAPIDAPI_BASE_URL}/stock/v3/get-chart"
+    chart_params = {
+        "symbol": stock_symbol,
+        "region": region,
+        "interval": "1d",        # Daily interval for calculations
+        "range": "1y",           # 1 year range for 50/200 MA stability
+        "includePrePost": "false",
+        "useYfid": "true",
+        "includeAdjustedClose": "true",
+        "events": "div,split" # Include dividends/splits for adjusted close
+    }
+
+    analyst_url = f"{RAPIDAPI_BASE_URL}/stock/get-what-analysts-are-saying"
+    analyst_params = {
+        "symbols": stock_symbol,
+        "region": region,
+        "lang": "en-US" # Or adapt based on region?
+    }
 
     try:
-        loop = asyncio.get_running_loop()
+        timeout = aiohttp.ClientTimeout(total=20.0) # 20 second timeout for API calls
+        async with aiohttp.ClientSession(headers=RAPIDAPI_HEADERS, timeout=timeout) as session:
 
-        # --- Step 1: Get Ticker object ---
-        try:
-             ticker_obj = await loop.run_in_executor(None, yf.Ticker, stock_symbol)
-             if not ticker_obj:
-                 logger.error(f"[{stock_symbol}] fetch_stock_data_async: yf.Ticker returned None or invalid object.")
-                 return None # Critical failure
-             logger.debug(f"[{stock_symbol}] fetch_stock_data_async: yf.Ticker object CREATED successfully.")
-        except Exception as ticker_err:
-             logger.error(f"[{stock_symbol}] fetch_stock_data_async: Failed to create yf.Ticker object: {ticker_err}", exc_info=False)
-             return None # Critical failure
+            # --- Fetch Chart Data and Analyst Data Concurrently ---
+            async def fetch_api(url, params):
+                try:
+                    async with session.get(url, params=params) as response:
+                        logger.debug(f"[{stock_symbol}] Requesting {response.url}")
+                        if response.status == 200:
+                            data = await response.json()
+                            logger.debug(f"[{stock_symbol}] Received {response.status} from {url}")
+                            # Basic validation: Check for expected structure
+                            if url == chart_url and not data.get('chart', {}).get('result'):
+                                logger.error(f"[{stock_symbol}] Chart API response missing 'chart.result'. Data: {str(data)[:200]}")
+                                return None # Indicate fetch failure
+                            if url == analyst_url and 'result' not in data:
+                                 logger.warning(f"[{stock_symbol}] Analyst API response missing 'result'. Data: {str(data)[:200]}")
+                                 # Non-critical, proceed without analyst data
+                                 return {} # Return empty dict for analyst data on failure/no data
+                            return data
+                        elif response.status == 404:
+                             logger.error(f"[{stock_symbol}] API returned 404 Not Found for {url}. Symbol likely invalid for region '{region}' or API issue.")
+                             return None # Indicate critical failure for chart, non-critical for analyst
+                        else:
+                            logger.error(f"[{stock_symbol}] API Error {response.status} from {url}: {await response.text()}")
+                            return None # Indicate fetch failure
+                except asyncio.TimeoutError:
+                     logger.error(f"[{stock_symbol}] Timeout fetching data from {url}")
+                     return None
+                except aiohttp.ClientError as http_err:
+                    logger.error(f"[{stock_symbol}] HTTP Client Error fetching data from {url}: {http_err}", exc_info=False)
+                    return None
+                except json.JSONDecodeError as json_err:
+                     logger.error(f"[{stock_symbol}] JSON Decode Error parsing response from {url}: {json_err}", exc_info=False)
+                     return None
+                except Exception as e:
+                    logger.error(f"[{stock_symbol}] Unexpected error fetching data from {url}: {e}", exc_info=True)
+                    return None
 
-        # --- Step 2: Fetch info (best effort) ---
-        try:
-            logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Attempting to fetch ticker.info...")
-            info = await loop.run_in_executor(None, getattr, ticker_obj, 'info')
+            # Run fetches concurrently
+            api_tasks = [
+                fetch_api(chart_url, chart_params),
+                fetch_api(analyst_url, analyst_params)
+            ]
+            results = await asyncio.gather(*api_tasks)
+            chart_response, analyst_response = results
 
-            if not info or (isinstance(info, dict) and not info):
-                 logger.warning(f"[{stock_symbol}] fetch_stock_data_async: ticker.info dictionary is EMPTY or fetch returned None.")
-                 info = {}
-            else:
-                 logger.debug(f"[{stock_symbol}] fetch_stock_data_async: ticker.info fetched. Type: {type(info)}. Keys: {list(info.keys())[:10] if isinstance(info, dict) else 'Not a dict'}...")
-                 if isinstance(info, dict):
-                     dbg_info_fields = {k: info.get(k) for k in [
-                         "regularMarketPrice", "currentPrice", "bid", "ask", "open", "previousClose",
-                         "shortName", "longName", "quoteType", "exchange", "volume", "averageVolume"
-                     ]}
-                     logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Key fields in ticker.info: {dbg_info_fields}")
+            # --- Process Chart Data (CRITICAL) ---
+            if not chart_response or not chart_response.get('chart', {}).get('result'):
+                logger.error(f"[{stock_symbol}] CRITICAL - Failed to fetch or parse valid chart data from RapidAPI. Returning None.")
+                return None # Critical failure if chart data is missing/invalid
+
+            # Extract metadata and indicators safely
+            try:
+                meta = chart_response['chart']['result'][0].get('meta', {})
+                indicators = chart_response['chart']['result'][0].get('indicators', {}).get('quote', [{}])[0]
+                timestamps = chart_response['chart']['result'][0].get('timestamp', [])
+                closes = indicators.get('close', [])
+                volumes = indicators.get('volume', [])
+                opens = indicators.get('open', [])
+                highs = indicators.get('high', [])
+                lows = indicators.get('low', [])
+                # Adjusted close might be useful but let's stick to 'close' for MAs for now
+                # adj_closes = chart_response['chart']['result'][0].get('indicators', {}).get('adjclose', [{}])[0].get('adjclose', [])
+
+                if not meta or not timestamps or not closes:
+                     logger.error(f"[{stock_symbol}] CRITICAL - Essential chart data (meta, timestamps, closes) missing in response. Returning None.")
+                     return None
+
+                logger.debug(f"[{stock_symbol}] Chart meta keys: {list(meta.keys())}")
+                logger.debug(f"[{stock_symbol}] Fetched {len(timestamps)} daily data points.")
+
+            except (KeyError, IndexError, TypeError) as e:
+                 logger.error(f"[{stock_symbol}] CRITICAL - Error accessing expected keys in chart response structure: {e}. Response snippet: {str(chart_response)[:500]}", exc_info=False)
+                 return None
+
+            # --- Determine Price (CRITICAL) ---
+            cp = meta.get("regularMarketPrice")
+            price_source = "meta.regularMarketPrice"
+            if cp is None or not isinstance(cp, (int, float)):
+                # Fallback to last closing price from history if meta price is bad
+                if closes and isinstance(closes[-1], (int, float)):
+                    cp = closes[-1]
+                    price_source = "history.last_close"
+                    logger.warning(f"[{stock_symbol}] Used last close price from history ({cp}) as regularMarketPrice was invalid/missing.")
+                else:
+                    logger.error(f"[{stock_symbol}] CRITICAL - Could not determine valid finite price from meta or history. Last close: {closes[-1] if closes else 'N/A'}. Returning None.")
+                    return None # CRITICAL FAILURE
+
+            logger.info(f"[{stock_symbol}] Determined price: {cp} (Source: {price_source})")
+
+
+            # --- Prepare DataFrame for Calculations ---
+            # Ensure all lists have the same length corresponding to timestamps
+            min_len = len(timestamps)
+            if len(closes) != min_len or len(volumes) != min_len or len(opens) != min_len or len(highs) != min_len or len(lows) != min_len:
+                logger.warning(f"[{stock_symbol}] Mismatch in lengths of historical data arrays. Truncating to shortest length ({min_len}).")
+                closes = closes[:min_len]
+                volumes = volumes[:min_len]
+                opens = opens[:min_len]
+                highs = highs[:min_len]
+                lows = lows[:min_len]
+
+            # Filter out potential nulls/None before creating DataFrame
+            # Find indices where close is valid (not None and finite)
+            valid_indices = [i for i, price in enumerate(closes) if price is not None and np.isfinite(price)]
+
+            if not valid_indices:
+                 logger.error(f"[{stock_symbol}] CRITICAL - No valid closing prices found in historical data. Cannot proceed.")
+                 return None
+
+            # Create DataFrame using only valid data points, ensuring alignment
+            try:
+                 df = pd.DataFrame({
+                     'Timestamp': pd.to_datetime([timestamps[i] for i in valid_indices], unit='s'),
+                     'Open': [opens[i] for i in valid_indices],
+                     'High': [highs[i] for i in valid_indices],
+                     'Low': [lows[i] for i in valid_indices],
+                     'Close': [closes[i] for i in valid_indices],
+                     # Ensure volume is integer, handle None -> 0
+                     'Volume': [int(volumes[i]) if volumes[i] is not None and np.isfinite(volumes[i]) else 0 for i in valid_indices]
+                 }).set_index('Timestamp')
+                 logger.debug(f"[{stock_symbol}] Created DataFrame with {len(df)} rows for calculations.")
+            except Exception as df_err:
+                logger.error(f"[{stock_symbol}] CRITICAL - Failed to create DataFrame from historical data: {df_err}", exc_info=True)
+                return None
+
+
+            # --- Calculate Moving Averages & Average Volume ---
+            ma50 = None
+            ma200 = None
+            avg_vol = None
+
+            if len(df) >= 50:
+                try:
+                    ma50 = df["Close"].rolling(window=50).mean().iloc[-1]
+                    # Calculate 50-day average volume as well
+                    avg_vol = df["Volume"].rolling(window=50).mean().iloc[-1]
+                    if not np.isfinite(ma50): ma50 = None
+                    if not np.isfinite(avg_vol): avg_vol = None
+                except Exception as ma_ex: logger.warning(f"[{stock_symbol}] Error calculating MA50/AvgVol50: {ma_ex}")
+            else: logger.warning(f"[{stock_symbol}] Not enough data for MA50/AvgVol50 (need 50, got {len(df)}).")
+
+            if len(df) >= 200:
+                try:
+                    ma200 = df["Close"].rolling(window=200).mean().iloc[-1]
+                    # Optionally update avg_vol to 200 day average if available
+                    # avg_vol = df["Volume"].rolling(window=200).mean().iloc[-1] # Uncomment if 200d avg vol is preferred
+                    if not np.isfinite(ma200): ma200 = None
+                except Exception as ma_ex: logger.warning(f"[{stock_symbol}] Error calculating MA200: {ma_ex}")
+            else: logger.warning(f"[{stock_symbol}] Not enough data for MA200 (need 200, got {len(df)}).")
+
+            logger.debug(f"[{stock_symbol}] MA50 (calc): {ma50}, MA200 (calc): {ma200}, AvgVol50 (calc): {avg_vol}")
+
+            # --- Get Other Fields from Meta or History ---
+            name = meta.get("shortName", meta.get("longName", stock_symbol))
+            qtype = meta.get("instrumentType") # e.g., "EQUITY", "INDEX"
+            exch = meta.get("exchangeName") # e.g., "NSI" for NSE
+            # Use meta volume if available and seems valid, otherwise use last history volume
+            current_vol = meta.get("regularMarketVolume")
+            vol_source = "meta.regularMarketVolume"
+            if current_vol is None or not isinstance(current_vol, (int, float)) or current_vol < 0 :
+                 if not df.empty and 'Volume' in df.columns:
+                    current_vol = df['Volume'].iloc[-1]
+                    vol_source = "history.last_volume"
+                    logger.debug(f"[{stock_symbol}] Used last volume from history ({current_vol}) as meta volume was invalid/missing.")
                  else:
-                      logger.warning(f"[{stock_symbol}] fetch_stock_data_async: ticker.info was not a dictionary. Type: {type(info)}")
-                      info = {}
+                    current_vol = None
+                    vol_source = "None"
+                    logger.warning(f"[{stock_symbol}] Could not determine current volume from meta or history.")
 
-        except json.JSONDecodeError as json_err:
-             logger.error(f"[{stock_symbol}] fetch_stock_data_async: JSONDecodeError fetching info: {json_err}. Symbol likely invalid/delisted or API issue.", exc_info=False)
-             info = {}
-        except Exception as info_err:
-             logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Non-critical error fetching 'info': {info_err}", exc_info=False)
-             info = {}
+            # Fundamental data is generally NOT in the chart endpoint
+            mc = meta.get("marketCap") # Check if it exists
+            pe = None # meta.get("trailingPE") # Typically not here
+            eps = None # meta.get("trailingEps") # Typically not here
+            sec = None # meta.get("sector") # Typically not here
+            ind = None # meta.get("industry") # Typically not here
 
-        # --- Step 3: Fetch history concurrently (best effort) ---
-        # Fetch 1min data for most recent price/volume, daily for MAs
-        hist_params = [
-            {"period": "1d", "interval": "1m"},  # Most recent intra-day data
-            {"period": "5d", "interval": "1d"},  # Recent daily close fallback
-            {"period": "60d", "interval": "1d"}, # More data for 50d MA resilience
-            {"period": "220d", "interval": "1d"} # More data for 200d MA resilience
-        ]
-        results = []
-        try:
-            logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Attempting history fetches...")
+            # Previous Close: Use 2nd last close from daily history
+            prev_close = df["Close"].iloc[-2] if len(df) >= 2 else None
 
-            # ===================== FIX APPLIED HERE =====================
-            # Create partial functions with arguments bound correctly
-            history_task_funcs = [
-                partial(ticker_obj.history, period=p.get("period"), interval=p.get("interval"))
-                for p in hist_params
-            ]
-            # Run the partial functions in the executor
-            tasks = [loop.run_in_executor(None, task_func) for task_func in history_task_funcs]
-            # ============================================================
+            # Today's Open: Use meta if available, otherwise last open from history
+            day_open = meta.get("regularMarketOpen")
+            if day_open is None and not df.empty:
+                day_open = df['Open'].iloc[-1]
 
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            day_high = meta.get("regularMarketDayHigh")
+            day_low = meta.get("regularMarketDayLow")
+            week_52_high = meta.get("fiftyTwoWeekHigh")
+            week_52_low = meta.get("fiftyTwoWeekLow")
 
-            # Assign results carefully, checking for Exceptions and empty DataFrames
-            h1m = results[0] if not isinstance(results[0], Exception) and results[0] is not None and not results[0].empty else None
-            h5d = results[1] if not isinstance(results[1], Exception) and results[1] is not None and not results[1].empty else None
-            h50d_data = results[2] if not isinstance(results[2], Exception) and results[2] is not None and not results[2].empty else None # Source data for MA50
-            h200d_data = results[3] if not isinstance(results[3], Exception) and results[3] is not None and not results[3].empty else None # Source data for MA200
+            logger.debug(f"[{stock_symbol}] Meta Fields - Name: {name}, MC: {mc}, Type: {qtype}, Exch: {exch}")
+            logger.debug(f"[{stock_symbol}] Volume: {current_vol} (Source: {vol_source}), AvgVol: {avg_vol}")
+            logger.debug(f"[{stock_symbol}] Day: O:{day_open} H:{day_high} L:{day_low} PrevC:{prev_close}")
+            logger.debug(f"[{stock_symbol}] 52Wk: H:{week_52_high} L:{week_52_low}")
 
-            log_parts = [
-                f"1m: {'OK' if h1m is not None else 'Fail/Empty'}",
-                f"5d: {'OK' if h5d is not None else 'Fail/Empty'}",
-                f"50d_src: {'OK' if h50d_data is not None else 'Fail/Empty'}",
-                f"200d_src: {'OK' if h200d_data is not None else 'Fail/Empty'}"
-            ]
-            logger.debug(f"[{stock_symbol}] fetch_stock_data_async: History fetch results - {', '.join(log_parts)}")
-
-            # Log latest close from history if available (useful debug)
-            if h1m is not None and 'Close' in h1m.columns:
-                logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Latest Close from 1m history: {h1m['Close'].iloc[-1]}")
-            elif h5d is not None and 'Close' in h5d.columns:
-                 logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Latest Close from 5d history (fallback): {h5d['Close'].iloc[-1]}")
-
-        except Exception as hist_err:
-             # This catch block might be less likely to be hit now with exceptions handled in gather
-             logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Unexpected error during history fetch task setup or gathering: {hist_err}", exc_info=False)
-             h1m, h5d, h50d_data, h200d_data = None, None, None, None
-
-        # --- Step 4: Determine Price (CRITICAL) ---
-        # (Keep the existing robust price determination logic)
-        cp = None
-        price_source = "None"
-        safe_info = info if isinstance(info, dict) else {}
-
-        logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Determining price. Info keys available: {list(safe_info.keys())}")
-
-        # Check fields in preferred order from INFO dictionary
-        if safe_info.get("regularMarketPrice") is not None and isinstance(safe_info.get("regularMarketPrice"), (int, float)):
-            cp = safe_info["regularMarketPrice"]
-            price_source = "info.regularMarketPrice"
-        elif safe_info.get("currentPrice") is not None and isinstance(safe_info.get("currentPrice"), (int, float)):
-            cp = safe_info["currentPrice"]
-            price_source = "info.currentPrice"
-        elif safe_info.get("bid") is not None and isinstance(safe_info.get("bid"), (int, float)) and safe_info["bid"] > 0:
-            cp = safe_info["bid"]
-            price_source = "info.bid"
-        elif safe_info.get("ask") is not None and isinstance(safe_info.get("ask"), (int, float)) and safe_info["ask"] > 0:
-            cp = safe_info["ask"]
-            price_source = "info.ask"
-        elif safe_info.get("open") is not None and isinstance(safe_info.get("open"), (int, float)):
-            cp = safe_info["open"]
-            price_source = "info.open"
-        elif safe_info.get("previousClose") is not None and isinstance(safe_info.get("previousClose"), (int, float)):
-            cp = safe_info["previousClose"]
-            price_source = "info.previousClose"
-
-        logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Price after checking info: {cp} (Source: {price_source})")
-
-        # Fallback to HISTORY if price not found in info OR info fetch failed OR history fetch succeeded
-        if cp is None:
-            logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Price not found in info, attempting fallback to history...")
-            if h1m is not None and 'Close' in h1m.columns: # Check h1m exists and has 'Close'
+            # --- Process Analyst Data (Non-critical) ---
+            analyst_summary = []
+            if analyst_response and analyst_response.get('result'):
                 try:
-                    latest_close = h1m["Close"].iloc[-1]
-                    if isinstance(latest_close, (int, float, np.number)) and np.isfinite(latest_close):
-                        cp = latest_close
-                        price_source = "history.1m.Close"
-                        logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Using 1m history close price: {cp}")
-                    else:
-                        logger.warning(f"[{stock_symbol}] fetch_stock_data_async: 1m history Close value is invalid or non-finite: {latest_close}. Skipping.")
-                except IndexError:
-                     logger.warning(f"[{stock_symbol}] fetch_stock_data_async: IndexError accessing 1m history Close.")
-                except Exception as hist_ex:
-                    logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Error accessing 1m history Close: {hist_ex}")
-
-            if cp is None and h5d is not None and 'Close' in h5d.columns: # Check h5d exists and has 'Close'
-                 try:
-                    latest_close = h5d["Close"].iloc[-1]
-                    if isinstance(latest_close, (int, float, np.number)) and np.isfinite(latest_close):
-                       cp = latest_close
-                       price_source = "history.5d.Close"
-                       logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Using 5d history close price: {cp}")
-                    else:
-                        logger.warning(f"[{stock_symbol}] fetch_stock_data_async: 5d history Close value is invalid or non-finite: {latest_close}. Skipping.")
-                 except IndexError:
-                     logger.warning(f"[{stock_symbol}] fetch_stock_data_async: IndexError accessing 5d history Close.")
-                 except Exception as hist_ex:
-                    logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Error accessing 5d history Close: {hist_ex}")
-
-            if cp is None:
-                logger.warning(f"[{stock_symbol}] fetch_stock_data_async: History fallbacks also failed to find a valid price.")
+                    hits = analyst_response['result'][0].get('hits', [])
+                    logger.debug(f"[{stock_symbol}] Found {len(hits)} analyst reports.")
+                    for report in hits[:2]: # Get latest 2 reports
+                         analyst_summary.append({
+                             "provider": report.get("provider"),
+                             "rating": report.get("investment_rating"),
+                             "target_price": report.get("target_price"),
+                             "action": report.get("investment_rating_status"), # e.g., Maintained, Increased
+                             "date": pd.to_datetime(report.get("report_date"), unit='ms', errors='coerce') if report.get("report_date") else None,
+                             "abstract": report.get("abstract", "")[:150] + "..." # Short abstract
+                         })
+                except Exception as an_err:
+                    logger.warning(f"[{stock_symbol}] Error processing analyst data: {an_err}. Data: {str(analyst_response)[:200]}", exc_info=False)
+                    analyst_summary = [] # Clear summary on error
+            else:
+                 logger.debug(f"[{stock_symbol}] No analyst data found or failed to fetch.")
 
 
-        # Final check: If NO valid price found after all attempts
-        if cp is None or not isinstance(cp, (int, float, np.number)) or not np.isfinite(cp):
-             logger.error(f"[{stock_symbol}] fetch_stock_data_async: CRITICAL - Could not determine valid finite price. Last attempt value: {cp} (Type: {type(cp)}). Source: {price_source}. Returning None.")
-             return None # CRITICAL FAILURE
+            # --- Construct Final Data Dictionary ---
+            data = {
+                "symbol": stock_symbol,
+                "name": name,
+                "quote_type": qtype,
+                "exchange": exch,
+                "current_price": float(cp) if cp is not None and np.isfinite(cp) else None,
+                "volume": int(current_vol) if current_vol is not None and np.isfinite(current_vol) else None,
+                "average_volume": int(avg_vol) if avg_vol is not None and np.isfinite(avg_vol) else None, # Using 50d avg vol
+                "moving_avg_50": float(ma50) if ma50 is not None and np.isfinite(ma50) else None,
+                "moving_avg_200": float(ma200) if ma200 is not None and np.isfinite(ma200) else None,
+                "market_cap": int(mc) if mc is not None and np.isfinite(mc) else None, # Will likely be None often
+                "pe_ratio": float(pe) if pe is not None and np.isfinite(pe) else None, # None
+                "eps": float(eps) if eps is not None and np.isfinite(eps) else None,   # None
+                "sector": sec, # None
+                "industry": ind, # None
+                "previous_close": float(prev_close) if prev_close is not None and np.isfinite(prev_close) else None,
+                "open": float(day_open) if day_open is not None and np.isfinite(day_open) else None,
+                "day_high": float(day_high) if day_high is not None and np.isfinite(day_high) else None,
+                "day_low": float(day_low) if day_low is not None and np.isfinite(day_low) else None,
+                "fifty_two_week_high": float(week_52_high) if week_52_high is not None and np.isfinite(week_52_high) else None,
+                "fifty_two_week_low": float(week_52_low) if week_52_low is not None and np.isfinite(week_52_low) else None,
+                "analyst_ratings": analyst_summary # Add the analyst summary list
+            }
 
+            stock_data_cache[cache_key] = data
+            logger.info(f"[{stock_symbol}] RapidAPI fetch successful. Caching and returning data.")
+            return data
 
-        logger.info(f"[{stock_symbol}] fetch_stock_data_async: Successfully determined price: {cp} (Source: {price_source})")
-
-        # --- Step 5: Get other fields ---
-        # (Keep the existing logic for volume, MAs, and other fields)
-        logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Extracting other fields...")
-
-        vol = safe_info.get("volume")
-        vol_source = "info.volume"
-        avg_vol = safe_info.get("averageVolume")
-
-        if vol is None or vol == 0:
-            logger.debug(f"[{stock_symbol}] Info volume is {vol}, checking history...")
-            vol_fallback_used = False
-            if h1m is not None and 'Volume' in h1m.columns:
-                try:
-                    latest_vol = h1m["Volume"].iloc[-1]
-                    if isinstance(latest_vol, (int, float, np.number)) and np.isfinite(latest_vol) and latest_vol >= 0:
-                        vol = latest_vol
-                        vol_source = "history.1m.Volume"
-                        vol_fallback_used = True
-                        logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Used 1m history volume: {vol}")
-                    else:
-                        logger.warning(f"[{stock_symbol}] fetch_stock_data_async: 1m history Volume value invalid: {latest_vol}")
-                except Exception as vol_ex: logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Error accessing 1m history Volume: {vol_ex}")
-
-            if not vol_fallback_used and h5d is not None and 'Volume' in h5d.columns:
-                try:
-                    latest_vol = h5d["Volume"].iloc[-1]
-                    if isinstance(latest_vol, (int, float, np.number)) and np.isfinite(latest_vol) and latest_vol >= 0:
-                        vol = latest_vol
-                        vol_source = "history.5d.Volume"
-                        logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Used 5d history volume: {vol}")
-                    else:
-                          logger.warning(f"[{stock_symbol}] fetch_stock_data_async: 5d history Volume value invalid: {latest_vol}")
-                except Exception as vol_ex: logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Error accessing 5d history Volume: {vol_ex}")
-
-        if vol is not None and (not isinstance(vol, (int, float, np.number)) or not np.isfinite(vol) or vol < 0):
-            logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Final volume value is invalid: {vol}. Setting to None.")
-            vol = None
-
-        logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Final Volume: {vol} (Source: {vol_source})")
-        logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Average Volume (from info): {avg_vol}")
-
-        # Moving Averages (Use h50d_data, h200d_data which were potentially fetched)
-        ma50 = None
-        if h50d_data is not None and 'Close' in h50d_data.columns and len(h50d_data) >= 50:
-             try:
-                 ma50 = h50d_data["Close"].tail(50).mean()
-                 if not np.isfinite(ma50): ma50 = None
-             except Exception as ma_ex: logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Error calculating MA50: {ma_ex}")
-        elif h50d_data is not None: logger.warning(f"[{stock_symbol}] Not enough data points for MA50 calculation (need 50, got {len(h50d_data)}).")
-
-        ma200 = None
-        if h200d_data is not None and 'Close' in h200d_data.columns and len(h200d_data) >= 200:
-             try:
-                 ma200 = h200d_data["Close"].tail(200).mean()
-                 if not np.isfinite(ma200): ma200 = None
-             except Exception as ma_ex: logger.warning(f"[{stock_symbol}] fetch_stock_data_async: Error calculating MA200: {ma_ex}")
-        elif h200d_data is not None: logger.warning(f"[{stock_symbol}] Not enough data points for MA200 calculation (need 200, got {len(h200d_data)}).")
-
-        logger.debug(f"[{stock_symbol}] fetch_stock_data_async: MA50 (calc): {ma50}, MA200 (calc): {ma200}")
-
-        # Other fields from info
-        mc = safe_info.get("marketCap")
-        pe = safe_info.get("trailingPE")
-        eps = safe_info.get("trailingEps")
-        sec = safe_info.get("sector")
-        ind = safe_info.get("industry")
-        name = safe_info.get("shortName", safe_info.get("longName", stock_symbol))
-        qtype = safe_info.get("quoteType")
-        exch = safe_info.get("exchange")
-
-        logger.debug(f"[{stock_symbol}] fetch_stock_data_async: Info Fields - Name: {name}, MC: {mc}, P/E: {pe}, EPS: {eps}, Sector: {sec}, Industry: {ind}, QuoteType: {qtype}, Exchange: {exch}")
-
-        # --- Step 6: Construct final data dictionary ---
-        # (Keep the existing dictionary structure)
-        data = {
-            "symbol": stock_symbol,
-            "name": name,
-            "quote_type": qtype,
-            "exchange": exch,
-            "current_price": float(cp) if cp is not None else None,
-            "volume": int(vol) if vol is not None and np.isfinite(vol) else None,
-            "average_volume": int(avg_vol) if avg_vol is not None and np.isfinite(avg_vol) else None,
-            "moving_avg_50": float(ma50) if ma50 is not None and np.isfinite(ma50) else None,
-            "moving_avg_200": float(ma200) if ma200 is not None and np.isfinite(ma200) else None,
-            "market_cap": int(mc) if mc is not None and np.isfinite(mc) else None,
-            "pe_ratio": float(pe) if pe is not None and np.isfinite(pe) else None,
-            "eps": float(eps) if eps is not None and np.isfinite(eps) else None,
-            "sector": sec,
-            "industry": ind,
-            "previous_close": float(safe_info['previousClose']) if safe_info.get('previousClose') is not None and np.isfinite(safe_info['previousClose']) else None,
-            "open": float(safe_info['open']) if safe_info.get('open') is not None and np.isfinite(safe_info['open']) else None,
-            "day_high": float(safe_info['dayHigh']) if safe_info.get('dayHigh') is not None and np.isfinite(safe_info['dayHigh']) else None,
-            "day_low": float(safe_info['dayLow']) if safe_info.get('dayLow') is not None and np.isfinite(safe_info['dayLow']) else None,
-            "fifty_two_week_high": float(safe_info['fiftyTwoWeekHigh']) if safe_info.get('fiftyTwoWeekHigh') is not None and np.isfinite(safe_info['fiftyTwoWeekHigh']) else None,
-            "fifty_two_week_low": float(safe_info['fiftyTwoWeekLow']) if safe_info.get('fiftyTwoWeekLow') is not None and np.isfinite(safe_info['fiftyTwoWeekLow']) else None,
-        }
-
-        stock_data_cache[cache_key] = data
-        logger.info(f"[{stock_symbol}] fetch_stock_data_async: Successfully processed data. Caching and returning.")
-        return data
-
-    except Exception as e:
-        logger.error(f"[{stock_symbol}] fetch_stock_data_async: UNEXPECTED error during overall process: {e}", exc_info=True)
+    except aiohttp.ClientError as e:
+        logger.error(f"[{stock_symbol}] Network or Client Error during RapidAPI fetch setup: {e}", exc_info=True)
         return None
+    except Exception as e:
+        logger.error(f"[{stock_symbol}] UNEXPECTED error during overall RapidAPI process: {e}", exc_info=True)
+        return None
+
 # ===============================================================
-# 6. Fetch News (Robust Scraping - FIX for Reliability)
+# 6. Fetch News (Robust Scraping - Keep existing)
 # ===============================================================
+# (Keep the fetch_latest_news_async function exactly as it was in the initial prompt)
 async def fetch_latest_news_async(asset: str) -> List[Dict[str, str]]:
     """Fetches latest news using feedparser from Google News RSS."""
     cache_key = f"news_{asset.upper()}"
@@ -1941,19 +1978,14 @@ async def fetch_latest_news_async(asset: str) -> List[Dict[str, str]]:
 
     try:
         # Construct Google News RSS URL (India, English)
-        # Adding "stock" or "market" might help filter results
         search_term = f"{asset} stock market India" # Be more specific
-        # ============ FIX: URL Encode the search term ============
         encoded_search_term = quote_plus(search_term)
         gnews_url = f"https://news.google.com/rss/search?q={encoded_search_term}&hl=en-IN&gl=IN&ceid=IN:en"
-        # ========================================================
 
         loop = asyncio.get_running_loop()
         # feedparser is synchronous, run in executor
         logger.debug(f"Parsing Google News RSS feed: {gnews_url}")
-        # Add timeout to feedparser call if possible, or wrap executor call
         try:
-            # Consider adding a timeout to the executor call itself
             feed_data = await asyncio.wait_for(
                 loop.run_in_executor(None, feedparser.parse, gnews_url),
                 timeout=15.0 # Example: 15 second timeout
@@ -1961,45 +1993,32 @@ async def fetch_latest_news_async(asset: str) -> List[Dict[str, str]]:
         except asyncio.TimeoutError:
             logger.error(f"Timeout fetching/parsing news feed for {asset} from {gnews_url}")
             return [{"headline": f"Timeout fetching news for {asset}.", "summary": "Feedparser took too long.", "link": "#"}]
-        except Exception as parse_exec_err: # Catch errors during executor run
+        except Exception as parse_exec_err:
              logger.error(f"Error running feedparser in executor for {asset}: {parse_exec_err}", exc_info=True)
              return [{"headline": f"Error processing news feed task for {asset}.", "summary": str(parse_exec_err), "link": "#"}]
 
-
-        # Check for bozo flag AFTER the call completes
         if feed_data.bozo:
              bozo_exception = feed_data.get('bozo_exception', 'Unknown parsing error')
-             # Log specific bozo errors that might indicate fetch issues vs parse issues
              logger.warning(f"Feedparser marked feed as bozo for {asset}. URL: {gnews_url}. Exception: {bozo_exception}")
-             # Check if it's an HTTP error potentially
              if isinstance(bozo_exception, (feedparser.exceptions.HTTPError, ConnectionRefusedError)):
-                 # More severe issue, return specific error
                  return [{"headline": f"Error fetching news feed for {asset}.", "summary": f"HTTP/Connection Error: {bozo_exception}", "link": "#"}]
              else:
-                 # Could be malformed XML, etc. Return generic parse error.
                  return [{"headline": f"Error parsing news feed for {asset}.", "summary": f"Parsing issue: {bozo_exception}", "link": "#"}]
-
 
         if not feed_data.entries:
             logger.warning(f"No news entries found in Google News RSS feed for query: {search_term}")
             return [{"headline": f"No recent news found for {asset}.", "summary": f"Query: '{search_term}'", "link": "#"}]
 
-        # Process feed entries
         for entry in feed_data.entries[:max_news]:
             headline = entry.get('title', 'No Title')
             link = entry.get('link', '#')
-            # Summary might be in 'summary' or 'description' field
             summary = entry.get('summary', entry.get('description', 'No summary available.'))
-            # Basic cleaning of summary (remove potential HTML)
             try:
                 summary_soup = BeautifulSoup(summary, "html.parser")
                 cleaned_summary = summary_soup.get_text(strip=True)
             except Exception as bs_err:
                  logger.warning(f"Could not clean summary HTML for '{headline[:50]}...': {bs_err}")
-                 cleaned_summary = summary # Fallback to raw summary
-
-            # Basic filtering (optional, can be brittle)
-            # if "your filter keyword" in headline.lower(): continue
+                 cleaned_summary = summary
 
             news_list.append({
                 "headline": headline,
@@ -2007,24 +2026,23 @@ async def fetch_latest_news_async(asset: str) -> List[Dict[str, str]]:
                 "link": link
             })
 
-        if not news_list: # Should be covered by 'if not feed_data.entries', but for safety
+        if not news_list:
              logger.warning(f"Filtered out all news entries for {asset}")
              return [{"headline": f"No relevant news found for {asset} after filtering.", "summary": "", "link": "#"}]
 
-        news_cache[cache_key] = news_list # Cache the result
+        news_cache[cache_key] = news_list
         logger.info(f"Successfully parsed {len(news_list)} news items for {asset} via feedparser.")
         return news_list
 
-    # Catch unexpected errors in the overall function logic
     except Exception as e:
         logger.error(f"Unexpected error in fetch_latest_news_async for {asset}: {e}", exc_info=True)
-        # Return error state
         return [{"headline": f"Unexpected error fetching news for {asset}.", "summary": str(e), "link": "#"}]
 
 
 # ===============================================================
-# 7. Build Analysis Prompt (Minor adjustments for clarity)
+# 7. Build Analysis Prompt (May need slight adjustments)
 # ===============================================================
+# (Keep the fmt function as it was)
 def fmt(v, p="₹", s="", pr=2, na="N/A"):
     """Formats numbers nicely, handling None, non-finite, and Indian Crores/Lakhs."""
     if v is None or v == 'N/A' or (isinstance(v, (float, np.number)) and not np.isfinite(v)): return na
@@ -2037,7 +2055,7 @@ def fmt(v, p="₹", s="", pr=2, na="N/A"):
         except Exception: return str(v) # Fallback
     return str(v)
 
-# --- Improved Prompt Building Function ---
+# --- Updated Prompt Building Function (to potentially include analyst ratings) ---
 def build_stock_analysis_prompt_for_options(
     stock_symbol_display: str,
     stock_data: Optional[Dict[str, Any]],
@@ -2045,23 +2063,22 @@ def build_stock_analysis_prompt_for_options(
 ) -> str:
     """
     Generates a structured prompt for LLM analysis focused on Option Trader insights,
-    using available stock/index data and news. Acknowledges missing option-specific data.
+    using available stock/index data (RapidAPI sourced), analyst ratings, and news.
+    Acknowledges missing option-specific data.
     """
-    func_name = "build_stock_analysis_prompt_for_options"
+    func_name = "build_stock_analysis_prompt_for_options_rapidapi"
 
-    # --- Handle potentially missing input data ---
     if not stock_data:
         logger.error(f"[{func_name}] Critical error: stock_data is None for {stock_symbol_display}. Cannot build prompt.")
-        # Return a minimal prompt indicating the failure, or raise an error
         return f"Analysis for {stock_symbol_display} failed: Essential stock data is missing."
-    if latest_news is None: # Allow news to be None, but handle it
+    if latest_news is None:
          logger.warning(f"[{func_name}] Warning: latest_news is None for {stock_symbol_display}. Proceeding without news.")
-         latest_news = [{"headline": "News data not available.", "summary": "", "link": "#"}] # Default placeholder
+         latest_news = [{"headline": "News data not available.", "summary": "", "link": "#"}]
 
-    logger.debug(f"[{func_name}] Building structured options-focused prompt for {stock_symbol_display}")
+    logger.debug(f"[{func_name}] Building structured options-focused prompt for {stock_symbol_display} using RapidAPI data")
 
     # --- Extract Data Safely (Using .get() extensively) ---
-    name = stock_data.get('name', stock_symbol_display) # Fallback to display symbol
+    name = stock_data.get('name', stock_symbol_display)
     price = stock_data.get('current_price')
     prev_close = stock_data.get('previous_close')
     day_open = stock_data.get('open')
@@ -2069,23 +2086,25 @@ def build_stock_analysis_prompt_for_options(
     day_low = stock_data.get('day_low')
     ma50 = stock_data.get('moving_avg_50')
     ma200 = stock_data.get('moving_avg_200')
-    volume = stock_data.get('volume') # Current day's volume (might be partial or 0 EOD for index)
-    avg_volume = stock_data.get('average_volume') # Average volume (better context)
+    volume = stock_data.get('volume')
+    avg_volume = stock_data.get('average_volume') # Now calculated (e.g., 50d avg)
     week_52_high = stock_data.get('fifty_two_week_high')
     week_52_low = stock_data.get('fifty_two_week_low')
-    market_cap = stock_data.get('market_cap')
-    pe_ratio = stock_data.get('pe_ratio')
-    eps = stock_data.get('eps')
-    sector = stock_data.get('sector')
-    industry = stock_data.get('industry')
-    qtype = stock_data.get('quote_type', 'Unknown') # Get quote type (INDEX/EQUITY etc)
+    market_cap = stock_data.get('market_cap') # Often None from chart API
+    pe_ratio = stock_data.get('pe_ratio')     # Likely None
+    eps = stock_data.get('eps')               # Likely None
+    sector = stock_data.get('sector')         # Likely None
+    industry = stock_data.get('industry')     # Likely None
+    qtype = stock_data.get('quote_type', 'Unknown')
+    analyst_ratings = stock_data.get('analyst_ratings', []) # Extract analyst ratings
 
     display_title = f"{stock_symbol_display}" + (f" ({name})" if name and name != stock_symbol_display else "")
-    is_index = qtype == 'INDEX' # More reliable check than heuristics
+    # Adjusted index check based on typical RapidAPI instrumentType values
+    is_index = qtype == 'INDEX'
 
     # --- Prepare Context Strings ---
 
-    # Technical Context - More details for options
+    # Technical Context (same logic as before, using potentially RapidAPI-sourced data)
     trend = "N/A"; support_str = "N/A"; resistance_str = "N/A"
     ma_available = ma50 is not None and ma200 is not None and price is not None
 
@@ -2095,7 +2114,6 @@ def build_stock_analysis_prompt_for_options(
         support_str = " / ".join([fmt(lvl) for lvl in support_levels]) if support_levels else "Below Key MAs"
         resistance_str = " / ".join([fmt(lvl) for lvl in resistance_levels]) if resistance_levels else "Above Key MAs"
 
-        # Trend description based on price vs MAs
         if price > ma50 > ma200: trend = "Strong Uptrend (Price > 50MA > 200MA)"
         elif price < ma50 < ma200: trend = "Strong Downtrend (Price < 50MA < 200MA)"
         elif ma50 > price > ma200 : trend = "Sideways/Testing Support (Below 50MA, Above 200MA)"
@@ -2103,26 +2121,25 @@ def build_stock_analysis_prompt_for_options(
         elif price > ma50 and price > ma200: trend = "Uptrend (Price > Both MAs, 50MA potentially below 200MA)"
         elif price < ma50 and price < ma200: trend = "Downtrend (Price < Both MAs, 50MA potentially above 200MA)"
         else: trend = "Indeterminate (MAs crossing or very close)"
-
-    elif price and ma50: # Only 50MA available
+    elif price and ma50:
         support_str = fmt(ma50) if price > ma50 else "N/A (Below 50MA)"
         resistance_str = fmt(ma50) if price <= ma50 else "N/A (Above 50MA)"
         trend = "Above 50MA" if price > ma50 else "Below 50MA"
         resistance_str += " (200MA N/A)"
         support_str += " (200MA N/A)"
-    else: # No reliable MAs
+    else:
         trend = "Trend Unknown (MA data insufficient)"
 
-    # Volume context
     vol_str = fmt(volume, p='', pr=0, na='N/A')
-    avg_vol_str = fmt(avg_volume, p='', pr=0, na='N/A')
+    avg_vol_str = fmt(avg_volume, p='', pr=0, na='N/A') # Now uses calculated avg vol
     vol_comment = f"Volume: {vol_str}."
-    if avg_volume is not None and volume is not None:
-        if volume > avg_volume * 1.5: vol_comment += f" Significantly ABOVE Average ({avg_vol_str})."
-        elif volume < avg_volume * 0.7: vol_comment += f" Significantly BELOW Average ({avg_vol_str})."
-        else: vol_comment += f" Near Average ({avg_vol_str})."
+    if avg_volume is not None and volume is not None and avg_volume > 0: # Added check avg_volume > 0
+        vol_ratio = volume / avg_volume
+        if vol_ratio > 1.5: vol_comment += f" Significantly ABOVE {fmt(avg_volume, p='', pr=0, s=' (50d Avg?)') }."
+        elif vol_ratio < 0.7: vol_comment += f" Significantly BELOW {fmt(avg_volume, p='', pr=0, s=' (50d Avg?)') }."
+        else: vol_comment += f" Near {fmt(avg_volume, p='', pr=0, s=' (50d Avg?)') }."
     elif avg_volume is not None:
-         vol_comment += f" Average Volume: {avg_vol_str} (Current day volume N/A or 0)."
+         vol_comment += f" Average Volume (50d?): {avg_vol_str} (Current day volume N/A or 0)."
     else: vol_comment += f" Average Volume N/A."
 
 
@@ -2130,91 +2147,306 @@ def build_stock_analysis_prompt_for_options(
         f"Price: {fmt(price)} (Open: {fmt(day_open)}, Day Range: {fmt(day_low)} - {fmt(day_high)}, Prev Close: {fmt(prev_close)}). "
         f"52wk Range: {fmt(week_52_low)} - {fmt(week_52_high)}. "
         f"MAs: 50D={fmt(ma50)}, 200D={fmt(ma200)}. "
-        f"{vol_comment} " # Include volume comparison
+        f"{vol_comment} "
         f"Trend Context: {trend}. "
         f"Key Levels (from MAs): Support near {support_str}, Resistance near {resistance_str}."
     )
 
-    # Fundamental Context String (handles missing data)
+    # Fundamental Context String (Acknowledges missing data from Chart API)
     fund_context = ""
-    pe_comparison_note = ""
+    pe_comparison_note = "Note: P/E data likely unavailable from this API source."
     if is_index:
          fund_context = "N/A (Index - Standard fundamental ratios do not apply)."
-         pe_comparison_note = "N/A for index."
     else:
-        fund_context = f"Market Cap: {fmt(market_cap, p='')}, P/E Ratio: {fmt(pe_ratio, p='', s='x')}, EPS: {fmt(eps)}, Sector: {fmt(sector, p='', na='N/A')}, Industry: {fmt(industry, p='', na='N/A')}"
+        # Use 'N/A' formatting for potentially missing fundamental fields
+        fund_context = (
+            f"Market Cap: {fmt(market_cap, p='', na='N/A')}, "
+            f"P/E Ratio: {fmt(pe_ratio, p='', s='x', na='N/A')}, "
+            f"EPS: {fmt(eps, p='', na='N/A')}, "
+            f"Sector: {fmt(sector, p='', na='N/A')}, "
+            f"Industry: {fmt(industry, p='', na='N/A')}"
+        )
+        # Update PE note based on actual availability
         if pe_ratio is not None:
             pe_comparison_note = f"Note: P/E ({fmt(pe_ratio, p='', s='x')}) context requires comparison to industry peers and historical levels (external data needed)."
         else:
             pe_comparison_note = "Note: P/E data unavailable for comparison."
 
 
-    # News Context String (handles potential errors/no news)
+    # News Context String (Same as before)
     news_formatted = []
-    # Check if the first item indicates an error or no news found
     is_news_error_or_empty = not latest_news or any(err_indicator in latest_news[0].get("headline", "").lower() for err_indicator in ["error", "no recent news", "no relevant news", "timeout", "not available"])
-
     if not is_news_error_or_empty:
-        for n in latest_news[:3]: # Max 3 news items
+        for n in latest_news[:3]:
             headline = n.get('headline','N/A')
-            # Basic sanitize for prompt safety
             summary = n.get('summary','N/A').replace('"', "'").replace('{', '(').replace('}', ')')
             link = n.get('link', '#')
-            news_formatted.append(f'- "{headline}" ({link}): {summary}') # Add quotes to headline
+            news_formatted.append(f'- "{headline}" ({link}): {summary}')
         news_context = "\n".join(news_formatted)
-    else: # Handle error case or no news case explicitly
+    else:
         news_context = f"- {latest_news[0].get('headline', 'No recent news summaries available.')}" if latest_news else "- No recent news summaries available."
+
+    # --- NEW: Analyst Ratings Context ---
+    analyst_context = "No recent analyst ratings found or fetch failed."
+    if analyst_ratings:
+         analyst_formatted = []
+         for r in analyst_ratings:
+             rating_str = f"{r.get('provider', 'N/A')}: {r.get('rating', 'N/A')}"
+             if r.get('target_price') is not None:
+                 rating_str += f" (Target: {fmt(r.get('target_price'))})"
+             if r.get('action'):
+                  rating_str += f" [{r.get('action')}]"
+             if r.get('date'):
+                  rating_str += f" ({r['date'].strftime('%Y-%m-%d')})"
+             analyst_formatted.append(f"- {rating_str}")
+             # Optionally include abstract if needed:
+             # abstract = r.get('abstract', '').strip()
+             # if abstract:
+             #     analyst_formatted.append(f"    Summary: {abstract}")
+         analyst_context = "\n".join(analyst_formatted)
 
 
     # --- Construct the Structured Prompt ---
     prompt = f"""
-Analyze the provided data for **{display_title}** from the perspective of an **Options Trader**. Use clear headings and bullet points. Focus on potential direction, volatility hints, and key levels, while explicitly acknowledging missing options-specific data (like Implied Volatility).
+Analyze the provided data for **{display_title}** from the perspective of an **Options Trader**. Use clear headings and bullet points. Focus on potential direction, volatility hints, and key levels, while explicitly acknowledging missing options-specific data (like Implied Volatility) and potential gaps in fundamental data from this API source.
 
-**Provided Data Snapshots:**
+**Provided Data Snapshots (Source: RapidAPI / Google News):**
 
 *   **Technical Context:** {tech_context}
-*   **Fundamental Context:** {fund_context}
+*   **Fundamental Context:** {fund_context} (Note: May have data gaps from this API)
+*   **Analyst Ratings Summary (Max 2 Recent):**
+{analyst_context}
 *   **Recent News Snippets (Max 3):**
 {news_context}
 
 **Analysis Request (Options Trader Focus):**
 
 1.  **Overall Market Posture & Bias:**
-    *   Synthesize the technical trend (price vs. MAs), recent price action (day's range, vs prev close), and news sentiment.
+    *   Synthesize technicals (trend, price action), news sentiment, and any strong signal from analyst ratings.
     *   State the implied short-term **Directional Bias** (e.g., Bullish, Bearish, Neutral/Range-bound, Uncertain).
-    *   Briefly comment on potential **Volatility Hints** (e.g., News suggesting event? Price near 52wk extremes? High volume move?). Acknowledge actual IV data is missing.
+    *   Comment on potential **Volatility Hints** (News? Analyst target changes? Price extremes? Volume surge?). Acknowledge IV data is missing.
 
 2.  **Key Technical Levels & Observations:**
-    *   **Support & Resistance:** Identify key potential support/resistance levels based *only* on the provided MAs, 52-week levels, and recent day's range.
-    *   **Trend Strength & Volume:** Comment on the trend's conviction. Is the volume confirming the price move or diverging? Is the price extended from MAs or consolidating?
-    *   **Significant Price Zones:** Note if the current price is near the 52-week high/low, suggesting potential breakout or breakdown zones relevant for strike selection.
+    *   **Support & Resistance:** Identify levels based *only* on provided MAs, 52-week levels, and recent day's range.
+    *   **Trend Strength & Volume:** Comment on trend conviction. Is volume confirming or diverging? Is price extended from MAs?
+    *   **Significant Price Zones:** Note if price is near 52-week high/low.
 
-3.  **News Sentiment & Potential Catalysts:**
-    *   **Sentiment:** Assess the general sentiment (Positive, Negative, Neutral, Mixed, N/A) from the news provided.
-    *   **Volatility Impact:** How might this news potentially influence near-term price **volatility** (increase or decrease uncertainty) or act as a catalyst? Mention if news hints at earnings or other major events (though specific dates aren't provided).
+3.  **News & Analyst Sentiment:**
+    *   **Combined Sentiment:** Assess overall sentiment from news *and* analyst ratings (Positive, Negative, Neutral, Mixed, N/A).
+    *   **Potential Catalysts/Volatility:** How might news or analyst actions influence volatility or act as catalysts?
 
-4.  **Fundamental Considerations (if applicable, usually for stocks):**
-    *   Briefly note if fundamentals (P/E, EPS, Sector) provide any strong directional context or risk indication (e.g., very high P/E might imply higher volatility risk). {pe_comparison_note} Note if N/A for index.
+4.  **Fundamental Considerations (if applicable):**
+    *   Briefly note if available fundamentals provide context or risk indication. {pe_comparison_note} Note if N/A for index or data missing.
 
 5.  **Options Strategy Angle & Considerations:**
-    *   **Derived Bias:** Reiterate the derived directional bias (Bullish/Bearish/Neutral/Uncertain).
+    *   **Derived Bias:** Reiterate the derived directional bias.
     *   **CRITICAL CAVEAT:** State clearly: "**Implied Volatility (IV) data is MISSING.** IV is crucial for option pricing and strategy selection. The following are *general conceptual ideas only* and ignore the current IV environment."
     *   **General Strategy Types (Conceptual):**
-        *   **If Bullish:** Suggest considering strategies like Long Calls, Bull Call Spreads, or Put Credit Spreads. Mention suitability usually depends on bullish conviction and desired risk/reward.
-        *   **If Bearish:** Suggest considering strategies like Long Puts, Bear Put Spreads, or Call Credit Spreads. Mention suitability depends on bearish conviction.
-        *   **If Neutral/Range-Bound:** Suggest considering strategies like Iron Condors, Iron Butterflies, or Calendar Spreads (requires understanding of volatility structure). Mention aim is typically to profit from time decay if price stays stable.
-        *   **If Uncertain/Expecting Volatility:** Suggest potentially considering Long Straddles/Strangles *if high volatility is anticipated* (but note high cost and need for significant move). Mention these are high-risk.
-        *   **If Bias Unclear:** State that the data does not provide a clear directional bias for strategy selection.
-    *   **Key Factors Ignored:** Remind the user that this analysis **ignores IV, risk tolerance, specific expiry selection, strike selection, option liquidity, and time decay (theta) implications** which are all critical for actual trading.
+        *   [Keep the Bullish/Bearish/Neutral/Uncertain/Unclear strategy suggestions as before]
+    *   **Key Factors Ignored:** Remind the user that this analysis **ignores IV, risk tolerance, expiry/strike selection, option liquidity, and time decay (theta)**.
 
 6.  **Identified Risks & Data Limitations:**
-    *   Summarize key risks suggested *only* by the provided data (e.g., Price below key MAs, potential negative news catalyst, technical divergence, proximity to 52wk low).
-    *   Explicitly list major **Data Limitations** for options trading: **No Implied Volatility (IV), No Historical Volatility (HV), No Option Chain Data (Greeks, OI, Volume), No Upcoming Event Calendar.**
+    *   Summarize risks suggested *only* by the provided data (e.g., Price below MAs, negative news/analyst rating, technical divergence, 52wk low proximity).
+    *   Explicitly list major **Data Limitations**: **No Implied Volatility (IV), No Historical Volatility (HV), No Option Chain Data (Greeks, OI, Volume), No Upcoming Event Calendar, Potential gaps in Fundamental data (P/E, EPS, Sector likely missing).**
 
-**Disclaimer:** This analysis is auto-generated based on limited, potentially delayed data snapshots and recent news summaries. It is NOT financial advice or a recommendation to trade specific options strategies. Data accuracy depends on the sources (yfinance, Google News RSS). **Crucial options data (especially Implied Volatility) is missing.** Always conduct thorough independent research, understand the risks involved, consider your own risk tolerance, and consult with a qualified financial advisor before making any trading decisions. Market conditions are dynamic.
+**Disclaimer:** This analysis is auto-generated based on limited, potentially delayed data snapshots (RapidAPI) and recent news/analyst summaries. It is NOT financial advice. Data accuracy depends on sources. **Crucial options data (IV) and potentially key fundamental data are missing.** Always conduct thorough independent research, understand risks, consider your risk tolerance, and consult a qualified financial advisor before trading. Market conditions are dynamic.
 """
-    logger.debug(f"[{func_name}] Generated options-focused prompt for {stock_symbol_display}")
+    logger.debug(f"[{func_name}] Generated options-focused prompt for {stock_symbol_display} with RapidAPI data")
     return prompt
+
+# --- Example Usage (Async context needed) ---
+async def main():
+    # Example: Fetch data for NIFTY 50 Index from India
+    # symbol_to_fetch = "^NSEI" # NIFTY 50 index symbol on Yahoo
+    symbol_to_fetch = "RELIANCE.NS" # Reliance Industries on NSE
+    # symbol_to_fetch = "INFY.NS" # Infosys on NSE
+    region_code = "IN"
+
+    print(f"--- Fetching Stock Data for {symbol_to_fetch} ({region_code}) ---")
+    stock_data = await fetch_stock_data_async(symbol_to_fetch, region=region_code)
+
+    if stock_data:
+        # print("\n--- Fetched Stock Data ---")
+        # # Print safely, handling None values
+        # for key, value in stock_data.items():
+        #     if key == 'analyst_ratings' and isinstance(value, list):
+        #         print(f"  {key}:")
+        #         if value:
+        #             for rating in value:
+        #                 print(f"    - {rating}")
+        #         else:
+        #             print("    - None")
+        #     else:
+        #          print(f"  {key}: {value}")
+
+        print(f"\n--- Fetching News Data for {symbol_to_fetch} ---")
+        news_data = await fetch_latest_news_async(stock_data.get("name", symbol_to_fetch)) # Use name if available for news search
+        # print("\n--- Fetched News Data ---")
+        # if news_data:
+        #     for item in news_data:
+        #         print(f"- {item.get('headline')}")
+        # else:
+        #     print("No news data fetched.")
+
+        print(f"\n--- Building Prompt for {symbol_to_fetch} ---")
+        prompt = build_stock_analysis_prompt_for_options(symbol_to_fetch, stock_data, news_data)
+        print("\n--- Generated Prompt ---")
+        print(prompt)
+
+    else:
+        print(f"Failed to fetch stock data for {symbol_to_fetch}")
+        
+
+# ===============================================================
+#  8. Greeks analysis by LLM
+# ===============================================================
+async def fetch_greeks_analysis(
+    asset_symbol: str,
+    portfolio_greeks: Dict[str, Optional[float]] # Expects TOTALS: delta, gamma, theta, vega, rho
+) -> Optional[str]:
+    """
+    Generates an LLM analysis focused *solely* on the provided TOTAL portfolio Greeks.
+
+    Args:
+        asset_symbol: The underlying asset symbol (for context).
+        portfolio_greeks: A dictionary containing the TOTAL portfolio Greeks,
+                          e.g., {"delta": 10.5, "gamma": 2.1, "theta": -5.0, "vega": 50.2, "rho": 1.5}.
+                          These values should represent the SUM for the entire portfolio
+                          (e.g., sum of (per-share greek * quantity) for all legs).
+
+    Returns:
+        A string containing the LLM-generated analysis, or an error message string
+        starting with '*' if analysis fails.
+    """
+    func_name = "fetch_greeks_analysis"
+    logger.info(f"[{func_name}][{asset_symbol}] Request received for Greeks analysis.")
+
+    if not portfolio_greeks or not isinstance(portfolio_greeks, dict):
+        logger.warning(f"[{func_name}][{asset_symbol}] Invalid or empty portfolio_greeks dictionary provided.")
+        return "*Cannot analyze Greeks: Input data is missing or invalid.*"
+
+    # --- Check Gemini API Key ---
+    if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY":
+        logger.error(f"[{func_name}][{asset_symbol}] Cannot generate Greeks analysis: Gemini API Key not configured.")
+        return "*Greeks analysis feature not configured (API Key missing).*"
+
+    # --- Format Greeks for the Prompt ---
+    # Use the format_greek helper for consistency, NaN/None handling, and +/- sign
+    delta_str = format_greek(portfolio_greeks.get('delta'))
+    gamma_str = format_greek(portfolio_greeks.get('gamma'))
+    theta_str = format_greek(portfolio_greeks.get('theta'))
+    vega_str = format_greek(portfolio_greeks.get('vega'))
+    rho_str = format_greek(portfolio_greeks.get('rho'))
+
+    # --- Build the Prompt ---
+    # Focus explicitly on interpreting the provided portfolio total numbers
+    prompt = f"""
+Analyze the provided **Total Portfolio Option Greeks** for a strategy on the underlying asset **{asset_symbol}**. Focus *exclusively* on what these Greek values imply about the portfolio's current sensitivities and risk exposure from an **Options Trader's perspective**. Assume these totals reflect the entire multi-leg position.
+
+**Provided Total Portfolio Greeks:**
+
+*   **Portfolio Delta (Δ): {delta_str}**
+*   **Portfolio Gamma (Γ): {gamma_str}**
+*   **Portfolio Theta (Θ): {theta_str}** (per day)
+*   **Portfolio Vega: {vega_str}** (per 1% change in IV)
+*   **Portfolio Rho (Ρ): {rho_str}** (per 1% change in interest rate)
+
+**Analysis Request (Interpret ONLY these total Greek values):**
+
+1.  **Overall Portfolio Sensitivities:**
+    *   **Direction (Delta):** Based on the total Delta ({delta_str}), is the portfolio currently net long (bullish), net short (bearish), or directionally neutral on the underlying asset ({asset_symbol})? How much will the portfolio's value roughly change for a $1 move in the underlying?
+    *   **Volatility (Vega):** Based on the total Vega ({vega_str}), is the portfolio currently long volatility (benefits from IV increase) or short volatility (benefits from IV decrease)? Is the sensitivity to IV changes significant?
+    *   **Time Decay (Theta):** Based on the total Theta ({theta_str}), is the portfolio gaining or losing value each day due to time decay? Is the daily time decay impact substantial?
+
+2.  **Dynamic Risk Factors (Gamma & Higher Order):**
+    *   **Delta Change (Gamma):** Based on the total Gamma ({gamma_str}), how is the portfolio's Delta expected to change as the underlying price moves? If Gamma is positive, will Delta become more positive on an up-move and more negative on a down-move (or vice-versa if negative)? Does the Gamma value suggest the portfolio requires frequent re-hedging to maintain its desired Delta exposure?
+    *   **Combined Effects:** Briefly mention how Gamma interacts with Delta (e.g., positive Gamma helps a long Delta position on up-moves but hurts on down-moves, relative to linear exposure).
+
+3.  **Interest Rate Sensitivity (Rho):**
+    *   Based on the total Rho ({rho_str}), comment briefly on the portfolio's sensitivity to interest rate changes. Is it significant compared to the other Greeks? (Often minor for shorter-term options).
+
+4.  **Synthesized Risk Profile & Key Takeaways:**
+    *   Summarize the main exposures revealed by the Greeks. (e.g., "The positive Delta and positive Gamma suggest a bullish stance that accelerates with price increases, but the large negative Theta indicates significant daily cost from time decay. The positive Vega means the position benefits from rising volatility.")
+    *   What are the primary risks *implied by these Greeks*? (e.g., Risk from time decay, risk from falling volatility, risk of Delta changing rapidly due to Gamma).
+
+**Important Limitations (Acknowledge These):**
+*   This analysis interprets *only* the five total portfolio Greek values provided.
+*   It **does not** know the specific options contracts, expiry dates, strikes, underlying price vs strikes (moneyness), current IV levels vs historical, bid-ask spreads, commissions, or overall market news/context.
+*   It cannot assess the probability of profit or the suitability of the strategy.
+
+**Output Format:** Use clear headings (like "Overall Portfolio Sensitivities", "Dynamic Risk Factors", etc.) and concise bullet points. Focus on actionable interpretations *derived directly from the total Greek values*.
+"""
+
+    logger.debug(f"[{func_name}][{asset_symbol}] Generating Greeks analysis prompt...")
+
+    # --- Call LLM ---
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash-latest")
+        logger.info(f"[{func_name}][{asset_symbol}] Calling Gemini API for Greeks analysis...")
+        start_llm = asyncio.get_event_loop().time()
+
+        # Add safety settings if desired
+        # safety_settings = [
+        #     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+        #     # ... other categories
+        # ]
+        # response = await model.generate_content_async(prompt, safety_settings=safety_settings)
+        response = await model.generate_content_async(prompt)
+
+        llm_duration = asyncio.get_event_loop().time() - start_llm
+        logger.info(f"[{func_name}][{asset_symbol}] Gemini response for Greeks analysis received in {llm_duration:.3f}s.")
+
+        # --- Robust Response Handling ---
+        analysis_text = None
+        try:
+            # Check for blocks first
+            if response.prompt_feedback and response.prompt_feedback.block_reason:
+                block_reason = response.prompt_feedback.block_reason.name
+                logger.error(f"[{func_name}][{asset_symbol}] Gemini Greeks analysis blocked. Reason: {block_reason}")
+                raise ValueError(f"Greeks analysis blocked by content filter ({block_reason}).")
+
+            # Check for parts *after* checking for blocks
+            if not response.parts:
+                # If blocked, this might also be true, but the block reason is more specific
+                feedback_info = f"Feedback: {response.prompt_feedback}" if response.prompt_feedback else "No parts and no feedback."
+                logger.error(f"[{func_name}][{asset_symbol}] Gemini Greeks analysis response missing parts. {feedback_info}")
+                # Avoid showing generic "missing parts" if it was actually blocked.
+                if not (response.prompt_feedback and response.prompt_feedback.block_reason):
+                     raise ValueError("Greeks analysis failed (No response parts received).")
+                else:
+                    # If it was blocked, the ValueError from the block check already covers it.
+                    # This part is just for logging if parts are missing *without* a block.
+                     pass # Error already raised by block check
+
+            # If parts exist and not blocked, try getting text
+            analysis_text = response.text
+
+        except ValueError as e: # Catch errors from checks above
+            logger.error(f"[{func_name}][{asset_symbol}] Error processing Gemini Greeks analysis response: {e}")
+            raise ValueError(f"{e}") # Re-raise the user-friendly message
+        except Exception as e: # Catch other unexpected errors
+            logger.error(f"[{func_name}][{asset_symbol}] Unexpected error processing Gemini Greeks analysis response: {e}", exc_info=True)
+            raise ValueError(f"Greeks analysis failed (Unexpected response processing error: {type(e).__name__}).")
+
+        # Final check for empty text
+        if not analysis_text or not analysis_text.strip():
+            # This case might occur if the model responds but with empty content,
+            # or if response.text fails for some reason after passing the .parts check.
+            feedback_info = f"Feedback: {response.prompt_feedback}" if response.prompt_feedback else "No feedback available."
+            logger.error(f"[{func_name}][{asset_symbol}] Gemini Greeks analysis response text is empty. {feedback_info}")
+            raise ValueError("Greeks analysis failed (Empty response text received).")
+
+        logger.info(f"[{func_name}][{asset_symbol}] Successfully generated Greeks analysis.")
+        return analysis_text # Return the generated text
+
+    except ValueError as gen_err: # Catch specific errors raised during response processing
+        logger.error(f"[{func_name}][{asset_symbol}] Greeks analysis generation processing error: {gen_err}")
+        return f"*Greeks Analysis Generation Error: {gen_err}*" # Return error message string
+    except Exception as e: # Catch broader API errors (network, config, etc.)
+        logger.error(f"[{func_name}][{asset_symbol}] Gemini API call or other unexpected error for Greeks analysis: {e}", exc_info=True)
+        # Check for specific Google API errors if the library provides them, otherwise use generic
+        # Example: if isinstance(e, google.api_core.exceptions.PermissionDenied): ...
+        return f"*Greeks analysis generation failed (API/Processing Error: {type(e).__name__})*"
 
 
 
@@ -2358,7 +2590,9 @@ async def get_expiry_dates(asset: str = Query(...)):
 
 @app.get("/get_news", tags=["Data"])
 async def get_news_endpoint(asset: str = Query(...)):
-    """Fetches the latest news headlines and summaries for a given asset."""
+    """
+    Fetches the latest news headlines and summaries for a given asset using feedparser.
+    """
     endpoint_name = "get_news_endpoint"
     logger.info(f"[{endpoint_name}] Request received for news: Asset={asset}")
     asset_upper = asset.strip().upper()
@@ -2366,24 +2600,33 @@ async def get_news_endpoint(asset: str = Query(...)):
         raise HTTPException(status_code=400, detail="Asset name required.")
 
     try:
-        # Use the existing robust async news fetching function
+        # Use the existing robust async news fetching function (which uses feedparser)
         news_items = await fetch_latest_news_async(asset_upper)
+
         # Check if the fetch itself indicated an error internally
-        if news_items and "Error fetching news" in news_items[0].get("headline", ""):
-            logger.warning(f"[{endpoint_name}] News fetch for {asset} returned an error state.")
-            # Return a slightly different structure or status? For now, return the error item.
-            # return JSONResponse(status_code=503, content={"news": news_items})
-            # Or just return the error message as success
+        # Use more robust check for error messages or empty states
+        is_error_or_empty = not news_items or any(
+            err_indicator in news_items[0].get("headline", "").lower()
+            for err_indicator in ["error", "no recent news", "no relevant news", "timeout", "not available"]
+        )
+
+        if is_error_or_empty:
+            if not news_items:
+                 logger.warning(f"[{endpoint_name}] News fetch for {asset} returned empty list.")
+                 # Standardize response for no news found
+                 news_items = [{"headline": f"No recent news found for {asset}.", "summary": "", "link": "#"}]
+            else:
+                # Log the specific error/state returned by the fetch function
+                logger.warning(f"[{endpoint_name}] News fetch for {asset} returned an error/empty state: {news_items[0].get('headline', 'N/A')}")
+            # Return the error/empty message list with a 200 OK status
             return {"news": news_items}
-        elif not news_items:
-             logger.warning(f"[{endpoint_name}] No news items found for {asset}.")
-             # Return an empty list or a specific message
-             return {"news": [{"headline": f"No recent news found for {asset}.", "summary": "", "link": "#"}]}
         else:
             logger.info(f"[{endpoint_name}] Successfully fetched {len(news_items)} news items for {asset}")
             return {"news": news_items}
+
     except Exception as e:
-        logger.error(f"[{endpoint_name}] Unexpected error fetching news for {asset}: {e}", exc_info=True)
+        logger.error(f"[{endpoint_name}] Unexpected error in news endpoint for {asset}: {e}", exc_info=True)
+        # Use 503 Service Unavailable for internal server errors during fetch
         raise HTTPException(status_code=503, detail=f"Server error fetching news for {asset}.")
 
         
@@ -2785,148 +3028,205 @@ async def get_payoff_chart_endpoint(request: PayoffRequest):
 @app.post("/get_stock_analysis", tags=["Analysis & Payoff"])
 async def get_stock_analysis_endpoint(request: StockRequest):
     """
-    Fetches stock data and news, then generates an LLM analysis focused on
-    insights for Options Traders. Handles missing data gracefully.
-    Returns 404 only if essential price data is unavailable.
+    Fetches stock data (via RapidAPI) and news (via feedparser), then generates
+    an LLM analysis focused on insights for Options Traders.
+    Handles missing data gracefully. Returns 404 only if essential stock data
+    (e.g., price from RapidAPI) is unavailable.
     """
     asset = request.asset.strip().upper()
+    endpoint_name = "get_stock_analysis_endpoint"
     if not asset: raise HTTPException(status_code=400, detail="Asset name required.")
 
-    analysis_cache_key = f"analysis_{asset}" # Consider adding date/time if staleness is a concern
+    analysis_cache_key = f"analysis_rapidapi_{asset}" # Include source in key
     cached_analysis = analysis_cache.get(analysis_cache_key)
     if cached_analysis:
-        logger.info(f"[{asset}] Cache hit analysis.")
+        logger.info(f"[{endpoint_name}][{asset}] Cache hit analysis.")
         return {"analysis": cached_analysis}
 
-    # Map asset to Yahoo symbol (handle common indices explicitly)
+    # --- Symbol Mapping & Region Definition ---
+    # Keep the existing mapping logic, define the region (assuming IN for now)
+    region_code = "IN" # Explicitly define region for RapidAPI call
     symbol_map = {
         "NIFTY": "^NSEI",
         "BANKNIFTY": "^NSEBANK",
-        "FINNIFTY": "NIFTY_FIN_SERVICE.NS", # Double-check this ticker on Yahoo Finance
-        "NIFTY 50": "^NSEI", # Alias
-        "NIFTY BANK": "^NSEBANK" # Alias
-        # Add more mappings as needed
+        "FINNIFTY": "NIFTY_FIN_SERVICE.NS", # Verify this symbol if needed
+        "NIFTY 50": "^NSEI",
+        "NIFTY BANK": "^NSEBANK"
+        # Add more mappings for BSE or other exchanges if needed
     }
-    # Default to .NS suffix if not in map and doesn't contain '^' (common for indices)
-    stock_symbol = symbol_map.get(asset, f"{asset}.NS" if '^' not in asset else asset)
+    # Determine symbol: Use map, default to .NS if not index, else use asset as is
+    stock_symbol = symbol_map.get(asset, f"{asset}.NS" if '^' not in asset and '.' not in asset else asset)
+
+    logger.info(f"[{endpoint_name}][{asset}] Analysis request. Using Symbol='{stock_symbol}', Region='{region_code}'")
 
     stock_data: Optional[Dict[str, Any]] = None
-    latest_news: Optional[List[Dict[str, str]]] = [] # Initialize as list
-
-    logger.info(f"Analysis request for asset '{asset}', using symbol '{stock_symbol}'")
+    latest_news: Optional[List[Dict[str, str]]] = []
 
     try:
         # --- Fetch Data Concurrently ---
-        logger.debug(f"[{asset}] Starting concurrent fetch for stock data and news...")
+        logger.debug(f"[{endpoint_name}][{asset}] Starting concurrent fetch (RapidAPI Stock + Feedparser News)...")
         start_fetch = time.monotonic()
 
-        stock_task = asyncio.create_task(fetch_stock_data_async(stock_symbol))
+        # === CORE CHANGE: Call new fetch_stock_data_async with symbol AND region ===
+        stock_task = asyncio.create_task(fetch_stock_data_async(stock_symbol, region=region_code))
+        # ==========================================================================
         news_task = asyncio.create_task(fetch_latest_news_async(asset)) # Use original asset name for news
 
         results = await asyncio.gather(stock_task, news_task, return_exceptions=True)
         fetch_duration = time.monotonic() - start_fetch
-        logger.debug(f"[{asset}] Concurrent fetch completed in {fetch_duration:.3f}s")
+        logger.debug(f"[{endpoint_name}][{asset}] Concurrent fetch completed in {fetch_duration:.3f}s")
 
-        # --- Process Stock Data Result ---
+        # --- Process Stock Data Result (from RapidAPI) ---
         if isinstance(results[0], Exception):
-            logger.error(f"[{asset}({stock_symbol})] Unexpected error during stock data fetch task: {results[0]}", exc_info=results[0])
-            raise HTTPException(status_code=503, detail=f"Server error fetching stock data for {stock_symbol}.")
+            logger.error(f"[{endpoint_name}][{asset}({stock_symbol})] Unexpected error during RapidAPI stock data fetch task: {results[0]}", exc_info=results[0])
+            raise HTTPException(status_code=503, detail=f"Server error fetching stock data for {stock_symbol} via external API.")
         elif results[0] is None:
-            # fetch_stock_data_async returns None if essential data (price) is missing
-            logger.error(f"[{asset}({stock_symbol})] Essential stock data (e.g., price) could not be determined. Symbol might be invalid, delisted, or experiencing API issues.")
-            raise HTTPException(status_code=404, detail=f"Essential stock data not found for: {stock_symbol}. Symbol might be invalid, delisted, or experiencing temporary data issues.")
+            # fetch_stock_data_async (RapidAPI version) returns None if essential data (chart/price) is missing
+            logger.error(f"[{endpoint_name}][{asset}({stock_symbol})] CRITICAL - Essential stock data (e.g., price/chart) could not be determined from RapidAPI. Symbol might be invalid for region '{region_code}', delisted, or API issue.")
+            # 404 Not Found is appropriate if the core data for the requested asset isn't available
+            raise HTTPException(status_code=404, detail=f"Essential stock data not found for: {stock_symbol} (Region: {region_code}). Verify symbol or try later.")
         else:
             stock_data = results[0]
-            logger.info(f"[{asset}({stock_symbol})] Successfully fetched stock data.")
+            logger.info(f"[{endpoint_name}][{asset}({stock_symbol})] Successfully fetched RapidAPI stock data.")
 
-        # --- Process News Data Result ---
+        # --- Process News Data Result (from feedparser) ---
         if isinstance(results[1], Exception):
-            logger.error(f"[{asset}] Unexpected error during news fetch task: {results[1]}", exc_info=results[1])
+            logger.error(f"[{endpoint_name}][{asset}] Unexpected error during news fetch task: {results[1]}", exc_info=results[1])
             # Provide placeholder indicating news fetch failure, but don't fail the whole request
-            latest_news = [{"headline": f"Internal server error fetching news for {asset}.", "summary": "Task failed unexpectedly.", "link": "#"}]
+            latest_news = [{"headline": f"Server error fetching news for {asset}.", "summary": "Task failed.", "link": "#"}]
         elif not results[1]:
-            logger.warning(f"[{asset}] News fetch returned an empty list unexpectedly.")
-            latest_news = [{"headline": f"No news data available for {asset}.", "summary": "", "link": "#"}]
+             logger.warning(f"[{endpoint_name}][{asset}] News fetch returned an empty list unexpectedly.")
+             latest_news = [{"headline": f"No news data available for {asset}.", "summary": "", "link": "#"}]
         else:
             latest_news = results[1]
-            # Log if the news fetch itself reported an error (e.g., timeout, no results)
-            if any(err_indicator in latest_news[0].get("headline", "").lower() for err_indicator in ["error", "no recent news", "no relevant news", "timeout", "not available"]):
-                logger.warning(f"[{asset}] News fetch resulted in an error/empty state: {latest_news[0]['headline']}")
+            # Log if the news fetch itself reported an error/empty state
+            is_news_error_or_empty = any(
+                err_indicator in latest_news[0].get("headline", "").lower()
+                for err_indicator in ["error", "no recent news", "no relevant news", "timeout", "not available"]
+            )
+            if is_news_error_or_empty:
+                logger.warning(f"[{endpoint_name}][{asset}] News fetch resulted in an error/empty state: {latest_news[0]['headline']}")
             else:
-                logger.info(f"[{asset}] Successfully processed news fetch result ({len(latest_news)} items).")
+                logger.info(f"[{endpoint_name}][{asset}] Successfully processed news fetch result ({len(latest_news)} items).")
 
     except HTTPException as http_err:
-         logger.error(f"[{asset}({stock_symbol})] Raising HTTPException status {http_err.status_code}: {http_err.detail}")
-         raise http_err # Re-raise 404 or other fetch-related HTTPExceptions
+         # Log and re-raise specific 4xx/5xx errors from fetch processing
+         logger.error(f"[{endpoint_name}][{asset}({stock_symbol})] Raising HTTPException status {http_err.status_code}: {http_err.detail}")
+         raise http_err
     except Exception as e:
-        logger.error(f"[{asset}] Unexpected error during data fetch orchestration for analysis: {e}", exc_info=True)
-        raise HTTPException(status_code=503, detail=f"Server error during data fetching for analysis.")
+        # Catch-all for unexpected errors during the fetch orchestration phase
+        logger.error(f"[{endpoint_name}][{asset}] Unexpected error during data fetch orchestration: {e}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Internal server error during data fetching.")
 
     # --- Generate Analysis using LLM ---
-    # stock_data is guaranteed to be populated Dict here if no exception was raised
+    # stock_data is guaranteed to be a populated Dict here if no exception was raised above
+
     if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY":
-        logger.error(f"[{asset}] Cannot generate analysis: Gemini API Key not configured.")
+        logger.error(f"[{endpoint_name}][{asset}] Cannot generate analysis: Gemini API Key not configured.")
         raise HTTPException(status_code=501, detail="Analysis feature not configured (API Key missing).")
 
-    logger.debug(f"[{asset}] Building options-focused analysis prompt...")
+    logger.debug(f"[{endpoint_name}][{asset}] Building options-focused analysis prompt using RapidAPI data...")
 
-    # ============================================================ #
-    # ========== CORE CHANGE: Use the new prompt function ========== #
-    # ============================================================ #
+    # === CORE CHANGE: Use the updated prompt builder function ===
+    # Pass the original 'asset' name for display, but use fetched 'stock_data' and 'latest_news'
     prompt = build_stock_analysis_prompt_for_options(asset, stock_data, latest_news)
-    # ============================================================ #
+    # ============================================================
 
     try:
-        # Ensure model selection is appropriate (1.5 Flash is good for speed/cost)
+        # Use the same Gemini model and generation logic
         model = genai.GenerativeModel("gemini-1.5-flash-latest")
-        logger.info(f"[{asset}] Generating Gemini analysis (options focus)...")
+        logger.info(f"[{endpoint_name}][{asset}] Generating Gemini analysis (options focus)...")
         start_llm = time.monotonic()
 
         response = await model.generate_content_async(prompt) # Async call
 
         llm_duration = time.monotonic() - start_llm
-        logger.info(f"[{asset}] Gemini response received in {llm_duration:.3f}s.")
+        logger.info(f"[{endpoint_name}][{asset}] Gemini response received in {llm_duration:.3f}s.")
 
-        # ======== Use the same robust Gemini response handling ========
+        # Use the same robust Gemini response handling logic as before
         analysis_text = None
         try:
             if response.prompt_feedback and response.prompt_feedback.block_reason:
                 block_reason = response.prompt_feedback.block_reason.name
-                logger.error(f"[{asset}] Gemini response blocked. Reason: {block_reason}")
-                raise ValueError(f"Analysis blocked ({block_reason}).") # User-friendly part
+                logger.error(f"[{endpoint_name}][{asset}] Gemini response blocked. Reason: {block_reason}")
+                # Raise a specific error that can be caught below
+                raise ValueError(f"Analysis blocked by content filter ({block_reason}).")
 
             if not response.parts:
                 feedback_info = f"Feedback: {response.prompt_feedback}" if response.prompt_feedback else "No feedback."
-                logger.error(f"[{asset}] Gemini response missing parts. {feedback_info}")
-                raise ValueError(f"Analysis failed (No response parts).")
+                logger.error(f"[{endpoint_name}][{asset}] Gemini response missing parts. {feedback_info}")
+                raise ValueError(f"Analysis generation failed (No response parts received).")
 
-            analysis_text = response.text # Extract text only if parts exist
+            analysis_text = response.text # Extract text
 
         except ValueError as e:
-            logger.error(f"[{asset}] Error processing Gemini response object: {e}")
-            raise ValueError(f"Analysis failed ({e}).") # Propagate user-friendly message
+            # Catch errors from response processing (blocked, missing parts)
+            logger.error(f"[{endpoint_name}][{asset}] Error processing Gemini response object: {e}")
+            # Raise the same error message to be caught by the outer try-except
+            raise ValueError(f"{e}")
         except Exception as e:
-            logger.error(f"[{asset}] Unexpected error processing Gemini response: {e}", exc_info=True)
-            raise ValueError(f"Analysis failed (Unexpected response processing error: {type(e).__name__}).")
+            # Catch unexpected errors during response processing
+            logger.error(f"[{endpoint_name}][{asset}] Unexpected error processing Gemini response: {e}", exc_info=True)
+            raise ValueError(f"Analysis generation failed (Unexpected response processing error: {type(e).__name__}).")
 
+        # Check for empty text after successful processing
         if not analysis_text or not analysis_text.strip():
             feedback_info = f"Feedback: {response.prompt_feedback}" if response.prompt_feedback else "No feedback."
-            logger.error(f"[{asset}] Gemini response text is empty. {feedback_info}")
-            raise ValueError(f"Analysis failed (Empty response text).")
-        # ============================================================
+            logger.error(f"[{endpoint_name}][{asset}] Gemini response text is empty. {feedback_info}")
+            raise ValueError(f"Analysis generation failed (Empty response text received).")
 
         # Cache the valid analysis text
         analysis_cache[analysis_cache_key] = analysis_text
-        logger.info(f"[{asset}] Successfully generated and cached options-focused analysis.")
+        logger.info(f"[{endpoint_name}][{asset}] Successfully generated and cached options-focused analysis (RapidAPI source).")
         return {"analysis": analysis_text}
 
-    except ValueError as gen_err: # Catch specific errors from response processing
-        logger.error(f"[{asset}] Analysis generation processing error: {gen_err}")
-        raise HTTPException(status_code=503, detail=f"Analysis Generation Error: {gen_err}") # Pass user-friendly message
-    except Exception as e: # Catch broader API errors
-        logger.error(f"[{asset}] Gemini API call or other unexpected error: {e}", exc_info=True)
-        # Consider checking for specific google API errors if needed
-        raise HTTPException(status_code=503, detail=f"Analysis generation failed (API/Processing Error: {type(e).__name__})")
+    except ValueError as gen_err:
+        # Catch specific errors raised during response processing (blocked, missing parts, empty text)
+        logger.error(f"[{endpoint_name}][{asset}] Analysis generation processing error: {gen_err}")
+        # Return a 503 with the user-friendly error message from the ValueError
+        raise HTTPException(status_code=503, detail=f"Analysis Generation Error: {gen_err}")
+    except Exception as e:
+        # Catch broader errors from the genai API call itself or other unexpected issues
+        logger.error(f"[{endpoint_name}][{asset}] Gemini API call or other unexpected error during generation: {e}", exc_info=True)
+        # Provide a generic error for unexpected API issues
+        raise HTTPException(status_code=503, detail=f"Analysis generation failed (External API/Processing Error: {type(e).__name__})")
+        # ===============================================================
+
+
+@app.post("/get_greeks_analysis", tags=["Analysis & Payoff"], summary="Get LLM analysis based on portfolio Greeks")
+async def get_greeks_analysis_endpoint(request: GreeksAnalysisRequest):
+    """
+    Generates an LLM analysis based *only* on the provided total portfolio Greeks.
+    The Greeks should be calculated client-side and represent the entire portfolio.
+    """
+    endpoint_name = "get_greeks_analysis_endpoint"
+    logger.info(f"[{endpoint_name}] Request received for asset: {request.asset_symbol}")
+    logger.debug(f"[{endpoint_name}] Received Greeks data: {request.portfolio_greeks.dict()}") # Log received data
+
+    # Convert Pydantic model back to dict for the function
+    greeks_dict = request.portfolio_greeks.dict()
+
+    analysis = await fetch_greeks_analysis(request.asset_symbol, greeks_dict)
+
+    # Check if the function returned an error message string
+    if isinstance(analysis, str) and analysis.startswith("*"):
+        error_message = analysis.strip('*')
+        logger.warning(f"[{endpoint_name}][{request.asset_symbol}] Greeks analysis generation failed: {error_message}")
+        # Map specific errors to appropriate HTTP status codes
+        if "API Key missing" in error_message:
+             raise HTTPException(status_code=501, detail=error_message) # 501 Not Implemented
+        elif "blocked by content filter" in error_message:
+             raise HTTPException(status_code=400, detail=error_message) # 400 Bad Request (content issue)
+        else:
+             # Other generation errors typically indicate server-side issues
+             raise HTTPException(status_code=503, detail=error_message) # 503 Service Unavailable
+    elif not analysis: # Should not happen if errors return strings, but as a fallback
+         logger.error(f"[{endpoint_name}][{request.asset_symbol}] Greeks analysis returned None unexpectedly.")
+         raise HTTPException(status_code=503, detail="Unknown error generating Greeks analysis.")
+    else:
+         # Success
+         logger.info(f"[{endpoint_name}][{request.asset_symbol}] Successfully generated Greeks analysis.")
+         return {"greeks_analysis": analysis} # Return the valid analysis
 
 
 # ===============================================================

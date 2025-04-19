@@ -38,6 +38,8 @@
 
 * { box-sizing: border-box; }
 
+html { scroll-behavior: smooth; } /* Optional smooth scroll */
+
 body {
     font-family: 'Source Sans 3', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     background-color: var(--page-bg);
@@ -47,6 +49,8 @@ body {
     line-height: 1.6;
     font-size: 15px;
     min-height: 100vh;
+    -webkit-font-smoothing: antialiased; /* Improve font rendering */
+    -moz-osx-font-smoothing: grayscale;
 }
 
 /* ===============================================================
@@ -59,6 +63,9 @@ header {
     padding: 0.9rem 1.5rem;
     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     margin-bottom: 25px;
+    position: sticky; /* Keep header visible */
+    top: 0;
+    z-index: 1000;
 }
 header h1 { margin: 0; font-size: 1.65rem; font-weight: 600; letter-spacing: 0.5px; }
 
@@ -67,18 +74,29 @@ header h1 { margin: 0; font-size: 1.65rem; font-weight: 600; letter-spacing: 0.5
    =============================================================== */
 .container {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: wrap; /* Allow wrapping on smaller screens */
     gap: 30px;
     padding: 0 30px 30px 30px;
-    max-width: 1900px;
+    max-width: 1900px; /* Max width for very large screens */
     margin: 0 auto;
+    align-items: flex-start; /* Align items to the top */
 }
 
-.option-chain-container,
-.strategy-container {
-    flex: 1;
+.option-chain-container {
+    flex: 1 1 550px; /* Flex basis, allow shrinking/growing */
     min-width: 480px;
+    position: sticky; /* Make option chain sticky */
+    top: 80px; /* Adjust based on header height + desired gap */
+    align-self: flex-start; /* Ensure it sticks to the top */
+    max-height: calc(100vh - 110px); /* Limit height to prevent overflow */
+    overflow-y: hidden; /* Hide main scrollbar, internal table scrolls */
 }
+
+.strategy-container {
+    flex: 1 1 600px; /* Flex basis, allow shrinking/growing */
+    min-width: 500px;
+}
+
 
 .card {
     padding: 25px;
@@ -91,7 +109,16 @@ header h1 { margin: 0; font-size: 1.65rem; font-weight: 600; letter-spacing: 0.5
     gap: 20px; /* Inner spacing for card content */
 }
 
+/* Apply scrolling within the option chain card content */
+.option-chain-container > .table-wrapper {
+    max-height: calc(100vh - 250px); /* Adjust based on card padding, header, controls */
+    overflow-y: auto;
+}
+
+
 .strategy-container {
+    display: flex;
+    flex-direction: column;
     gap: 30px; /* Spacing between result sections */
 }
 
@@ -100,16 +127,17 @@ header h1 { margin: 0; font-size: 1.65rem; font-weight: 600; letter-spacing: 0.5
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 5px;
+    margin-bottom: 5px; /* Reduced margin */
     padding-bottom: 12px;
     border-bottom: 1px solid var(--border-color);
 }
 h2, h3, .section-subheader { color: var(--text-dark); margin: 0; font-weight: 600; }
 h2 { font-size: 1.35rem; }
 h3, .section-subheader { font-size: 1.15rem; color: #495057; }
-.results-section > h3.section-subheader { /* Styling for subheaders inside results */
-    padding-bottom: 10px;
-    margin-bottom: 18px;
+/* Slightly reduced margin/padding for subheaders */
+.results-section > h3.section-subheader {
+    padding-bottom: 8px;
+    margin-bottom: 15px;
     border-bottom: 1px solid #eee;
 }
 
@@ -124,7 +152,9 @@ h3, .section-subheader { font-size: 1.15rem; color: #495057; }
     font-weight: 500;
 }
 #globalError.hidden { display: none; } /* Ensure hidden works */
-#globalError.error-message { display: block !important; text-align: center; } /* Ensure visible when error */
+/* Use JS to set 'error' class, not hardcode .error-message */
+#globalError.error { display: block !important; text-align: center; }
+
 
 /* ===============================================================
    Controls
@@ -141,29 +171,54 @@ input.lots-input { width: 70px; text-align: right; padding: 6px; font-size: 0.9r
    Tables
    =============================================================== */
 .table-wrapper { width: 100%; overflow-x: auto; border: 1px solid var(--border-color); border-radius: var(--card-radius); background-color: #fff; }
-.data-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-.data-table th, .data-table td { padding: 11px 14px; text-align: center; border-bottom: 1px solid var(--border-color); white-space: nowrap; vertical-align: middle; }
+.data-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; table-layout: fixed; /* Prevent columns resizing wildly */ }
+.data-table th, .data-table td { padding: 11px 14px; text-align: center; border-bottom: 1px solid var(--border-color); white-space: nowrap; vertical-align: middle; overflow: hidden; text-overflow: ellipsis; /* Prevent text overflow */ }
 .data-table th { background-color: var(--table-header-bg); color: var(--text-dark); font-weight: 600; border-bottom-width: 2px; border-color: #cdd4db; position: sticky; top: 0; z-index: 1; text-align: center !important; }
 .data-table tbody tr:last-child td { border-bottom: none; }
 .data-table tbody tr:hover { background-color: var(--table-hover-bg); }
 
+/* Explicit Column Widths (Adjust as needed) */
+#optionChainTable th:nth-child(1), #optionChainTable td:nth-child(1) { width: 12%; } /* Call LTP */
+#optionChainTable th:nth-child(2), #optionChainTable td:nth-child(2) { width: 12%; } /* Call OI */
+#optionChainTable th:nth-child(3), #optionChainTable td:nth-child(3) { width: 11%; } /* Call IV */
+#optionChainTable th:nth-child(4), #optionChainTable td:nth-child(4) { width: 14%; font-weight: 600; } /* Strike */
+#optionChainTable th:nth-child(5), #optionChainTable td:nth-child(5) { width: 11%; } /* Put IV */
+#optionChainTable th:nth-child(6), #optionChainTable td:nth-child(6) { width: 12%; } /* Put OI */
+#optionChainTable th:nth-child(7), #optionChainTable td:nth-child(7) { width: 12%; } /* Put LTP */
+
+
+#strategyTable th:nth-child(1), #strategyTable td:nth-child(1) { width: 10%; } /* Type */
+#strategyTable th:nth-child(2), #strategyTable td:nth-child(2) { width: 15%; } /* Strike */
+#strategyTable th:nth-child(3), #strategyTable td:nth-child(3) { width: 20%; } /* Expiry */
+#strategyTable th:nth-child(4), #strategyTable td:nth-child(4) { width: 12%; } /* Lots */
+#strategyTable th:nth-child(5), #strategyTable td:nth-child(5) { width: 13%; } /* Action */
+#strategyTable th:nth-child(6), #strategyTable td:nth-child(6) { width: 15%; } /* Premium */
+#strategyTable th:nth-child(7), #strategyTable td:nth-child(7) { width: 10%; } /* Remove */
+
+.greeks-table th:nth-child(1), .greeks-table td:nth-child(1) { width: 10%; } /* Action */
+.greeks-table th:nth-child(2), .greeks-table td:nth-child(2) { width: 8%; } /* Lots */
+.greeks-table th:nth-child(3), .greeks-table td:nth-child(3) { width: 8%; } /* Type */
+.greeks-table th:nth-child(4), .greeks-table td:nth-child(4) { width: 14%; } /* Strike */
+.greeks-table th:nth-child(n+5), .greeks-table td:nth-child(n+5) { width: 12%; } /* Greeks */
+
+
 /* Right-align numeric data */
+.data-table td.oi, /* Specific class for OI */
 .data-table td:nth-child(1), /* Call LTP */
-.data-table td:nth-child(2), /* Call OI */
 .data-table td:nth-child(3), /* Call IV */
 .data-table td:nth-child(5), /* Put IV */
-.data-table td:nth-child(6), /* Put OI */
 .data-table td:nth-child(7), /* Put LTP */
 #strategyTable td:nth-child(2), /* Strike */
 #strategyTable td:nth-child(4), /* Lots Input Container */
 #strategyTable td:nth-child(6), /* Premium */
-.charges-table td:nth-child(n+4):not(:nth-child(12)), /* Charges */
-.greeks-table td:nth-child(n+5) /* Greeks */
- { text-align: right; font-feature-settings: "tnum"; }
+/* Don't apply to tax table notes */
+.charges-table td:not(.note),
+.greeks-table td:nth-child(n+4) /* Strike + Greeks */
+ { text-align: right; font-feature-settings: "tnum"; /* Tabular nums */ }
 
 /* Align totals */
 .charges-table tfoot td, .greeks-table tfoot td { text-align: right; }
-.charges-table tfoot td:first-child, .greeks-table tfoot td:first-child { text-align: left; }
+.charges-table tfoot td:first-child, .greeks-table tfoot td:first-child { text-align: right; } /* Align first cell too */
 
 /* Option Chain Specific */
 .option-chain td { background-color: transparent; transition: background-color 0.3s ease-out; } /* Add transition for highlight */
@@ -171,37 +226,38 @@ input.lots-input { width: 70px; text-align: right; padding: 6px; font-size: 0.9r
 .option-chain td.put { background-color: rgba(200, 85, 61, 0.08); }
 .option-chain td.clickable:hover { background-color: rgba(74, 124, 89, 0.15) !important; cursor: pointer; } /* Hover priority */
 .option-chain td.oi { color: var(--text-muted); font-size: 0.82rem; }
-.option-chain td.strike { font-weight: 600; }
 .option-chain .atm-strike td { background-color: #fefae0 !important; font-weight: bold !important; }
 .option-chain .atm-strike { border-top: 1px solid #faedcd; border-bottom: 1px solid #faedcd; }
 
 /* Strategy Table Specific */
-#strategyTable td:nth-child(4) { width: 80px; } /* Lots input */
-#strategyTable td:nth-child(5) { width: 70px; text-align: center;} /* Action button */
-#strategyTable td:nth-child(7) { width: 50px; padding: 5px; text-align: center; } /* Remove button */
-button.toggle-buy-sell { padding: 4px 8px; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; font-weight: bold; max-width: 60px; font-size: 0.78rem; }
+#strategyTable td:nth-child(7) { padding: 5px; } /* Remove button cell */
+button.toggle-buy-sell { padding: 4px 8px; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; font-weight: bold; min-width: 55px; font-size: 0.78rem; }
 button.toggle-buy-sell.button-buy { background-color: rgba(95, 173, 86, 0.15); color: var(--success-color); border-color: rgba(95, 173, 86, 0.3); }
 button.toggle-buy-sell.button-buy:hover { background-color: rgba(95, 173, 86, 0.3); }
 button.toggle-buy-sell.button-sell { background-color: rgba(200, 85, 61, 0.15); color: var(--danger-color); border-color: rgba(200, 85, 61, 0.3); }
 button.toggle-buy-sell.button-sell:hover { background-color: rgba(200, 85, 61, 0.3); }
-#strategyTable button.remove-btn { font-size: 1.35em; color: var(--danger-color); background: none; border: none; padding: 0; width: 100%; height: 100%; }
+#strategyTable button.remove-btn { font-size: 1.35em; color: var(--danger-color); background: none; border: none; padding: 0; width: 100%; height: 100%; line-height: 1; cursor: pointer; }
 #strategyTable button.remove-btn:hover { color: var(--danger-hover); background-color: rgba(200, 85, 61, 0.05); }
 
 /* Results Tables */
 .results-table tfoot tr, .totals-row { font-weight: 600; background-color: var(--table-total-bg); border-top: 2px solid #cdd4db; }
-.charges-table td.note { max-width: 90px; font-size: 0.8rem; color: var(--text-muted); cursor: help; text-align: left !important; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Tax Table Specific */
+.charges-table caption { font-size: 0.9rem; color: var(--text-muted); padding-bottom: 10px; text-align: left; font-style: italic; }
+.charges-table td.note { max-width: 120px; font-size: 0.8rem; color: var(--text-muted); cursor: help; text-align: left !important; overflow: hidden; text-overflow: ellipsis; white-space: normal; /* Allow wrap */ line-height: 1.3; }
+/* Greeks Table Specific */
 .greeks-table caption { font-size: 0.9rem; color: var(--text-muted); padding-bottom: 10px; caption-side: top; text-align: left; font-style: italic; }
 .greeks-table th[title], .greeks-table td[title] { cursor: help; }
 .greeks-table .totals-row td { background-color: var(--table-total-bg); font-weight: bold; }
 
+
 /* ===============================================================
    Buttons
    =============================================================== */
-button { padding: 8px 16px; font-size: 0.92rem; border: 1px solid transparent; border-radius: var(--card-radius); cursor: pointer; transition: all 0.2s ease; font-weight: 500; line-height: 1.5; }
+button { padding: 8px 16px; font-size: 0.92rem; border: 1px solid transparent; border-radius: var(--card-radius); cursor: pointer; transition: all 0.2s ease; font-weight: 500; line-height: 1.5; background-color: #6c757d; color: white; } /* Default button style */
 button:disabled { opacity: 0.65; cursor: not-allowed; }
-.button-primary { background-color: var(--primary-color); color: white; border-color: var(--primary-color); }
+.button-primary { background-color: var(--primary-color); border-color: var(--primary-color); }
 .button-primary:hover:not(:disabled) { background-color: var(--primary-hover); border-color: var(--primary-hover); transform: translateY(-1px); box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-.button-danger { background-color: var(--danger-color); color: white; border-color: var(--danger-color); }
+.button-danger { background-color: var(--danger-color); border-color: var(--danger-color); }
 .button-danger:hover:not(:disabled) { background-color: var(--danger-hover); border-color: var(--danger-hover); transform: translateY(-1px); box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
 .button-wide { width: 100%; max-width: 240px; padding: 11px 0; font-size: 1.05rem; font-weight: 600; }
 .button-container { display: flex; justify-content: center; margin-top: 20px; }
@@ -213,32 +269,36 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
 #payoffChartContainer {
   max-width: 1200px;
   width: 100%;
-  height: 500px;  /* Fixed height instead of min-height */
+  height: 450px;  /* Adjusted height */
   margin: 1.5em auto;
-  padding: 0;  /* Remove padding to maximize chart area */
-  border: 1px solid #ccc;
+  padding: 0;
+  border: 1px solid var(--border-color);
   box-sizing: border-box;
   position: relative;
-  overflow: hidden;  /* Prevent any overflow issues */
+  overflow: hidden;
+  background-color: #fff; /* Ensure background */
 }
 
-/* Loading and error states */
-#payoffChartContainer.loading::before,
-#payoffChartContainer.error::before {
-  content: attr(data-message);
+/* Loading and error states overlay */
+#payoffChartContainer[data-state="loading"]::before,
+#payoffChartContainer[data-state="error"]::before {
+  content: attr(data-message); /* Get message from data attribute */
   position: absolute;
   inset: 0;
   display: flex;
   justify-content: center;
   align-items: center;
-  background-color: rgba(255, 255, 255, 0.8);
+  background-color: rgba(255, 255, 255, 0.85); /* Slightly more opaque */
   font-style: italic;
-  color: #555;
-  z-index: 10;
+  font-size: 1.1rem;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 20px;
+  z-index: 10; /* Ensure overlay is on top */
 }
-
-#payoffChartContainer.error::before {
-  color: red;
+#payoffChartContainer[data-state="error"]::before {
+  color: var(--danger-color); /* Use danger color for errors */
+  font-weight: 500;
 }
 
 /* Make Plotly completely fill the container */
@@ -248,16 +308,16 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
   width: 100% !important;
   height: 100% !important;
 }
-
-/* Ensure SVG elements properly scale */
 #payoffChartContainer .main-svg {
   width: 100% !important;
   height: 100% !important;
 }
 
 
-/* Result Sections (Metrics, Tax, Greeks, AI wrappers) */
-.results-section { background-color: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--card-radius); padding: 20px 25px; box-shadow: none; }
+/* Result Sections (Metrics, Tax, Greeks, Analysis wrappers) */
+.results-section { background-color: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--card-radius); padding: 20px 25px; box-shadow: none; margin-bottom: 20px; /* Add consistent margin between sections */ }
+.results-section:last-child { margin-bottom: 0; } /* Remove margin from last section */
+
 .card-accent-warning { background-color: var(--accent-warning-bg); border-left: 4px solid var(--warning-color); }
 .card-accent-warning .section-subheader { color: var(--accent-warning-text); border-bottom-color: var(--accent-warning-border); }
 
@@ -267,13 +327,14 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
 .metrics-list li { padding: 10px 5px; font-size: 0.95rem; color: #333; display: flex; justify-content: space-between; border-bottom: 1px solid #eee; align-items: center; }
 .metrics-list li:last-child { border-bottom: none; }
 .metrics-list .metric-label { color: var(--text-secondary); margin-right: 15px; flex-shrink: 0; }
-.metrics-list .metric-value { font-weight: 600; color: var(--text-dark); text-align: right; font-family: monospace; }
+.metrics-list .metric-value { font-weight: 600; color: var(--text-dark); text-align: right; font-family: monospace, monospace; /* Monospace for numbers */ }
 
 /* Breakdown List (Inside Details) */
 .breakdown-header { /* This is the <summary> for breakdown */
     font-size: 0.95rem;
     font-weight: 600;
     color: var(--text-secondary);
+    cursor: pointer;
 }
 .breakdown-list { list-style: none; padding-left: 0; margin: 0; /* Reset margin */ font-size: 0.9rem; color: #444; }
 .breakdown-list li { padding: 3px 0 3px 15px; position: relative; }
@@ -281,7 +342,7 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
 
 /* Collapsible Sections Styling (<details>) */
 .results-details { border: 1px solid var(--border-color); border-radius: var(--card-radius); margin-bottom: 15px; background-color: #fff; overflow: hidden; /* Prevents content spill */ }
-.results-details summary { display: block; /* Needed for proper styling/arrow */ padding: 10px 15px; background-color: var(--table-header-bg); cursor: pointer; font-weight: 600; outline: none; border-bottom: 1px solid transparent; /* Hide border when closed */ transition: background-color 0.2s ease, border-color 0.2s ease; }
+.results-details summary { display: block; /* Needed for proper styling/arrow */ padding: 10px 15px; background-color: var(--table-header-bg); cursor: pointer; font-weight: 600; outline: none; border-bottom: 1px solid transparent; /* Hide border when closed */ transition: background-color 0.2s ease, border-color 0.2s ease; position: relative; /* For arrow positioning */ }
 .results-details[open] summary { border-bottom: 1px solid var(--border-color); /* Show border when open */ }
 .results-details summary:hover { background-color: #e9ecef; }
 .results-details > *:not(summary) { padding: 15px; } /* Style content area */
@@ -295,10 +356,26 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
 #costBreakdownContainer summary { font-size: 0.95rem; color: var(--text-secondary); }
 
 /* ===============================================================
-   Analysis Section
+   Analysis Sections (Stock & Greeks)
    =============================================================== */
-#analysisSection { background-color: #f8f9fa; }
-.analysis-container { background-color: transparent; border: none; padding: 0; margin-top: 0; font-size: 0.95rem; line-height: 1.7; color: #333; }
+#analysisSection, #greeksAnalysisSection {
+    background-color: #f8f9fa;
+    /* Ensure consistent padding */
+    padding: 20px 25px;
+}
+
+/* Common container for markdown content */
+.analysis-container {
+    background-color: transparent;
+    border: none;
+    padding: 0; /* Padding is on the parent section */
+    margin-top: 0;
+    font-size: 0.95rem;
+    line-height: 1.7;
+    color: #333;
+    min-height: 100px; /* Ensure visibility when loading/error */
+}
+/* Markdown Element Styling */
 .analysis-container h1, .analysis-container h2, .analysis-container h3, .analysis-container h4 { margin-top: 1.2em; margin-bottom: 0.6em; font-weight: 600; line-height: 1.3; color: #222; padding-bottom: 0.2em; border-bottom: 1px solid #eee; }
 .analysis-container h1 { font-size: 1.4rem; } .analysis-container h2 { font-size: 1.3rem; } .analysis-container h3 { font-size: 1.15rem; } .analysis-container h4 { font-size: 1.05rem; }
 .analysis-container p { margin-bottom: 1em; }
@@ -306,9 +383,61 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
 .analysis-container li { margin-bottom: 0.5em; }
 .analysis-container strong, .analysis-container b { font-weight: 600; }
 .analysis-container a { color: var(--primary-color); text-decoration: none; } .analysis-container a:hover { text-decoration: underline; }
-.analysis-container code { background-color: #e9ecef; padding: 0.2em 0.4em; margin: 0 2px; font-size: 85%; border-radius: 3px; font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+.analysis-container code { background-color: #e9ecef; padding: 0.2em 0.4em; margin: 0 2px; font-size: 85%; border-radius: 3px; font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; word-break: break-word; }
 .analysis-container pre { background-color: #e9ecef; padding: 15px; border-radius: 5px; overflow-x: auto; margin-bottom: 1em; } .analysis-container pre code { background-color: transparent; padding: 0; margin: 0; font-size: inherit; border-radius: 0; }
-.analysis-container blockquote { margin-left: 0; padding-left: 15px; border-left: 4px solid #ccc; color: #666; font-style: italic; }
+.analysis-container blockquote { margin-left: 0; padding-left: 15px; border-left: 4px solid #ccc; color: #666; font-style: italic; margin-bottom: 1em; }
+/* Placeholder/Loading/Error inside analysis */
+.analysis-container .loading-text,
+.analysis-container .placeholder-text {
+    text-align: center;
+    padding: 30px 15px;
+    color: var(--text-muted);
+    font-style: italic;
+}
+.analysis-container .error-message {
+     padding: 20px;
+     text-align: center;
+     background-color: rgba(200, 85, 61, 0.05);
+     border: 1px dashed var(--danger-color);
+     border-radius: 4px;
+     color: var(--danger-color); /* Ensure text color matches */
+     font-weight: 500;
+}
+
+/* ===============================================================
+   News Section
+   =============================================================== */
+#newsSection {
+    background-color: #ffffff; /* Match other cards or use light-bg */
+}
+
+.news-container {
+    max-height: 400px; /* Example max height */
+    overflow-y: auto; /* Add scroll if content exceeds max height */
+    padding-right: 10px; /* Space for scrollbar */
+    min-height: 100px; /* Ensure visibility when loading/error */
+}
+.news-list { list-style: none; padding-left: 0; margin: 0; }
+.news-item { padding: 12px 0; border-bottom: 1px dashed var(--border-color); }
+.news-item:last-child { border-bottom: none; }
+.news-headline { font-weight: 600; margin-bottom: 4px; }
+.news-headline a { color: var(--primary-hover); text-decoration: none; font-size: 1.05rem; }
+.news-headline a:hover { text-decoration: underline; color: var(--primary-color); }
+.news-summary { font-size: 0.9rem; color: var(--text-secondary); line-height: 1.5; margin: 0; }
+/* Placeholder/Loading/Error inside news */
+.news-container .loading-text,
+.news-container .placeholder-text {
+    text-align: center;
+    padding: 30px 15px;
+    color: var(--text-muted);
+    font-style: italic;
+}
+.news-container .error-message {
+    padding: 20px;
+    text-align: center;
+    color: var(--danger-color);
+    font-weight: 500;
+}
 
 /* ===============================================================
    Scrollbar (Optional Thin Scrollbar)
@@ -318,21 +447,59 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
 .thin-scrollbar::-webkit-scrollbar-thumb { background: #c1c1c1; border-radius: 3px; }
 .thin-scrollbar::-webkit-scrollbar-thumb:hover { background: #a8a8a8; }
 
+/* Apply to news container too */
+.news-container::-webkit-scrollbar { width: 6px; }
+.news-container::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 3px; }
+.news-container::-webkit-scrollbar-thumb { background: #c1c1c1; border-radius: 3px; }
+.news-container::-webkit-scrollbar-thumb:hover { background: #a8a8a8; }
+
 /* ===============================================================
-   Utility & State Classes
+   Utility & State Classes (Managed by JS via setElementState)
    =============================================================== */
 /* Hidden State */
 .hidden { display: none !important; }
 
-/* Loading State */
-.loading-text, tbody .loading-text { color: var(--text-muted); font-style: italic; text-align: center; padding: 25px; display: table-cell; /* Ensure it spans correctly */ }
-select.loading, input.loading { opacity: 0.7; }
+/* Loading State Placeholder Text*/
+.loading-text {
+    color: var(--text-muted);
+    font-style: italic;
+    text-align: center;
+    width: 100%; /* Ensure spans full width */
+    padding: 25px;
+}
+/* Apply loading style to specific elements via JS */
+[data-state="loading"] select,
+[data-state="loading"] input {
+    opacity: 0.7;
+    cursor: wait;
+}
+/* Style containers during loading */
+[data-state="loading"] > *:not(.loading-text):not(.section-subheader):not(.section-header):not(caption) {
+    /* Optionally hide content while loading text is shown */
+     /* display: none; */
+     opacity: 0.5; /* Or fade out */
+}
+/* Ensure loading text shows correctly in table bodies */
+tbody[data-state="loading"] tr:first-child td.loading-text {
+    display: table-cell; /* Make sure it displays */
+}
 
 /* Error State */
+/* Error message styling applied directly or via JS */
 .error-message { color: var(--danger-color) !important; font-weight: 500; }
+/* Style elements with error state */
+[data-state="error"] {
+    border-color: var(--danger-color) !important; /* Highlight border */
+}
+[data-state="error"] select,
+[data-state="error"] input {
+     border-color: var(--danger-color) !important;
+     background-color: #fff0f0; /* Light red background */
+}
+/* Ensure error text shows correctly */
 td.error-message { background-color: rgba(200, 85, 61, 0.08); text-align: center; padding: 10px; }
-select.error, input.error { border-color: var(--danger-color); }
-.analysis-container .error-message, .chart-container .error-message { padding: 20px; text-align: center; background-color: rgba(200, 85, 61, 0.05); border: 1px dashed var(--danger-color); border-radius: 4px; }
+[data-state="error"] .error-message { display: block; } /* Ensure message is visible */
+
 
 /* Value Change Highlight */
 #spotPriceDisplay.value-changed,
@@ -341,32 +508,59 @@ select.error, input.error { border-color: var(--danger-color); }
     animation: value-flash var(--highlight-duration) ease-out;
 }
 @keyframes value-flash {
-    0% { background-color: var(--highlight-bg); }
+    0%, 50% { background-color: var(--highlight-bg); } /* Hold highlight longer */
     100% { background-color: transparent; } /* Rely on original cell background */
 }
 
 /* Placeholder Text */
-.placeholder-text { text-align: center; color: #777; padding: 40px 20px; border: 1px dashed #ccc; margin: 10px 0; width: 100%; font-style: italic; }
+.placeholder-text {
+    text-align: center;
+    color: #777;
+    padding: 40px 20px;
+    border: 1px dashed #ccc;
+    margin: 10px 0;
+    width: 100%;
+    font-style: italic;
+    border-radius: var(--card-radius);
+}
+/* Remove placeholder border when inside specific containers */
+.analysis-container .placeholder-text,
+.news-container .placeholder-text,
+#payoffChartContainer .placeholder-text {
+    border: none;
+    margin: 0;
+    padding: 30px 15px; /* Adjust padding */
+}
+#greeksTable .placeholder-text { /* Placeholder inside greeks table body */
+    border: none;
+    padding: 20px;
+    display: table-cell;
+    text-align: center;
+    width: 100%;
+}
+
 
 /* ===============================================================
    Responsive Design
    =============================================================== */
 @media screen and (max-width: 1200px) {
     .container { flex-direction: column; gap: 25px; padding: 0 25px 25px 25px; }
+    .option-chain-container { position: static; max-height: none; } /* Unstick option chain */
     .option-chain-container, .strategy-container { min-width: initial; }
 }
 @media screen and (max-width: 768px) {
     body { font-size: 14px; }
+    header { position: static; margin-bottom: 20px;} /* Unstick header */
     header h1 { font-size: 1.4rem; }
     .container { padding: 0 15px 15px 15px; gap: 20px;}
     .card, .results-section { padding: 18px; }
     h2 { font-size: 1.25rem; }
     h3, .section-subheader { font-size: 1.1rem; }
-    .data-table { font-size: 0.85rem; }
-    .data-table th, .data-table td { padding: 9px 10px; }
+    .data-table { font-size: 0.85rem; table-layout: auto; } /* Allow table to resize */
+    .data-table th, .data-table td { padding: 9px 10px; white-space: normal; } /* Allow wrapping */
     button { font-size: 0.9rem; padding: 8px 12px; }
     .button-wide { max-width: 220px; padding: 11px 0; }
-    .chart-container { min-height: 320px; }
+    #payoffChartContainer { height: 350px; } /* Adjust chart height */
     .controls-row { gap: 12px; }
     select, input { padding: 7px 10px; font-size: 0.9rem;}
 }
@@ -382,61 +576,5 @@ select.error, input.error { border-color: var(--danger-color); }
     .metrics-list li { font-size: 0.9rem; padding: 8px 0; }
     .analysis-container { font-size: 0.9rem; }
     .table-wrapper { border-radius: 4px; }
-}
-
-/* ===============================================================
-   News Section
-   =============================================================== */
-#newsSection {
-    background-color: #f8f9fa; /* Optional: different background */
-}
-
-.news-container {
-    /* Styles for the div holding the news list */
-    max-height: 400px; /* Example max height */
-    overflow-y: auto; /* Add scroll if content exceeds max height */
-    padding-right: 10px; /* Space for scrollbar */
-}
-
-.news-list {
-    list-style: none;
-    padding-left: 0;
-    margin: 0;
-}
-
-.news-item {
-    padding: 12px 0;
-    border-bottom: 1px dashed var(--border-color);
-}
-.news-item:last-child {
-    border-bottom: none;
-}
-
-.news-headline {
-    font-weight: 600;
-    margin-bottom: 4px;
-}
-
-.news-headline a {
-    color: var(--primary-hover);
-    text-decoration: none;
-    font-size: 1.05rem;
-}
-
-.news-headline a:hover {
-    text-decoration: underline;
-    color: var(--primary-color);
-}
-
-.news-summary {
-    font-size: 0.9rem;
-    color: var(--text-secondary);
-    line-height: 1.5;
-    margin: 0;
-}
-
-.news-container .loading-text,
-.news-container .error-message {
-    text-align: center;
-    padding: 20px;
+    #payoffChartContainer { height: 300px; } /* Further adjust chart height */
 }
