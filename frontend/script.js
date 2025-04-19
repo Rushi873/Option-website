@@ -31,7 +31,13 @@ const SELECTORS = {
     greeksAnalysisSection: '#greeksAnalysisSection',
     greeksAnalysisResultContainer: '#greeksAnalysisResult',
     greeksTableContainer: '#greeksSection', 
+    metricsList: '.metrics-list',
+    statusMessageContainer: '#statusMessage',
+    warningContainer: '#warningMessage', 
+    
 };
+
+// Ensure 'strategyPositions' is declared in a scope accessible by resetResultsUI
 
 // Basic Logger
 const logger = {
@@ -1637,33 +1643,6 @@ function resetResultsUI() {
 }
 
 // --- Define necessary variables and functions assumed by resetResultsUI ---
-
-// Ensure 'strategyPositions' is declared in a scope accessible by resetResultsUI
-
-
-// Ensure SELECTORS object includes all needed IDs/classes
-const SELECTORS = {
-    payoffChartContainer: '#payoffChartContainer',
-    taxInfoContainer: '#taxInfo',
-    greeksSection: '#greeksSection', // The section containing the table
-    greeksTable: '#greeksTable',
-    greeksAnalysisSection: '#greeksAnalysisSection',
-    greeksAnalysisResultContainer: '#greeksAnalysisResult',
-    costBreakdownList: '#costBreakdownList',
-    costBreakdownContainer: '#costBreakdownContainer',
-    maxProfitDisplay: '#maxProfit .metric-value',
-    maxLossDisplay: '#maxLoss .metric-value',
-    breakevenDisplay: '#breakeven .metric-value',
-    rewardToRiskDisplay: '#rewardToRisk .metric-value',
-    netPremiumDisplay: '#netPremium .metric-value',
-    metricsList: '.metrics-list', // Assuming class selector for the UL
-    newsResultContainer: '#newsResult',
-    analysisResultContainer: '#analysisResult',
-    strategyTableBody: '#strategyTable tbody', // Selector for strategy table body needed
-    statusMessageContainer: '#statusMessage', // Example ID, replace if needed
-    warningContainer: '#warningMessage',   // Example ID, replace if needed
-    // ... other selectors used elsewhere ...
-};
 
 
 function renderCostBreakdown(listElement, costBreakdownData) {
