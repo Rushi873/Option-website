@@ -1529,8 +1529,11 @@ function resetCalculationOutputsUI() {
 
      // --- Reset Warning Container ---
       const warningContainer = document.querySelector(SELECTORS.warningContainer); // Use correct selector
-      if (warningContainer) { warningContainer.textContent = ''; warningContainer.style.display = 'none'; setElementState(SELECTORS.warningContainer, 'hidden'); }
-      else { logger.warn("Warning container not found during output reset.");}
+      if (warningContainer) {
+    // ... set textContent, style.display ...
+    setElementState(SELECTORS.warningContainer, 'hidden'); // << Must use the selector key here
+      } else {
+    logger.warn("Warning container not found during output reset.");
 
      // --- DO NOT Reset News or Stock Analysis Containers Here ---
      // --- DO NOT Clear strategyPositions or Strategy Table Here ---
@@ -1634,6 +1637,103 @@ function renderCostBreakdown(listElement, costBreakdownData) {
             listElement.appendChild(errorLi);
         }
     });
+}
+
+async function renderPayoffChart(containerElement, figureJsonString) {
+    const logger = window.logger || window.console;
+    logger.debug("Attempting to render Plotly chart...");
+
+    if (!containerElement) {
+        logger.error("renderPayoffChart: Target container element is null or undefined.");
+        setElementState(SELECTORS.payoffChartContainer, 'error', 'Chart container not found.'); // Use appropriate selector
+        return;
+    }
+    if (typeof Plotly === 'undefined') {
+        logger.error("renderPayoffChart: Plotly.js library is not loaded.");
+        setElementState(SELECTORS.payoffChartContainer, 'error', 'Charting library failed to load.');
+        return;
+    }
+    if (!figureJsonString || typeof figureJsonString !== 'string') {
+         logger.error("renderPayoffChart: Invalid or missing figure JSON string.");
+         setElementState(SELECTORS.payoffChartContainer, 'error', 'Invalid chart data received.');
+         return;
+    }
+
+    try {
+        // Parse the figure JSON from server
+        const figure = JSON.parse(figureJsonString);
+
+        // --- Apply Layout Defaults/Overrides (Optional but Recommended) ---
+        // Ensure layout object exists
+        if (!figure.layout) figure.layout = {};
+
+        // Common layout settings for financial charts
+        figure.layout.height = figure.layout.height || 450; // Set default height if not provided
+        figure.layout.autosize = true; // Ensure responsiveness
+        figure.layout.margin = figure.layout.margin || { l: 70, r: 50, t: 40, b: 70 };
+        figure.layout.template = figure.layout.template || 'plotly_white';
+        figure.layout.showlegend = figure.layout.showlegend === undefined ? false : figure.layout.showlegend; // Default to no legend unless specified
+        figure.layout.hovermode = figure.layout.hovermode || 'x unified';
+
+        // Axis styling
+        if (!figure.layout.yaxis) figure.layout.yaxis = {};
+        figure.layout.yaxis.title = figure.layout.yaxis.title || { text: 'Profit / Loss (₹)', standoff: 10 };
+        figure.layout.yaxis.automargin = true;
+        figure.layout.yaxis.gridcolor = figure.layout.yaxis.gridcolor || 'rgba(220, 220, 220, 0.7)';
+        figure.layout.yaxis.zeroline = figure.layout.yaxis.zeroline === undefined ? false : figure.layout.yaxis.zeroline;
+        figure.layout.yaxis.tickprefix = figure.layout.yaxis.tickprefix || "₹";
+        figure.layout.yaxis.tickformat = figure.layout.yaxis.tickformat || ',.0f';
+
+        if (!figure.layout.xaxis) figure.layout.xaxis = {};
+        figure.layout.xaxis.title = figure.layout.xaxis.title || { text: 'Underlying Spot Price', standoff: 10 };
+        figure.layout.xaxis.automargin = true;
+        figure.layout.xaxis.gridcolor = figure.layout.xaxis.gridcolor || 'rgba(220, 220, 220, 0.7)';
+        figure.layout.xaxis.zeroline = figure.layout.xaxis.zeroline === undefined ? false : figure.layout.xaxis.zeroline;
+        figure.layout.xaxis.tickformat = figure.layout.xaxis.tickformat || ',.0f';
+        // --- End Layout Defaults ---
+
+        // Plotly configuration options
+        const plotConfig = {
+            responsive: true,
+            displayModeBar: true, // Show mode bar
+            displaylogo: false,   // Hide Plotly logo
+            // Customize mode bar buttons if needed
+            modeBarButtonsToRemove: ['sendDataToCloud', 'lasso2d', 'select2d', 'toImage']
+        };
+
+        // Ensure container is visible and clear previous content/placeholders
+        containerElement.style.display = '';
+        containerElement.innerHTML = ''; // Clear placeholder/previous chart
+
+        // Create the plot using async version if available, otherwise sync
+        logger.debug("Rendering Plotly chart...");
+        if (Plotly.newPlot) { // Use sync version as await wasn't used before
+             Plotly.newPlot(containerElement.id, figure.data, figure.layout, plotConfig);
+        } else {
+             throw new Error("Plotly.newPlot function not found.");
+        }
+
+
+        // Optional: Add slight delay before resize check
+        setTimeout(() => {
+             try {
+                 if (Plotly.Plots && Plotly.Plots.resize) {
+                      Plotly.Plots.resize(containerElement);
+                      logger.debug("Plotly chart resize check completed.");
+                 }
+             } catch(resizeError){
+                  logger.warn("Error during Plotly resize:", resizeError);
+             }
+        }, 100);
+
+        setElementState(containerElement, 'content'); // Set state using the element itself
+        logger.info("Successfully rendered Plotly chart.");
+
+    } catch (renderError) {
+        logger.error("Error during Plotly chart processing:", renderError);
+        // Use setElementState to display error within the chart container
+        setElementState(containerElement, 'error', `Failed to display chart: ${renderError.message}`);
+    }
 }
 
 
