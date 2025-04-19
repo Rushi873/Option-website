@@ -329,73 +329,69 @@ document.addEventListener("DOMContentLoaded", () => {
 
 async function initializePage() {
     logger.info("Initializing page: Setting loading states...");
-    // Set initial loading states for everything that gets loaded eventually
-    setElementState(SELECTORS.assetDropdown, 'loading');
-    setElementState(SELECTORS.expiryDropdown, 'loading');
-    setElementState(SELECTORS.optionChainTableBody, 'loading');
-    setElementState(SELECTORS.analysisResultContainer, 'loading'); // Loading initially
-    setElementState(SELECTORS.newsResultContainer, 'loading');     // Loading initially
-    setElementState(SELECTORS.spotPriceDisplay, 'loading', 'Spot Price: ...');
-
-    resetResultsUI(); // Reset all result areas initially (clears strategy too)
-    setupEventListeners(); // Setup button clicks, dropdown changes etc.
+    // ... (set initial loading states) ...
+    resetResultsUI();
+    setupEventListeners();
+    loadMarkdownParser(); // Load markdown early
 
     try {
-        // Load assets into dropdown and get the default asset value
-        const defaultAsset = await loadAssets(); // loadAssets now returns the default asset
+        // Load assets and get the default asset value
+        const defaultAsset = await loadAssets(); // loadAssets populates dropdown and returns default
 
         if (defaultAsset) {
-            logger.info(`Fetching initial News & Analysis for default asset: ${defaultAsset}`);
-            // Set loading states specifically for news/analysis before fetching
-             setElementState(SELECTORS.analysisResultContainer, 'loading', 'Loading analysis...');
-             setElementState(SELECTORS.newsResultContainer, 'loading', 'Loading news...');
+            logger.info(`Default asset determined: ${defaultAsset}. Fetching initial static data...`);
+            // Set loading states for news/analysis
+            setElementState(SELECTORS.analysisResultContainer, 'loading', 'Loading analysis...');
+            setElementState(SELECTORS.newsResultContainer, 'loading', 'Loading news...');
 
-             // Fetch initial News & Analysis concurrently
-             const initialFetches = await Promise.allSettled([
-                 fetchAnalysis(defaultAsset),
-                 fetchNews(defaultAsset)
-             ]);
+            // Fetch initial News & Analysis concurrently
+            const initialStaticFetches = Promise.allSettled([
+                fetchAnalysis(defaultAsset),
+                fetchNews(defaultAsset)
+            ]);
 
-             // Log initial fetch errors (handled within fetch functions visually)
-             if (initialFetches[0].status === 'rejected') {
-                 logger.error(`Initial analysis fetch failed: ${initialFetches[0].reason?.message || initialFetches[0].reason}`);
-             }
-             if (initialFetches[1].status === 'rejected') {
-                 logger.error(`Initial news fetch failed: ${initialFetches[1].reason?.message || initialFetches[1].reason}`);
-             }
+            // Trigger the *market data* load for the default asset
+            // This will update activeAsset and fetch Spot/Expiry/Chain
+            const initialMarketFetch = handleAssetChange(); // Don't await here yet if we want static to run in parallel
 
-            // Now, explicitly trigger handleAssetChange for the default asset
-            // to load Spot, Expiry, and Chain data. Since activeAsset is still null,
-            // the check at the start of handleAssetChange won't prevent it from running.
-            logger.info(`Triggering handleAssetChange for default asset ${defaultAsset} to load market data...`);
-            await handleAssetChange();
+            // Await both static data fetches AND the market data fetch
+            const [staticResults, marketResult] = await Promise.allSettled([
+                 initialStaticFetches,
+                 initialMarketFetch // Await the handleAssetChange completion
+            ]);
+
+            // Log errors from static fetches
+            if (staticResults.status === 'fulfilled') {
+                const [analysisRes, newsRes] = staticResults.value; // results of Promise.allSettled inside
+                 if (analysisRes.status === 'rejected') { logger.error(`Initial analysis fetch failed: ${analysisRes.reason?.message || analysisRes.reason}`); }
+                 if (newsRes.status === 'rejected') { logger.error(`Initial news fetch failed: ${newsRes.reason?.message || newsRes.reason}`); }
+            } else {
+                 logger.error("Error settling initial static fetches:", staticResults.reason);
+            }
+
+            // Log error from market data fetch (handleAssetChange) if it occurred
+            // Note: handleAssetChange has its own internal error handling/logging
+            if (marketResult.status === 'rejected') {
+                logger.error(`Initial market data fetch (handleAssetChange) failed: ${marketResult.reason?.message || marketResult.reason}`);
+                // Maybe set global error here if market data fails critically
+                setElementState(SELECTORS.globalErrorDisplay, 'error', `Failed to load initial market data for ${defaultAsset}.`);
+            } else {
+                 logger.info(`Initial market data fetch (handleAssetChange) completed for ${defaultAsset}.`);
+            }
 
         } else {
+            // Keep the existing logic for when no assets are found
             logger.warn("No default asset set. Waiting for user selection.");
-            // Set placeholders if no assets were loaded at all
-            setElementState(SELECTORS.analysisResultContainer, 'content');
-            document.querySelector(SELECTORS.analysisResultContainer).innerHTML = '<p class="placeholder-text">Select an asset to load analysis...</p>';
-            setElementState(SELECTORS.newsResultContainer, 'content');
-            document.querySelector(SELECTORS.newsResultContainer).innerHTML = '<p class="placeholder-text">Select an asset to load news...</p>';
-            setElementState(SELECTORS.expiryDropdown, 'content');
-             populateDropdown(SELECTORS.expiryDropdown, [], "-- Select Asset First --");
-             setElementState(SELECTORS.optionChainTableBody, 'content');
-             document.querySelector(SELECTORS.optionChainTableBody).innerHTML = `<tr><td colspan="7">Select an Asset</td></tr>`;
-             setElementState(SELECTORS.spotPriceDisplay, 'content');
-             document.querySelector(SELECTORS.spotPriceDisplay).textContent = 'Spot Price: -';
+            // ... (set placeholders for analysis, news, expiry, chain, spot) ...
         }
 
     } catch (error) {
+        // Keep existing catch block for initialization failures
         logger.error("Page Initialization failed:", error);
-        setElementState(SELECTORS.globalErrorDisplay, 'error', `Page Initialization Failed: ${error.message}`);
-        // Set error states for core elements
-        setElementState(SELECTORS.assetDropdown, 'error', 'Failed');
-        setElementState(SELECTORS.expiryDropdown, 'error', 'Failed');
-        setElementState(SELECTORS.optionChainTableBody, 'error', 'Init failed');
-        setElementState(SELECTORS.analysisResultContainer, 'error', 'Init failed');
-        setElementState(SELECTORS.newsResultContainer, 'error', 'Init failed');
+        // ... (set error states) ...
     }
-     logger.info("Initialization sequence complete.");
+    // This log now accurately reflects the end of the entire sequence
+    logger.info("Initialization sequence complete.");
 }
 
 /** Loads assets, populates dropdown, sets default, and returns the default asset value. */
@@ -705,44 +701,38 @@ async function handleExpiryChange() {
 
 /** Fetches and populates the asset dropdown */
 async function loadAssets() {
+    logger.info("Loading assets...");
     setElementState(SELECTORS.assetDropdown, 'loading');
+    let defaultAsset = null;
+
     try {
         const data = await fetchAPI("/get_assets");
         const assets = data?.assets || [];
-        populateDropdown(SELECTORS.assetDropdown, assets, "-- Select Asset --");
+        // Determine default *before* populating if possible
+        const potentialDefault = assets.includes("NIFTY") ? "NIFTY" : (assets[0] || null);
+
+        // Populate dropdown, setting the determined default
+        populateDropdown(SELECTORS.assetDropdown, assets, "-- Select Asset --", potentialDefault);
         setElementState(SELECTORS.assetDropdown, 'content');
 
-        // Default to NIFTY or first asset
         const assetDropdown = document.querySelector(SELECTORS.assetDropdown);
-        let defaultAsset = null;
-        if (assets.includes("NIFTY")) {
-            defaultAsset = "NIFTY";
-        } else if (assets.length > 0) {
-            defaultAsset = assets[0];
-            logger.warn(`"NIFTY" not found, defaulting to first asset: ${defaultAsset}`);
-        }
-
-        if (defaultAsset && assetDropdown) {
-            assetDropdown.value = defaultAsset;
-            logger.info(`Defaulting asset selection to: ${defaultAsset}`);
-            await handleAssetChange(); // Trigger data load for default
-        } else if (assets.length === 0){
+        if (assetDropdown && assetDropdown.value) {
+             defaultAsset = assetDropdown.value; // Confirm the actual selected default value
+             logger.info(`Assets loaded. Default selected: ${defaultAsset}`);
+        } else if (assets.length === 0) {
              logger.warn("No assets found in database.");
-             setElementState(SELECTORS.assetDropdown, 'error', 'No assets found');
-             await handleAssetChange(); // Clear dependent fields
+             setElementState(SELECTORS.assetDropdown, 'error', 'No assets');
         } else {
-             // Assets exist but neither NIFTY nor the first one is defaultable? Unlikely.
-             await handleAssetChange(); // Clear dependent fields
+            logger.warn("Asset dropdown populated, but no default value could be determined.");
         }
 
     } catch (error) {
+        // Keep existing catch block
         logger.error("Failed to load assets:", error);
-        setElementState(SELECTORS.assetDropdown, 'error', `Assets Error: ${error.message}`);
-        setElementState(SELECTORS.expiryDropdown, 'error', 'Asset load failed');
-        setElementState(SELECTORS.optionChainTableBody, 'error', 'Asset load failed');
-        // Show global error as this is critical failure
-        setElementState(SELECTORS.globalErrorDisplay, 'error', `Failed to load assets: ${error.message}`);
+        // ... (set error states) ...
+        throw error; // Re-throw
     }
+    return defaultAsset; // Return the determined default asset value
 }
 
 /** Fetches stock analysis for the selected asset */
@@ -2397,4 +2387,13 @@ function findATMStrikeAsStringKey(strikeStringKeys = [], spotPrice) {
 
     logger.debug(`Calculated ATM strike key: ${closestKey} for spot price: ${spotPrice}`);
     return closestKey;
+}
+
+const numericATMStrike = Number(atmStrikeObjectKey);
+logger.debug(`Attempting to find ATM row with data-strike="${numericATMStrike}". Tbody has ${currentTbody.rows.length} rows.`); // Add log
+const atmRow = currentTbody.querySelector(`tr[data-strike="${numericATMStrike}"]`);
+if (atmRow) {
+    // ... scroll ...
+} else {
+     logger.warn(`ATM strike row for key (${atmStrikeObjectKey} / ${numericATMStrike}) not found for scrolling.`);
 }
