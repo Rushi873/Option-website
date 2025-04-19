@@ -2473,8 +2473,67 @@ function gatherStrategyLegsFromTable() { // Name is legacy, now reads state arra
 const numericATMStrike = Number(atmStrikeObjectKey);
 logger.debug(`Attempting to find ATM row with data-strike="${numericATMStrike}". Tbody has ${currentTbody.rows.length} rows.`);
 const atmRow = currentTbody.querySelector(`tr[data-strike="${numericATMStrike}"]`);
-if (atmRow) {
-  // Scroll logic here...
-} else {
-  logger.debug(`ATM strike row for key (${atmStrikeObjectKey} / ${numericATMStrike}) not found for scrolling.`);
+if (scrollToATM && atmStrikeObjectKey !== null && !isRefresh) {
+    // Pass the variable into the setTimeout callback to avoid scope issues
+    setTimeout((atmKeyToUse) => {
+        try {
+            // Enhanced debugging for ATM row finding
+            const numericATMStrike = Number(atmKeyToUse);
+            logger.debug(`Attempting to find ATM row with data-strike="${numericATMStrike}". Tbody has ${currentTbody.rows.length} rows.`);
+            
+            if (isNaN(numericATMStrike)) {
+                logger.warn(`Invalid ATM key passed to scroll timeout: ${atmKeyToUse}`);
+                return;
+            }
+            
+            // Try exact match first
+            let atmRow = currentTbody.querySelector(`tr[data-strike="${numericATMStrike}"]`);
+            
+            // If exact match fails, try with the original string key
+            if (!atmRow) {
+                logger.debug(`Exact numeric match failed, trying with original key: ${atmKeyToUse}`);
+                atmRow = currentTbody.querySelector(`tr[data-strike="${atmKeyToUse}"]`);
+            }
+            
+            // If still not found, try with closest match (for decimal strikes)
+            if (!atmRow) {
+                logger.debug(`String key match failed, checking all rows for closest match`);
+                const allRows = currentTbody.querySelectorAll('tr[data-strike]');
+                let closestRow = null;
+                let closestDiff = Infinity;
+                
+                allRows.forEach(row => {
+                    const rowStrike = Number(row.dataset.strike);
+                    if (!isNaN(rowStrike)) {
+                        const diff = Math.abs(rowStrike - numericATMStrike);
+                        if (diff < closestDiff) {
+                            closestDiff = diff;
+                            closestRow = row;
+                        }
+                    }
+                });
+                
+                if (closestRow && closestDiff < 0.01) {
+                    logger.debug(`Found closest match with difference ${closestDiff}`);
+                    atmRow = closestRow;
+                }
+            }
+            
+            // Perform the scroll if row was found
+            if (atmRow) {
+                atmRow.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+                logger.debug(`Scrolled to ATM strike: ${atmRow.dataset.strike}`);
+                
+                // Optional: Highlight the row temporarily for visibility
+                atmRow.classList.add("highlight-atm");
+                setTimeout(() => {
+                    atmRow.classList.remove("highlight-atm");
+                }, 2000);
+            } else {
+                logger.warn(`ATM strike row for key (${atmKeyToUse} / ${numericATMStrike}) not found for scrolling.`);
+            }
+        } catch (e) {
+            logger.error("Error inside scroll timeout:", e);
+        }
+    }, 250, atmStrikeObjectKey); // Pass the outer scope variable here as the 3rd argument
 }
