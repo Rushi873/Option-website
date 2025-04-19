@@ -1661,64 +1661,74 @@ function renderCostBreakdown(listElement, costBreakdownData) {
 // Payoff Chart & Results Logic
 // ===============================================================
 
+/** Fetches payoff chart data, metrics, taxes, greeks and triggers rendering */
 async function fetchPayoffChart() {
-    const logger = window.logger || window.console; // Use console if no specific logger is set up
+    const asset = document.querySelector(SELECTORS.assetDropdown)?.value;
+    const chartContainer = document.querySelector(SELECTORS.payoffChartContainer);
     const updateButton = document.querySelector(SELECTORS.updateChartButton);
+    // Ensure logger is defined (using window.console as fallback)
+    const logger = window.logger || window.console;
 
-    logger.info("--- [fetchPayoffChart] START ---"); // Mark the beginning
+    logger.info("--- [fetchPayoffChart] START ---"); // Debug Start
 
-    // 1. --- Get Asset and Strategy Legs FIRST ---
-    const asset = activeAsset; // Use the globally tracked activeAsset
-    logger.debug("[fetchPayoffChart] Step 1: Get Asset. Value:", asset); // Log asset value
+    // --- Input Validation ---
+    logger.debug("[fetchPayoffChart] Step 1: Validating inputs...");
     if (!asset) {
-        alert("Error: No asset is currently selected.");
-        logger.error("[fetchPayoffChart] Aborted: No active asset.");
+        alert("Please select an asset.");
+        logger.error("[fetchPayoffChart] Aborted: No asset selected."); // Debug Log
         return;
     }
+    logger.debug(`[fetchPayoffChart] Asset: '${asset}'`); // Debug Log
 
-    // Gather strategy legs from the *current state* using the helper
-    logger.debug("[fetchPayoffChart] Step 1b: Gathering strategy legs...");
-    const currentStrategyLegs = gatherStrategyLegsFromTable(); // Assumes this reads UI/state
-    // *** DEBUG: Log the raw gathered legs ***
-    logger.debug("[fetchPayoffChart] Step 1c: Gathered legs raw data:", JSON.parse(JSON.stringify(currentStrategyLegs))); // Deep copy log
+    // *** DEBUG: Log the source strategyPositions array BEFORE mapping ***
+    logger.debug("[fetchPayoffChart] Step 1b: Current strategyPositions:", JSON.parse(JSON.stringify(strategyPositions)));
 
-    if (!currentStrategyLegs || currentStrategyLegs.length === 0) {
-        alert("Please add positions to the strategy first.");
-        logger.warn("[fetchPayoffChart] Aborted: No strategy legs gathered or returned empty array.");
-        resetCalculationOutputsUI(); // Reset only outputs
+    if (!Array.isArray(strategyPositions) || strategyPositions.length === 0) { // Added check for array type
+        // resetResultsUI(); // Resetting here might be premature if validation fails later
+        alert("Please add positions first.");
+        logger.warn("[fetchPayoffChart] Aborted: strategyPositions is empty or not an array."); // Debug Log
         return;
     }
-    logger.debug(`[fetchPayoffChart] Gathered ${currentStrategyLegs.length} legs.`);
+    logger.debug(`[fetchPayoffChart] Found ${strategyPositions.length} legs in strategyPositions.`);
 
-    // 2. --- Set Loading States & Reset OUTPUT UI ---
-    logger.debug("[fetchPayoffChart] Step 2: Resetting outputs and setting loading states...");
-    resetCalculationOutputsUI(); // Reset only the output sections
-    setElementState(SELECTORS.payoffChartContainer, 'loading', 'Generating chart data...');
-    setElementState(SELECTORS.taxInfoContainer, 'loading', 'Calculating charges...');
-    setElementState(SELECTORS.greeksSection, 'loading', 'Calculating Greeks...');
-    setElementState(SELECTORS.greeksTable, 'loading');
-    setElementState(SELECTORS.greeksAnalysisSection, 'hidden');
-    setElementState(SELECTORS.metricsList, 'loading');
-    setElementState(SELECTORS.costBreakdownContainer, 'hidden');
+    // Check for chart container *early*
+    if (!chartContainer) {
+        logger.error("[fetchPayoffChart] Aborted: Payoff chart container element not found."); // Debug Log
+        return; // Stop execution if container is missing
+    }
+
+    // --- Set Loading States & Reset UI ---
+    // NOTE: Calling the combined resetResultsUI HERE clears strategyPositions BEFORE mapping below.
+    // This was identified as the cause of the 400 error.
+    // We will move the reset later, after gathering/validating legs.
+    logger.info("[fetchPayoffChart] Step 2: Preparing UI for calculation (Will reset outputs later)..."); // Debug Log
+    // resetResultsUI(); // <<<<---- DO NOT RESET HERE YET
+    // Set loading states temporarily
+    setElementState(SELECTORS.payoffChartContainer, 'loading', 'Preparing data...');
+    setElementState(SELECTORS.taxInfoContainer, 'loading', '...');
+    setElementState(SELECTORS.greeksTable, 'loading', '...');
     if (updateButton) updateButton.disabled = true;
 
 
-    // 3. --- Prepare Request Data (using gathered legs) ---
-    logger.debug("[fetchPayoffChart] Step 3: Mapping gathered legs to request format...");
+    // --- Prepare Request Data (Map and Validate strategyPositions) ---
+    logger.debug("[fetchPayoffChart] Step 3: Mapping and validating strategy legs..."); // Debug Log
     let dataIsValid = true;
-    let mappingErrors = 0;
-    const requestStrategy = currentStrategyLegs.map((pos, index) => {
+    let mappingErrors = 0; // Count legs failing validation
+    const requestStrategy = strategyPositions.map((pos, index) => { // Map directly from global state
         const legNum = index + 1;
-        logger.debug(`[fetchPayoffChart] Mapping leg ${legNum}:`, pos); // Log each leg being mapped
-        const currentDTE = pos.days_to_expiry ?? calculateDaysToExpiry(pos.expiry_date);
+        logger.debug(`[fetchPayoffChart] Mapping leg ${legNum}:`, JSON.parse(JSON.stringify(pos))); // Log raw leg data
 
-        // Perform Local Validation
-        if (currentDTE === null) { logger.error(`[fetchPayoffChart] Invalid expiry date leg ${legNum}.`); dataIsValid = false; mappingErrors++; return null; } // Return null on error
-        if (!pos.strike_price || isNaN(parseFloat(pos.strike_price)) || parseFloat(pos.strike_price) <= 0) { logger.error(`[fetchPayoffChart] Invalid strike leg ${legNum}: ${pos.strike_price}`); dataIsValid = false; mappingErrors++; return null; }
-        if (pos.last_price === null || pos.last_price === undefined || isNaN(parseFloat(pos.last_price)) || parseFloat(pos.last_price) < 0) { logger.error(`[fetchPayoffChart] Invalid premium leg ${legNum}: ${pos.last_price}`); dataIsValid = false; mappingErrors++; return null; }
-        if (!pos.lots || isNaN(parseInt(pos.lots)) || parseInt(pos.lots) === 0) { logger.error(`[fetchPayoffChart] Invalid lots leg ${legNum}: ${pos.lots}`); dataIsValid = false; mappingErrors++; return null; }
-        // IV is optional for backend, but log warning if missing/invalid
-        if (pos.iv === null || pos.iv === undefined || pos.iv === '' || isNaN(parseFloat(pos.iv))) { logger.warn(`[fetchPayoffChart] Missing or invalid IV leg ${legNum}.`); }
+        const currentDTE = calculateDaysToExpiry(pos.expiry_date);
+        let legValidationMessages = []; // Store validation issues for this leg
+
+        // Basic local validation (log errors, set flag, store message)
+        if (currentDTE === null) { legValidationMessages.push(`Invalid expiry date`); dataIsValid = false; }
+        if (!pos.strike_price || isNaN(parseFloat(pos.strike_price)) || parseFloat(pos.strike_price) <= 0) { legValidationMessages.push(`Invalid strike (${pos.strike_price})`); dataIsValid = false; }
+        if (pos.last_price === null || pos.last_price === undefined || isNaN(parseFloat(pos.last_price)) || parseFloat(pos.last_price) < 0) { legValidationMessages.push(`Invalid premium (${pos.last_price})`); dataIsValid = false; }
+        if (!pos.lots || isNaN(parseInt(pos.lots)) || parseInt(pos.lots) === 0) { legValidationMessages.push(`Invalid lots (${pos.lots})`); dataIsValid = false; }
+        // IV and lot_size are optional for backend, only log warnings if needed
+        if (pos.iv === null || pos.iv === undefined || pos.iv === '' || isNaN(parseFloat(pos.iv))) { logger.warn(`[fetchPayoffChart] Leg ${legNum}: Missing/invalid IV.`); }
+        if (pos.lot_size && (isNaN(parseInt(pos.lot_size)) || parseInt(pos.lot_size) <= 0)) { logger.warn(`[fetchPayoffChart] Leg ${legNum}: Invalid explicit lot size (${pos.lot_size}).`); }
 
         // Determine backend op_type ('c' or 'p')
         let backendOpType = '';
@@ -1726,63 +1736,84 @@ async function fetchPayoffChart() {
             const upperOptType = pos.option_type.toUpperCase();
             if (upperOptType === 'CE') { backendOpType = 'c'; }
             else if (upperOptType === 'PE') { backendOpType = 'p'; }
-            else { logger.error(`[fetchPayoffChart] Invalid option_type value in leg ${legNum}: ${pos.option_type}`); dataIsValid = false; mappingErrors++; return null; }
+            else { legValidationMessages.push(`Invalid option_type (${pos.option_type})`); dataIsValid = false; }
         } else {
-            logger.error(`[fetchPayoffChart] Missing or invalid option_type in leg ${legNum}`); dataIsValid = false; mappingErrors++; return null;
+            legValidationMessages.push(`Missing/invalid option_type`); dataIsValid = false;
         }
-        // --- End Local Validation ---
 
-        // Return object matching backend Pydantic model
-        return {
+        // If leg failed basic validation, log and return null for filtering
+        if (!dataIsValid || legValidationMessages.length > 0) {
+            logger.error(`[fetchPayoffChart] Leg ${legNum} failed validation: ${legValidationMessages.join('; ')}`);
+            mappingErrors++;
+            return null; // Mark leg as invalid for filtering
+        }
+
+        // Return object matching backend Pydantic model if valid
+        const mappedLeg = {
             op_type: backendOpType,
             strike: String(pos.strike_price),
             tr_type: parseInt(pos.lots) >= 0 ? "b" : "s",
             op_pr: String(pos.last_price),
-            lot: String(Math.abs(parseInt(pos.lots))), // Send absolute lots
+            lot: String(Math.abs(parseInt(pos.lots))), // Absolute lots as string
             lot_size: pos.lot_size ? String(pos.lot_size) : null,
             iv: (pos.iv !== null && pos.iv !== undefined && pos.iv !== '' && !isNaN(parseFloat(pos.iv))) ? parseFloat(pos.iv) : null,
             days_to_expiry: currentDTE,
             expiry_date: pos.expiry_date,
         };
-        // Filter out null entries caused by validation errors
-    }).filter(leg => leg !== null);
+        logger.debug(`[fetchPayoffChart] Leg ${legNum} mapped successfully:`, mappedLeg); // Log successful mapping
+        return mappedLeg;
 
-    // Log the result of the mapping
-    logger.debug(`[fetchPayoffChart] Mapped requestStrategy (${requestStrategy.length} valid legs after filtering):`, JSON.parse(JSON.stringify(requestStrategy)));
+    }).filter(leg => leg !== null); // Filter out legs that failed validation
 
-    // Abort if local validation failed during map OR if filtering resulted in empty array
+    logger.debug(`[fetchPayoffChart] Mapping complete. ${requestStrategy.length} valid legs found, ${mappingErrors} legs failed validation.`);
+
+    // Abort if ALL legs failed validation or if dataIsValid was ever false
     if (!dataIsValid || requestStrategy.length === 0) {
         const errorReason = !dataIsValid ? `Invalid data found in ${mappingErrors} leg(s)` : "No valid legs remained after filtering";
-        logger.error(`[fetchPayoffChart] Aborted before API call. Reason: ${errorReason}.`);
         alert(`Error: ${errorReason}. Please check console for details or correct the strategy.`);
-        resetCalculationOutputsUI(); // Reset UI
+        logger.error(`[fetchPayoffChart] Aborted before API call. Reason: ${errorReason}.`);
+        resetCalculationOutputsUI(); // Reset results UI *only*
         if (updateButton) updateButton.disabled = false;
         return;
     }
 
+    // *** NOW Reset Output UI, just before API call ***
+    logger.debug("[fetchPayoffChart] Step 3b: Resetting output UI sections...");
+    resetCalculationOutputsUI(); // <<< Call the OUTPUTS ONLY reset function here
+    // Re-apply loading states for outputs
+    setElementState(SELECTORS.payoffChartContainer, 'loading', 'Generating chart data...');
+    setElementState(SELECTORS.taxInfoContainer, 'loading', 'Calculating charges...');
+    setElementState(SELECTORS.greeksSection, 'loading', 'Calculating Greeks...');
+    setElementState(SELECTORS.greeksTable, 'loading');
+    setElementState(SELECTORS.greeksAnalysisSection, 'hidden');
+    setElementState(SELECTORS.metricsList, 'loading');
+    setElementState(SELECTORS.costBreakdownContainer, 'hidden');
+    // Button disable state remains from earlier
+
+
     // Prepare final request payload
-    const requestData = { asset: asset, strategy: requestStrategy };
+    const requestData = { asset: asset, strategy: requestStrategy }; // Use the filtered, validated legs
     // *** DEBUG: Log the final payload EXACTLY as it will be sent ***
     logger.debug("[fetchPayoffChart] Step 4: Final requestData object:", JSON.parse(JSON.stringify(requestData)));
     logger.debug("[fetchPayoffChart] Step 4b: Body to be sent:", JSON.stringify(requestData));
 
-    // 4. --- Fetch API and Handle Response ---
+
+    // --- Fetch API and Handle Response ---
     logger.debug("[fetchPayoffChart] Step 5: Calling fetchAPI('/get_payoff_chart')...");
     try {
-        // Use your fetchAPI wrapper
         const data = await fetchAPI('/get_payoff_chart', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(requestData) // Send the correctly built data
         });
-        logger.debug("[fetchPayoffChart] Step 6: Received response data from /get_payoff_chart:", data);
+        logger.debug("[fetchPayoffChart] Step 6: Received response data from /get_payoff_chart:", data); // Log raw response
 
-        // ... (Keep the rest of the response processing and rendering logic as before) ...
-         // 5. Validate Backend Response
-         if (!data || !data.success) { /* ... handle backend failure ... */ return; }
-         // 6. Render Results
-         // ... render metrics, breakdown, tax, chart, greeks table ...
-         // ... trigger greeks analysis ...
+        // ... (Keep the rest of the response processing, Plotly rendering, metrics, tax, greeks rendering, and greeks analysis trigger logic exactly as it was) ...
+        // Validate Backend Response
+        if (!data || !data.success) { /* ... handle backend failure ... */ return; }
+        // Render Results
+        // ... render metrics, breakdown, tax, chart, greeks table ...
+        // ... trigger greeks analysis ...
 
     } catch (error) { // Catch errors from fetchAPI or rendering
         logger.error(`[fetchPayoffChart] Fatal error during API call or processing: ${error.status || 'Network Error'}`, error);
@@ -1798,34 +1829,6 @@ async function fetchPayoffChart() {
         logger.info("--- [fetchPayoffChart] END ---"); // Mark the end
     }
 }
-Use code with caution.
-JavaScript
-Explanation of Debugging Code Added:
-Start/End Markers: Added logger.info at the very beginning and end of the function to clearly see when it starts and finishes in the logs.
-Log Asset: Added logger.debug to show the value of asset right after it's retrieved.
-Log Gathered Legs: Added logger.debug to show the raw output of gatherStrategyLegsFromTable(). Using JSON.parse(JSON.stringify(...)) creates a deep copy for logging in case the array is modified later.
-Log Each Leg During Map: Added logger.debug inside the .map() callback to show each pos object before it's transformed.
-Log Mapped Strategy: Added logger.debug after the .map() and .filter() calls to show the requestStrategy array that results from the mapping and filtering (containing only legs that passed validation).
-Log Final Payload: Added logger.debug just before the fetchAPI call to show the exact requestData object and the stringified version that will be sent in the request body.
-Log API Call Start: Added logger.debug indicating the fetchAPI call is about to happen.
-Log API Response: Added logger.debug to show the raw data received from the backend after the fetchAPI call completes successfully.
-How to Use:
-Replace: Replace your existing fetchPayoffChart function with this instrumented version.
-Open Dev Console: Open your browser's developer console (usually F12). Make sure the "Debug" level messages are visible (often they are by default, but check the console filter options).
-Reproduce Error:
-Load the page.
-Add at least one leg to the strategy table.
-Click the "Update & Calculate" button.
-Analyze Logs: Carefully examine the debug logs in the console, paying close attention to:
-[fetchPayoffChart] Asset retrieved: - Is the asset name correct?
-[fetchPayoffChart] Gathered legs raw data: - Does this array contain objects representing the legs you added in the UI? Are any properties missing or incorrect here (this points to an error in addPosition or how the UI is read)?
-[fetchPayoffChart] Mapping leg X: - See the data for each leg as it enters the map.
-[fetchPayoffChart] Mapped requestStrategy (...) - Does this array look correct after mapping and filtering? Does it match the backend Pydantic model structure? Is it empty when it shouldn't be?
-[fetchPayoffChart] Final requestData object: - Does the final object have both a non-empty asset string and a non-empty strategy array?
-[fetchPayoffChart] Body to be sent: - Is this the exact JSON string you expect?
-This detailed logging should clearly show whether asset is missing, whether gatherStrategyLegsFromTable is failing, whether the mapping/validation is removing all legs, or whether the final requestData object is somehow malformed before the fetchAPI call that results in the 400 error.
-39.8s
-
 
 // --- Rendering Helpers for Payoff Results ---
 
