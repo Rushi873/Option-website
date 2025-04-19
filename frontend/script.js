@@ -983,31 +983,26 @@ async function fetchOptionChain(scrollToATM = false, isRefresh = false) {
     const asset = document.querySelector(SELECTORS.assetDropdown)?.value;
     const expiry = document.querySelector(SELECTORS.expiryDropdown)?.value;
 
-    const optionTable = document.querySelector("#optionChainTable");
-    if (!optionTable) {
-        logger.error("Option chain table element (#optionChainTable) not found.");
-        return;
-    }
-    const currentTbody = optionTable.querySelector("tbody");
-    if (!currentTbody) {
-        logger.error("Option chain tbody element not found within #optionChainTable.");
+    // Use direct tbody selector as before
+    const currentTbody = document.querySelector(SELECTORS.optionChainTableBody);
+    if (!currentTbody) { // Check tbody directly
+        logger.error("Option chain tbody element not found.");
         return;
     }
 
     // --- Initial Checks & Loading State ---
     if (!asset || !expiry) {
-        currentTbody.innerHTML = `<tr><td colspan="7">Select Asset and Expiry</td></tr>`;
+        currentTbody.innerHTML = `<tr><td colspan="7" class="placeholder-text">Select Asset and Expiry</td></tr>`; // Use placeholder class
         if (!isRefresh) setElementState(SELECTORS.optionChainTableBody, 'content');
         return;
     }
     if (!isRefresh) {
-        setElementState(SELECTORS.optionChainTableBody, 'loading');
-        currentTbody.innerHTML = `<tr><td colspan="7" class="loading-text">Loading Chain...</td></tr>`;
+        setElementState(SELECTORS.optionChainTableBody, 'loading', 'Loading Chain...'); // Loading text is handled by setElementState
     }
 
     try {
         // --- Fetch Spot Price if Needed ---
-        if (currentSpotPrice <= 0 && scrollToATM) {
+        if (currentSpotPrice <= 0 && scrollToATM && !isRefresh) { // Added !isRefresh check
             logger.info("Spot price unavailable, fetching before option chain for ATM scroll...");
             try { await fetchNiftyPrice(asset); } catch (spotError) { logger.warn("Failed to fetch spot price for ATM calculation:", spotError.message); }
             if (currentSpotPrice <= 0) { logger.warn("Spot price still unavailable, cannot calculate ATM strike accurately."); scrollToATM = false; }
@@ -1015,161 +1010,133 @@ async function fetchOptionChain(scrollToATM = false, isRefresh = false) {
 
         // --- Fetch Option Chain Data ---
         const data = await fetchAPI(`/get_option_chain?asset=${encodeURIComponent(asset)}&expiry=${encodeURIComponent(expiry)}`);
-        // console.log('[FETCH CHAIN] Data received from fetchAPI:', JSON.stringify(data, null, 2)); // Optional log
-
         const currentChainData = data?.option_chain;
-        // console.log('[FETCH CHAIN] Extracted currentChainData:', JSON.stringify(currentChainData, null, 2)); // Optional log
 
         // --- Handle Empty/Invalid Data ---
         if (!currentChainData || typeof currentChainData !== 'object' || currentChainData === null || Object.keys(currentChainData).length === 0) {
-            logger.warn(`[FETCH CHAIN] currentChainData is null, not an object, or empty. Asset: ${asset}, Expiry: ${expiry}`);
-            currentTbody.innerHTML = `<tr><td colspan="7">No option chain data available for ${asset} on ${expiry}</td></tr>`;
+            logger.warn(`No option chain data available for ${asset} on ${expiry}.`); // Simplified log
+            currentTbody.innerHTML = `<tr><td colspan="7" class="placeholder-text">No option chain data available for ${asset} on ${expiry}</td></tr>`; // Use placeholder class
             if (!isRefresh) setElementState(SELECTORS.optionChainTableBody, 'content');
             previousOptionChainData = {};
             return;
         }
 
         // --- Render Table & Handle Highlights ---
-        // Get STRING keys, sort them based on their numeric value
         const strikeStringKeys = Object.keys(currentChainData).sort((a, b) => Number(a) - Number(b));
-        // Find the ATM strike STRING key
+        // Find the ATM strike STRING key (defined in this scope)
         const atmStrikeObjectKey = currentSpotPrice > 0 ? findATMStrikeAsStringKey(strikeStringKeys, currentSpotPrice) : null;
 
         currentTbody.innerHTML = ''; // Clear existing tbody
 
         // Iterate using the STRING keys
         strikeStringKeys.forEach((strikeStringKey) => {
-            // Access data using the STRING key
+            // ... (Keep the exact row rendering logic from your previous version) ...
             const optionDataForStrike = currentChainData[strikeStringKey];
             const optionData = (typeof optionDataForStrike === 'object' && optionDataForStrike !== null)
                                 ? optionDataForStrike
-                                : { call: null, put: null }; // Default if structure bad for this strike
-
-            const call = optionData.call || {}; // Ensure call/put are objects
+                                : { call: null, put: null };
+            const call = optionData.call || {};
             const put = optionData.put || {};
-
-            // Get the numeric value for display/calculations
             const strikeNumericValue = Number(strikeStringKey);
-
-            // Access previous data using STRING key
             const prevOptionData = previousOptionChainData[strikeStringKey] || { call: {}, put: {} };
             const prevCall = prevOptionData.call || {};
             const prevPut = prevOptionData.put || {};
-
             const tr = document.createElement("tr");
-            // Store NUMERIC strike in dataset for strategy functions
             tr.dataset.strike = strikeNumericValue;
-
-            // Add ATM class by comparing STRING keys
             if (atmStrikeObjectKey !== null && strikeStringKey === atmStrikeObjectKey) {
                 tr.classList.add("atm-strike");
             }
-
-            // Define columns (keys still match backend JSON structure)
             const columns = [
                 { class: 'call clickable price', type: 'CE', key: 'last_price', format: val => formatNumber(val, 2, '-') },
                 { class: 'call oi', key: 'open_interest', format: val => formatNumber(val, 0, '-') },
                 { class: 'call iv', key: 'implied_volatility', format: val => `${formatNumber(val, 2, '-')} %` },
-                // Pass NUMERIC strike for formatting the central strike column
                 { class: 'strike', key: 'strike', isStrike: true, format: val => formatNumber(val, val % 1 === 0 ? 0 : 2) },
                 { class: 'put iv', key: 'implied_volatility', format: val => `${formatNumber(val, 2, '-')} %` },
                 { class: 'put oi', key: 'open_interest', format: val => formatNumber(val, 0, '-') },
                 { class: 'put clickable price', type: 'PE', key: 'last_price', format: val => formatNumber(val, 2, '-') },
             ];
-
-            // ----- Process Columns for the Row -----
             columns.forEach(col => {
                 try {
                     const td = document.createElement('td');
                     td.className = col.class;
-
                     let currentValue;
-
-                    // Get value: Use NUMERIC strike for strike column, access call/put objects for others
-                    if (col.isStrike) {
-                        currentValue = strikeNumericValue; // Use numeric value for strike cell display
-                    } else if (col.class.includes('call')) {
-                        currentValue = (typeof call === 'object' && call !== null) ? call[col.key] : undefined;
-                    } else { // Must be put
-                        currentValue = (typeof put === 'object' && put !== null) ? put[col.key] : undefined;
-                    }
-
-                    // Optional Log (can be removed once working)
-                    // if (!col.isStrike) {
-                    //     console.log(`[RAW] StrikeKey: ${strikeStringKey}, Key: ${col.key}, Type: ${col.class.includes('call') ? 'CE':'PE'}, Value:`, currentValue);
-                    // }
-
-                    // Format and display
+                    if (col.isStrike) { currentValue = strikeNumericValue; }
+                    else if (col.class.includes('call')) { currentValue = (typeof call === 'object' && call !== null) ? call[col.key] : undefined; }
+                    else { currentValue = (typeof put === 'object' && put !== null) ? put[col.key] : undefined; }
                     td.textContent = col.format(currentValue);
-
-                    // Add data attributes
                     if (col.type) {
                         td.dataset.type = col.type;
                         let sourceObj = col.class.includes('call') ? call : put;
                         if(typeof sourceObj === 'object' && sourceObj !== null) {
                             const ivValue = sourceObj['implied_volatility'];
                             const priceValue = sourceObj['last_price'];
-                            // Add datasets if values are valid numbers
                             if (ivValue !== null && ivValue !== undefined && !isNaN(parseFloat(ivValue))) { td.dataset.iv = ivValue; }
-                            if (priceValue !== null && priceValue !== undefined && !isNaN(parseFloat(priceValue))) { td.dataset.price = priceValue; } else { td.dataset.price = 0; }
-                        } else {
-                             td.dataset.price = 0; // Default dataset price if no data
-                        }
+                             // Use ternary for price dataset, ensure it's a string '0' if invalid
+                            td.dataset.price = (priceValue !== null && priceValue !== undefined && !isNaN(parseFloat(priceValue))) ? priceValue : '0';
+                        } else { td.dataset.price = '0'; }
                     }
-
-                    // Highlight check
+                     // Keep highlight logic exactly as you had it
                     if (isRefresh && !col.isStrike) {
                         let prevDataObject = col.class.includes('call') ? prevCall : prevPut;
                         if(typeof prevDataObject === 'object' && prevDataObject !== null) {
-                            let previousValue = prevDataObject[col.key];
-                            let changed = false;
+                            let previousValue = prevDataObject[col.key]; let changed = false;
                             const currentExists = currentValue !== null && typeof currentValue !== 'undefined';
                             const previousExists = previousValue !== null && typeof previousValue !== 'undefined';
-                            if (currentExists && previousExists) {
-                                if (typeof currentValue === 'number' && typeof previousValue === 'number') { changed = Math.abs(currentValue - previousValue) > 0.001; } else { changed = currentValue !== previousValue; }
-                            } else if (currentExists !== previousExists) { changed = true; }
+                            if (currentExists && previousExists) { if (typeof currentValue === 'number' && typeof previousValue === 'number') { changed = Math.abs(currentValue - previousValue) > 0.001; } else { changed = currentValue !== previousValue; } }
+                            else if (currentExists !== previousExists) { changed = true; }
                             if (changed) { highlightElement(td); }
+                        } else if (currentValue !== null && typeof currentValue !== 'undefined'){ // Highlight if new value appears
+                            highlightElement(td);
                         }
                     }
-                    tr.appendChild(td); // Append cell to row
+                    tr.appendChild(td);
                  } catch (cellError) {
-                     console.error(`[CELL ERROR] Strike: ${strikeStringKey}, Column Key: ${col.key}, Error:`, cellError);
-                     const errorTd = document.createElement('td'); // Create error cell
-                     errorTd.textContent = 'ERR';
-                     errorTd.className = col.class + ' error-message';
-                     tr.appendChild(errorTd); // Append error cell
+                     logger.error(`Error rendering cell for Strike: ${strikeStringKey}, Column Key: ${col.key}`, cellError);
+                     const errorTd = document.createElement('td'); errorTd.textContent = 'ERR'; errorTd.className = col.class + ' error-message'; tr.appendChild(errorTd);
                  }
-            }); // End columns.forEach
-
-            currentTbody.appendChild(tr); // Append row to table body
-
+            });
+            currentTbody.appendChild(tr);
         }); // End strikes.forEach
 
         if (!isRefresh) {
             setElementState(SELECTORS.optionChainTableBody, 'content');
         }
-        // Store the data (which has string keys) for the next refresh comparison
         previousOptionChainData = currentChainData;
 
-        // Scroll logic
+        // --- Scroll logic (Minimal Fix for Scope Error Applied HERE) ---
         if (scrollToATM && atmStrikeObjectKey !== null && !isRefresh) {
-             setTimeout(() => {
-                 // Find ATM row using the numeric strike stored in the dataset
-                 const atmRow = currentTbody.querySelector(`tr[data-strike="${Number(atmStrikeObjectKey)}"]`);
-                 if (atmRow) {
-                     atmRow.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
-                     logger.debug(`Scrolled to ATM strike key: ${atmStrikeObjectKey}`);
-                 } else { logger.warn(`ATM strike row for key (${atmStrikeObjectKey}) not found for scrolling.`); }
-             }, 150);
+             // *** FIX: Pass the variable into the setTimeout callback ***
+             setTimeout((atmKeyToUse) => { // Renamed parameter for clarity inside callback
+                try {
+                     // Use the passed 'atmKeyToUse' instead of the outer scope 'atmStrikeObjectKey'
+                     const numericStrikeToFind = Number(atmKeyToUse);
+                     if (isNaN(numericStrikeToFind)) {
+                          logger.warn(`Invalid ATM key passed to scroll timeout: ${atmKeyToUse}`);
+                          return;
+                     }
+                     logger.debug(`Scroll Timeout: Finding ATM row data-strike="${numericStrikeToFind}"`);
+                     const atmRow = currentTbody.querySelector(`tr[data-strike="${numericStrikeToFind}"]`);
+                     if (atmRow) {
+                         atmRow.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+                         logger.debug(`Scrolled to ATM strike key: ${atmKeyToUse}`); // Log the key used
+                     } else {
+                          // Log using the key *and* the number it converted to
+                          logger.warn(`ATM strike row for key (${atmKeyToUse} / ${numericStrikeToFind}) not found for scrolling.`);
+                     }
+                 } catch (e) {
+                     logger.error("Error inside scroll timeout:", e);
+                 }
+             }, 250, atmStrikeObjectKey); // Pass the outer scope variable here as the 3rd argument
+             // *** END FIX ***
          }
 
     } catch (error) { // Outer catch
-        logger.error("Error during fetchOptionChain execution (outer try/catch):", error);
+        logger.error(`Error during fetchOptionChain execution for ${activeAsset}/${expiry}:`, error);
         if (currentTbody) {
             currentTbody.innerHTML = `<tr><td colspan="7" class="error-message">Chain Error: ${error.message}</td></tr>`;
         }
-        if (!isRefresh) { setElementState(SELECTORS.optionChainTableBody, 'error', `Chain Error: ${error.message}`); }
-        else { logger.warn(`Option Chain refresh error: ${error.message}`); }
+        if (!isRefresh) { setElementState(SELECTORS.optionChainTableBody, 'error', `Chain Error`); } // Show simple error state
+        else { logger.warn(`Option Chain refresh failed: ${error.message}`); }
         previousOptionChainData = {};
     }
 }
