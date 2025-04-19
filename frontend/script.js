@@ -2536,4 +2536,5 @@ if (scrollToATM && atmStrikeObjectKey !== null && !isRefresh) {
             logger.error("Error inside scroll timeout:", e);
         }
     }, 250, atmStrikeObjectKey); // Pass the outer scope variable here as the 3rd argument
+    }
 }
