@@ -2063,12 +2063,13 @@ def build_stock_analysis_prompt_for_options(
     latest_news: Optional[List[Dict[str, str]]]
 ) -> str:
     """
-    Generates a structured prompt for LLM analysis focused on Option Trader insights,
-    using available stock/index data (RapidAPI sourced), analyst ratings, and news.
-    Acknowledges missing option-specific data.
+    Generates a structured prompt for LLM analysis focused on Option Trader insights.
+    Requires the LLM to start with a specific bias heading (Bullish/Bearish/Neutral Outlook)
+    and state the net bias explicitly. Generalized for stocks and indices.
     """
-    func_name = "build_stock_analysis_prompt_for_options_rapidapi"
+    func_name = "build_stock_analysis_prompt_for_options_v2" # Version tracking
 
+    # --- Handle potentially missing input data (Keep as is) ---
     if not stock_data:
         logger.error(f"[{func_name}] Critical error: stock_data is None for {stock_symbol_display}. Cannot build prompt.")
         return f"Analysis for {stock_symbol_display} failed: Essential stock data is missing."
@@ -2076,9 +2077,9 @@ def build_stock_analysis_prompt_for_options(
          logger.warning(f"[{func_name}] Warning: latest_news is None for {stock_symbol_display}. Proceeding without news.")
          latest_news = [{"headline": "News data not available.", "summary": "", "link": "#"}]
 
-    logger.debug(f"[{func_name}] Building structured options-focused prompt for {stock_symbol_display} using RapidAPI data")
+    logger.debug(f"[{func_name}] Building structured options-focused prompt for {stock_symbol_display}")
 
-    # --- Extract Data Safely (Using .get() extensively) ---
+    # --- Extract Data Safely (Keep as is) ---
     name = stock_data.get('name', stock_symbol_display)
     price = stock_data.get('current_price')
     prev_close = stock_data.get('previous_close')
@@ -2088,33 +2089,30 @@ def build_stock_analysis_prompt_for_options(
     ma50 = stock_data.get('moving_avg_50')
     ma200 = stock_data.get('moving_avg_200')
     volume = stock_data.get('volume')
-    avg_volume = stock_data.get('average_volume') # Now calculated (e.g., 50d avg)
+    avg_volume = stock_data.get('average_volume')
     week_52_high = stock_data.get('fifty_two_week_high')
     week_52_low = stock_data.get('fifty_two_week_low')
-    market_cap = stock_data.get('market_cap') # Often None from chart API
-    pe_ratio = stock_data.get('pe_ratio')     # Likely None
-    eps = stock_data.get('eps')               # Likely None
-    sector = stock_data.get('sector')         # Likely None
-    industry = stock_data.get('industry')     # Likely None
+    market_cap = stock_data.get('market_cap')
+    pe_ratio = stock_data.get('pe_ratio')
+    eps = stock_data.get('eps')
+    sector = stock_data.get('sector')
+    industry = stock_data.get('industry')
     qtype = stock_data.get('quote_type', 'Unknown')
-    analyst_ratings = stock_data.get('analyst_ratings', []) # Extract analyst ratings
+    analyst_ratings = stock_data.get('analyst_ratings', [])
 
     display_title = f"{stock_symbol_display}" + (f" ({name})" if name and name != stock_symbol_display else "")
-    # Adjusted index check based on typical RapidAPI instrumentType values
     is_index = qtype == 'INDEX'
 
-    # --- Prepare Context Strings ---
-
-    # Technical Context (same logic as before, using potentially RapidAPI-sourced data)
+    # --- Prepare Context Strings (Keep as is) ---
+    # Technical Context Calculation (Trend, Support/Resistance)
     trend = "N/A"; support_str = "N/A"; resistance_str = "N/A"
     ma_available = ma50 is not None and ma200 is not None and price is not None
-
     if ma_available:
         support_levels = sorted([lvl for lvl in [ma50, ma200] if lvl is not None and lvl < price], reverse=True)
         resistance_levels = sorted([lvl for lvl in [ma50, ma200] if lvl is not None and lvl >= price])
         support_str = " / ".join([fmt(lvl) for lvl in support_levels]) if support_levels else "Below Key MAs"
         resistance_str = " / ".join([fmt(lvl) for lvl in resistance_levels]) if resistance_levels else "Above Key MAs"
-
+        # Trend description
         if price > ma50 > ma200: trend = "Strong Uptrend (Price > 50MA > 200MA)"
         elif price < ma50 < ma200: trend = "Strong Downtrend (Price < 50MA < 200MA)"
         elif ma50 > price > ma200 : trend = "Sideways/Testing Support (Below 50MA, Above 200MA)"
@@ -2126,90 +2124,45 @@ def build_stock_analysis_prompt_for_options(
         support_str = fmt(ma50) if price > ma50 else "N/A (Below 50MA)"
         resistance_str = fmt(ma50) if price <= ma50 else "N/A (Above 50MA)"
         trend = "Above 50MA" if price > ma50 else "Below 50MA"
-        resistance_str += " (200MA N/A)"
-        support_str += " (200MA N/A)"
-    else:
-        trend = "Trend Unknown (MA data insufficient)"
-
-    vol_str = fmt(volume, p='', pr=0, na='N/A')
-    avg_vol_str = fmt(avg_volume, p='', pr=0, na='N/A') # Now uses calculated avg vol
+        resistance_str += " (200MA N/A)"; support_str += " (200MA N/A)"
+    else: trend = "Trend Unknown (MA data insufficient)"
+    # Volume context
+    vol_str = fmt(volume, p='', pr=0, na='N/A'); avg_vol_str = fmt(avg_volume, p='', pr=0, na='N/A')
     vol_comment = f"Volume: {vol_str}."
-    if avg_volume is not None and volume is not None and avg_volume > 0: # Added check avg_volume > 0
+    if avg_volume is not None and volume is not None and avg_volume > 0:
         vol_ratio = volume / avg_volume
-        if vol_ratio > 1.5: vol_comment += f" Significantly ABOVE {fmt(avg_volume, p='', pr=0, s=' (50d Avg?)') }."
-        elif vol_ratio < 0.7: vol_comment += f" Significantly BELOW {fmt(avg_volume, p='', pr=0, s=' (50d Avg?)') }."
-        else: vol_comment += f" Near {fmt(avg_volume, p='', pr=0, s=' (50d Avg?)') }."
-    elif avg_volume is not None:
-         vol_comment += f" Average Volume (50d?): {avg_vol_str} (Current day volume N/A or 0)."
+        if vol_ratio > 1.5: vol_comment += f" Significantly ABOVE {fmt(avg_volume, p='', pr=0, s=' (Avg)') }."
+        elif vol_ratio < 0.7: vol_comment += f" Significantly BELOW {fmt(avg_volume, p='', pr=0, s=' (Avg)') }."
+        else: vol_comment += f" Near {fmt(avg_volume, p='', pr=0, s=' (Avg)') }."
+    elif avg_volume is not None: vol_comment += f" Average Volume: {avg_vol_str}."
     else: vol_comment += f" Average Volume N/A."
+    # Assemble Technical Context
+    tech_context = ( f"Price: {fmt(price)} (Open: {fmt(day_open)}, Day Range: {fmt(day_low)} - {fmt(day_high)}, Prev Close: {fmt(prev_close)}). " f"52wk Range: {fmt(week_52_low)} - {fmt(week_52_high)}. " f"MAs: 50D={fmt(ma50)}, 200D={fmt(ma200)}. " f"{vol_comment} " f"Trend Context: {trend}. " f"Key Levels (from MAs): Support near {support_str}, Resistance near {resistance_str}." )
 
+    # Fundamental Context String
+    fund_context = ""; pe_comparison_note = "Note: P/E data likely unavailable."
+    if is_index: fund_context = "N/A (Index)"
+    else: fund_context = ( f"Market Cap: {fmt(market_cap, p='', na='N/A')}, " f"P/E Ratio: {fmt(pe_ratio, p='', s='x', na='N/A')}, " f"EPS: {fmt(eps, p='', na='N/A')}, " f"Sector: {fmt(sector, p='', na='N/A')}, " f"Industry: {fmt(industry, p='', na='N/A')}" )
+    if pe_ratio is not None: pe_comparison_note = f"Note: P/E ({fmt(pe_ratio, p='', s='x')}) requires peer/historical comparison."
 
-    tech_context = (
-        f"Price: {fmt(price)} (Open: {fmt(day_open)}, Day Range: {fmt(day_low)} - {fmt(day_high)}, Prev Close: {fmt(prev_close)}). "
-        f"52wk Range: {fmt(week_52_low)} - {fmt(week_52_high)}. "
-        f"MAs: 50D={fmt(ma50)}, 200D={fmt(ma200)}. "
-        f"{vol_comment} "
-        f"Trend Context: {trend}. "
-        f"Key Levels (from MAs): Support near {support_str}, Resistance near {resistance_str}."
-    )
+    # News Context String
+    news_formatted = []; is_news_error_or_empty = not latest_news or any(err in latest_news[0].get("headline","").lower() for err in ["error", "no recent", "no relevant", "timeout", "not available"])
+    if not is_news_error_or_empty: news_context = "\n".join([f'- "{n.get("headline","N/A")}" ({n.get("link","#")}): {n.get("summary","N/A").replace("`","").replace("{","(").replace("}",")")}' for n in latest_news[:3]])
+    else: news_context = f"- {latest_news[0].get('headline', 'No recent news summaries available.')}" if latest_news else "- No recent news summaries available."
 
-    # Fundamental Context String (Acknowledges missing data from Chart API)
-    fund_context = ""
-    pe_comparison_note = "Note: P/E data likely unavailable from this API source."
-    if is_index:
-         fund_context = "N/A (Index - Standard fundamental ratios do not apply)."
-    else:
-        # Use 'N/A' formatting for potentially missing fundamental fields
-        fund_context = (
-            f"Market Cap: {fmt(market_cap, p='', na='N/A')}, "
-            f"P/E Ratio: {fmt(pe_ratio, p='', s='x', na='N/A')}, "
-            f"EPS: {fmt(eps, p='', na='N/A')}, "
-            f"Sector: {fmt(sector, p='', na='N/A')}, "
-            f"Industry: {fmt(industry, p='', na='N/A')}"
-        )
-        # Update PE note based on actual availability
-        if pe_ratio is not None:
-            pe_comparison_note = f"Note: P/E ({fmt(pe_ratio, p='', s='x')}) context requires comparison to industry peers and historical levels (external data needed)."
-        else:
-            pe_comparison_note = "Note: P/E data unavailable for comparison."
-
-
-    # News Context String (Same as before)
-    news_formatted = []
-    is_news_error_or_empty = not latest_news or any(err_indicator in latest_news[0].get("headline", "").lower() for err_indicator in ["error", "no recent news", "no relevant news", "timeout", "not available"])
-    if not is_news_error_or_empty:
-        for n in latest_news[:3]:
-            headline = n.get('headline','N/A')
-            summary = n.get('summary','N/A').replace('"', "'").replace('{', '(').replace('}', ')')
-            link = n.get('link', '#')
-            news_formatted.append(f'- "{headline}" ({link}): {summary}')
-        news_context = "\n".join(news_formatted)
-    else:
-        news_context = f"- {latest_news[0].get('headline', 'No recent news summaries available.')}" if latest_news else "- No recent news summaries available."
-
-    # --- NEW: Analyst Ratings Context ---
+    # Analyst Ratings Context
     analyst_context = "No recent analyst ratings found or fetch failed."
     if analyst_ratings:
-         analyst_formatted = []
-         for r in analyst_ratings:
-             rating_str = f"{r.get('provider', 'N/A')}: {r.get('rating', 'N/A')}"
-             if r.get('target_price') is not None:
-                 rating_str += f" (Target: {fmt(r.get('target_price'))})"
-             if r.get('action'):
-                  rating_str += f" [{r.get('action')}]"
-             if r.get('date'):
-                  rating_str += f" ({r['date'].strftime('%Y-%m-%d')})"
-             analyst_formatted.append(f"- {rating_str}")
-             # Optionally include abstract if needed:
-             # abstract = r.get('abstract', '').strip()
-             # if abstract:
-             #     analyst_formatted.append(f"    Summary: {abstract}")
+         analyst_formatted = [f"- {r.get('provider','N/A')}: {r.get('rating','N/A')}" + (f" (Target: {fmt(r.get('target_price'))})" if r.get('target_price') is not None else "") + (f" [{r.get('action')}]" if r.get('action') else "") + (f" ({r['date'].strftime('%Y-%m-%d')})" if r.get('date') else "") for r in analyst_ratings]
          analyst_context = "\n".join(analyst_formatted)
 
 
-    # --- Construct the Structured Prompt ---
+    # --- Construct the Structured Prompt (with new instructions) ---
     prompt = f"""
-Analyze the provided data for **{display_title}** from the perspective of an **Options Trader**. Use clear headings and bullet points. Focus on potential direction, volatility hints, and key levels, while explicitly acknowledging missing options-specific data (like Implied Volatility) and potential gaps in fundamental data from this API source.
+**IMPORTANT:** Start your response with ONLY ONE of the following Level 2 Markdown headings, reflecting your overall assessment based on the provided data: `## Bullish Outlook`, `## Bearish Outlook`, or `## Neutral Outlook`.
+Immediately after the heading, state the **Net Bias** on a new line, like this: `Net Bias: [Your Bias (e.g., Bullish, Moderately Bearish, Neutral, Range-bound)]`.
+
+Then, provide the detailed analysis for **{display_title}** from the perspective of an **Options Trader**. Use the subsequent headings and bullet points as outlined below. Focus on potential direction, volatility hints, and key levels, while explicitly acknowledging missing options-specific data (like Implied Volatility) and potential gaps in fundamental data from this API source.
 
 **Provided Data Snapshots (Source: RapidAPI / Google News):**
 
@@ -2220,82 +2173,46 @@ Analyze the provided data for **{display_title}** from the perspective of an **O
 *   **Recent News Snippets (Max 3):**
 {news_context}
 
-**Analysis Request (Options Trader Focus):**
+---
+**Detailed Analysis Request (Options Trader Focus):**
 
-1.  **Overall Market Posture & Bias:**
-    *   Synthesize technicals (trend, price action), news sentiment, and any strong signal from analyst ratings.
-    *   State the implied short-term **Directional Bias** (e.g., Bullish, Bearish, Neutral/Range-bound, Uncertain).
-    *   Comment on potential **Volatility Hints** (News? Analyst target changes? Price extremes? Volume surge?). Acknowledge IV data is missing.
+**(Remember to place the `## [Bullish/Bearish/Neutral] Outlook` heading and `Net Bias:` statement BEFORE this section)**
+
+1.  **Overall Market Posture & Bias Rationale:**
+    *   *Explain* the reasoning behind the **Net Bias** you stated above, synthesizing the technical trend, price action vs MAs, volume, news sentiment, and analyst ratings.
+    *   Comment on potential **Volatility Hints** (e.g., Is news suggesting an event? Price near 52wk extremes? High volume move?). Acknowledge actual IV data is missing.
 
 2.  **Key Technical Levels & Observations:**
-    *   **Support & Resistance:** Identify levels based *only* on provided MAs, 52-week levels, and recent day's range.
-    *   **Trend Strength & Volume:** Comment on trend conviction. Is volume confirming or diverging? Is price extended from MAs?
-    *   **Significant Price Zones:** Note if price is near 52-week high/low.
+    *   **Support & Resistance:** Reiterate key potential support/resistance levels based *only* on the provided MAs, 52-week levels, and recent day's range.
+    *   **Trend Strength & Volume:** Comment on the trend's conviction. Is volume confirming the price move or diverging? Is the price extended from MAs or consolidating near them?
+    *   **Significant Price Zones:** Note if the current price is near the 52-week high/low, suggesting potential breakout or breakdown zones relevant for strike selection.
 
-3.  **News & Analyst Sentiment:**
-    *   **Combined Sentiment:** Assess overall sentiment from news *and* analyst ratings (Positive, Negative, Neutral, Mixed, N/A).
-    *   **Potential Catalysts/Volatility:** How might news or analyst actions influence volatility or act as catalysts?
+3.  **News & Analyst Sentiment Impact:**
+    *   **Sentiment:** Elaborate on the assessed sentiment (Positive, Negative, Neutral, Mixed, N/A) from the combined news and analyst data.
+    *   **Volatility/Catalyst Potential:** How might this news or analyst action potentially influence near-term price **volatility** (increase or decrease uncertainty) or act as a catalyst?
 
 4.  **Fundamental Considerations (if applicable):**
-    *   Briefly note if available fundamentals provide context or risk indication. {pe_comparison_note} Note if N/A for index or data missing.
+    *   Briefly explain if the available fundamentals provide any notable context (e.g., valuation hints, sector trends) or risk indication. {pe_comparison_note} State if N/A for index or data missing.
 
-5.  **Options Strategy Angle & Considerations:**
-    *   **Derived Bias:** Reiterate the derived directional bias.
-    *   **CRITICAL CAVEAT:** State clearly: "**Implied Volatility (IV) data is MISSING.** IV is crucial for option pricing and strategy selection. The following are *general conceptual ideas only* and ignore the current IV environment."
+5.  **Options Strategy Angle & Considerations (Based on Net Bias):**
+    *   **CRITICAL CAVEAT:** State clearly: "**Implied Volatility (IV) data is MISSING.** IV is crucial for option pricing and strategy selection. The following are *general conceptual ideas only* based on the derived directional bias and ignore the current IV environment."
     *   **General Strategy Types (Conceptual):**
-        *   [Keep the Bullish/Bearish/Neutral/Uncertain/Unclear strategy suggestions as before]
-    *   **Key Factors Ignored:** Remind the user that this analysis **ignores IV, risk tolerance, expiry/strike selection, option liquidity, and time decay (theta)**.
+        *   *If Net Bias is Bullish:* Suggest considering strategies like Long Calls, Bull Call Spreads, or Put Credit Spreads. Mention suitability depends on conviction and desired risk/reward.
+        *   *If Net Bias is Bearish:* Suggest considering strategies like Long Puts, Bear Put Spreads, or Call Credit Spreads. Mention suitability depends on conviction.
+        *   *If Net Bias is Neutral/Range-Bound:* Suggest considering strategies like Iron Condors, Iron Butterflies, or Calendar Spreads. Mention aim is typically to profit from time decay if price stays stable.
+        *   *If Bias is Uncertain/Expecting High Volatility (Less Common based on instructions):* Briefly mention Long Straddles/Strangles as high-risk plays IF high volatility is strongly suspected from context (e.g., major news pending), but reiterate high cost and need for significant move.
+    *   **Key Factors Ignored:** Remind the user that this analysis **ignores IV, risk tolerance, specific expiry selection, strike selection, option liquidity, and time decay (theta) implications**, all critical for actual trading.
 
 6.  **Identified Risks & Data Limitations:**
-    *   Summarize risks suggested *only* by the provided data (e.g., Price below MAs, negative news/analyst rating, technical divergence, 52wk low proximity).
+    *   Summarize key risks suggested *only* by the provided data (e.g., Price below key MAs, negative news/analyst rating, technical divergence, 52wk low proximity).
     *   Explicitly list major **Data Limitations**: **No Implied Volatility (IV), No Historical Volatility (HV), No Option Chain Data (Greeks, OI, Volume), No Upcoming Event Calendar, Potential gaps in Fundamental data (P/E, EPS, Sector likely missing).**
 
-**Disclaimer:** This analysis is auto-generated based on limited, potentially delayed data snapshots (RapidAPI) and recent news/analyst summaries. It is NOT financial advice. Data accuracy depends on sources. **Crucial options data (IV) and potentially key fundamental data are missing.** Always conduct thorough independent research, understand risks, consider your risk tolerance, and consult a qualified financial advisor before trading. Market conditions are dynamic.
+---
+**Disclaimer:** This analysis is auto-generated based on limited data. It is NOT financial advice. Data accuracy depends on sources. Crucial options data (IV) and potentially key fundamental data are missing. Always conduct thorough independent research, understand risks, consider your risk tolerance, and consult a qualified financial advisor before trading. Market conditions are dynamic.
 """
-    logger.debug(f"[{func_name}] Generated options-focused prompt for {stock_symbol_display} with RapidAPI data")
+    logger.debug(f"[{func_name}] Generated options-focused prompt for {stock_symbol_display} (v2 - specific heading)")
     return prompt
 
-# --- Example Usage (Async context needed) ---
-async def main():
-    # Example: Fetch data for NIFTY 50 Index from India
-    # symbol_to_fetch = "^NSEI" # NIFTY 50 index symbol on Yahoo
-    symbol_to_fetch = "RELIANCE.NS" # Reliance Industries on NSE
-    # symbol_to_fetch = "INFY.NS" # Infosys on NSE
-    region_code = "IN"
-
-    print(f"--- Fetching Stock Data for {symbol_to_fetch} ({region_code}) ---")
-    stock_data = await fetch_stock_data_async(symbol_to_fetch, region=region_code)
-
-    if stock_data:
-        # print("\n--- Fetched Stock Data ---")
-        # # Print safely, handling None values
-        # for key, value in stock_data.items():
-        #     if key == 'analyst_ratings' and isinstance(value, list):
-        #         print(f"  {key}:")
-        #         if value:
-        #             for rating in value:
-        #                 print(f"    - {rating}")
-        #         else:
-        #             print("    - None")
-        #     else:
-        #          print(f"  {key}: {value}")
-
-        print(f"\n--- Fetching News Data for {symbol_to_fetch} ---")
-        news_data = await fetch_latest_news_async(stock_data.get("name", symbol_to_fetch)) # Use name if available for news search
-        # print("\n--- Fetched News Data ---")
-        # if news_data:
-        #     for item in news_data:
-        #         print(f"- {item.get('headline')}")
-        # else:
-        #     print("No news data fetched.")
-
-        print(f"\n--- Building Prompt for {symbol_to_fetch} ---")
-        prompt = build_stock_analysis_prompt_for_options(symbol_to_fetch, stock_data, news_data)
-        print("\n--- Generated Prompt ---")
-        print(prompt)
-
-    else:
-        print(f"Failed to fetch stock data for {symbol_to_fetch}")
         
 
 # ===============================================================
