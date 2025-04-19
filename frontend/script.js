@@ -431,9 +431,6 @@ async function loadAssets() {
 }
 
 
-// Make sure initializePage is called on DOM ready
-document.addEventListener('DOMContentLoaded', initializePage);
-
 function setupEventListeners() {
     logger.info("Setting up event listeners...");
     document.querySelector(SELECTORS.assetDropdown)?.addEventListener("change", handleAssetChange);
@@ -2328,6 +2325,101 @@ async function fetchAndDisplayGreeksAnalysis(asset, portfolioGreeksData) {
 // ===============================================================
 // Misc Helpers
 // ===============================================================
+function gatherStrategyLegsFromTable() {
+    const logger = window.logger || window.console;
+    logger.debug("Gathering strategy legs from 'strategyPositions' array...");
+    
+    if (!Array.isArray(strategyPositions)) {
+      logger.error("Cannot gather legs: strategyPositions is not an array or not defined.");
+      return [];
+    }
+    if (strategyPositions.length === 0) {
+        logger.warn("Cannot gather legs: strategyPositions array is empty.");
+        return [];
+    }
+    
+    const validLegs = []; // Array to store only valid legs
+    let invalidLegCount = 0;
+    
+    strategyPositions.forEach((pos, index) => {
+       let legIsValid = true; // Assume valid initially for this leg
+       let validationError = null; // Store first error for logging
+    
+       // Validate essential data from the stored position object
+       if (!pos || typeof pos !== 'object') {
+            validationError = "Position data is not an object.";
+            legIsValid = false;
+       } else if (!pos.option_type || (pos.option_type !== 'CE' && pos.option_type !== 'PE')) {
+            validationError = `Invalid option_type: ${pos.option_type}`;
+            legIsValid = false;
+       } else if (!pos.strike_price || isNaN(parseFloat(pos.strike_price)) || parseFloat(pos.strike_price) <= 0) {
+            validationError = `Invalid strike_price: ${pos.strike_price}`;
+            legIsValid = false;
+       } else if (!pos.expiry_date || !/^\d{4}-\d{2}-\d{2}$/.test(pos.expiry_date)) {
+           validationError = `Invalid expiry_date: ${pos.expiry_date}`;
+           legIsValid = false;
+       } else if (pos.lots === undefined || pos.lots === null || isNaN(parseInt(pos.lots)) || parseInt(pos.lots) === 0) {
+            validationError = `Invalid lots: ${pos.lots}`;
+            legIsValid = false;
+       } else if (pos.last_price === undefined || pos.last_price === null || isNaN(parseFloat(pos.last_price)) || parseFloat(pos.last_price) < 0) {
+            validationError = `Invalid last_price: ${pos.last_price}`;
+            legIsValid = false;
+       }
+       // IV and lot_size are optional for backend, but DTE needs recalculation
+    
+       // --- Recalculate DTE ---
+       const currentDTE = calculateDaysToExpiry(pos.expiry_date);
+       if (currentDTE === null && legIsValid) { // Check DTE only if leg was valid so far
+           validationError = `Could not calculate DTE for expiry ${pos.expiry_date}.`;
+           legIsValid = false;
+       }
+    
+       // --- Determine Backend Option Type ---
+        let backendOpType = '';
+        if (legIsValid) { // Check op type only if leg is valid
+            const upperOptType = pos.option_type.toUpperCase();
+            if (upperOptType === 'CE') { backendOpType = 'c'; }
+            else if (upperOptType === 'PE') { backendOpType = 'p'; }
+            else { validationError = `Invalid stored option_type: ${pos.option_type}`; legIsValid = false; } // Should not happen if addPosition is correct
+        }
+    
+        // --- Handle IV ---
+        let ivToSend = null;
+        if (legIsValid && pos.iv !== null && pos.iv !== undefined && pos.iv !== '') {
+            const parsedIV = parseFloat(pos.iv);
+             if (!isNaN(parsedIV)) { ivToSend = parsedIV; }
+             else { logger.warn(`gatherStrategyLegs: Invalid IV found for leg ${index} ('${pos.iv}'), sending null.`); }
+        }
+    
+       // --- If Leg is Valid, Add to Array ---
+       if (legIsValid) {
+           validLegs.push({
+                // Data needed by backend (match StrategyLegInput in Pydantic)
+                op_type: backendOpType,
+                strike: String(pos.strike_price),
+                tr_type: parseInt(pos.lots) >= 0 ? 'b' : 's',
+                op_pr: String(pos.last_price),
+                lot: String(Math.abs(parseInt(pos.lots))),
+                lot_size: pos.lot_size ? String(pos.lot_size) : null,
+                iv: ivToSend,
+                days_to_expiry: currentDTE,
+                expiry_date: pos.expiry_date,
+           });
+       } else {
+            // Log the first validation error found for the skipped leg
+            logger.error(`gatherStrategyLegs: Skipping invalid position data at index ${index}. Reason: ${validationError}. Data:`, pos);
+            invalidLegCount++;
+       }
+    }); // End forEach
+    
+    if (invalidLegCount > 0) {
+       alert(`Error: ${invalidLegCount} invalid leg(s) found in the strategy and were ignored. Please check console for details.`);
+    }
+    
+    logger.debug(`Gathered ${validLegs.length} valid strategy legs from strategyPositions state (ignored ${invalidLegCount}).`);
+    // Return ONLY the valid legs
+    return validLegs;
+}
 
 /** Finds the strike closest to the current spot price */
 function findATMStrikeAsStringKey(strikeStringKeys = [], spotPrice) {
@@ -2359,8 +2451,6 @@ function findATMStrikeAsStringKey(strikeStringKeys = [], spotPrice) {
 const numericATMStrike = Number(atmStrikeObjectKey);
 logger.debug(`Attempting to find ATM row with data-strike="${numericATMStrike}". Tbody has ${currentTbody.rows.length} rows.`); // Add log
 const atmRow = currentTbody.querySelector(`tr[data-strike="${numericATMStrike}"]`);
-if (atmRow) {
-    // ... scroll ...
-} else {
-     logger.warn(`ATM strike row for key (${atmStrikeObjectKey} / ${numericATMStrike}) not found for scrolling.`);
+if (atmRow) { // ... scroll ...
+} else { `ATM strike row for key (${atmStrikeObjectKey} / ${numericATMStrike}) not found for scrolling.`);
 }
