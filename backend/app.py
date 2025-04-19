@@ -2349,42 +2349,82 @@ async def fetch_greeks_analysis(
 
     # --- Build the Prompt ---
     # Focus explicitly on interpreting the provided portfolio total numbers
-    prompt = f"""
-Analyze the provided **Total Portfolio Option Greeks** for a strategy on the underlying asset **{asset_symbol}**. Focus *exclusively* on what these Greek values imply about the portfolio's current sensitivities and risk exposure from an **Options Trader's perspective**. Assume these totals reflect the entire multi-leg position.
+    prompt = f"""You are an expert-level Options Trader and Risk Analyst. Analyze the **Total Portfolio Option Greeks** for a multi-leg options strategy on the underlying **{asset_symbol}**.
 
-**Provided Total Portfolio Greeks:**
+Your goal is to interpret what each Greek reveals about the **current directional exposure, risk profile, and sensitivity to market factors** – from a trader's perspective.
 
-*   **Portfolio Delta (Δ): {delta_str}**
-*   **Portfolio Gamma (Γ): {gamma_str}**
-*   **Portfolio Theta (Θ): {theta_str}** (per day)
-*   **Portfolio Vega: {vega_str}** (per 1% change in IV)
-*   **Portfolio Rho (Ρ): {rho_str}** (per 1% change in interest rate)
+Assume these values represent the **net Greek exposure across the full position**.
 
-**Analysis Request (Interpret ONLY these total Greek values):**
+---
 
-1.  **Overall Portfolio Sensitivities:**
-    *   **Direction (Delta):** Based on the total Delta ({delta_str}), is the portfolio currently net long (bullish), net short (bearish), or directionally neutral on the underlying asset ({asset_symbol})? How much will the portfolio's value roughly change for a $1 move in the underlying?
-    *   **Volatility (Vega):** Based on the total Vega ({vega_str}), is the portfolio currently long volatility (benefits from IV increase) or short volatility (benefits from IV decrease)? Is the sensitivity to IV changes significant?
-    *   **Time Decay (Theta):** Based on the total Theta ({theta_str}), is the portfolio gaining or losing value each day due to time decay? Is the daily time decay impact substantial?
+🔢 **Portfolio Greeks Provided:**
 
-2.  **Dynamic Risk Factors (Gamma & Higher Order):**
-    *   **Delta Change (Gamma):** Based on the total Gamma ({gamma_str}), how is the portfolio's Delta expected to change as the underlying price moves? If Gamma is positive, will Delta become more positive on an up-move and more negative on a down-move (or vice-versa if negative)? Does the Gamma value suggest the portfolio requires frequent re-hedging to maintain its desired Delta exposure?
-    *   **Combined Effects:** Briefly mention how Gamma interacts with Delta (e.g., positive Gamma helps a long Delta position on up-moves but hurts on down-moves, relative to linear exposure).
+- **Delta (Δ): {delta_str}**
+- **Gamma (Γ): {gamma_str}**
+- **Theta (Θ): {theta_str}** *(per day)*
+- **Vega: {vega_str}** *(per 1% change in implied volatility)*
+- **Rho (Ρ): {rho_str}** *(per 1% change in interest rate)*
 
-3.  **Interest Rate Sensitivity (Rho):**
-    *   Based on the total Rho ({rho_str}), comment briefly on the portfolio's sensitivity to interest rate changes. Is it significant compared to the other Greeks? (Often minor for shorter-term options).
+---
 
-4.  **Synthesized Risk Profile & Key Takeaways:**
-    *   Summarize the main exposures revealed by the Greeks. (e.g., "The positive Delta and positive Gamma suggest a bullish stance that accelerates with price increases, but the large negative Theta indicates significant daily cost from time decay. The positive Vega means the position benefits from rising volatility.")
-    *   What are the primary risks *implied by these Greeks*? (e.g., Risk from time decay, risk from falling volatility, risk of Delta changing rapidly due to Gamma).
+### 🔍 **Analysis Instructions**:
 
-**Important Limitations (Acknowledge These):**
-*   This analysis interprets *only* the five total portfolio Greek values provided.
-*   It **does not** know the specific options contracts, expiry dates, strikes, underlying price vs strikes (moneyness), current IV levels vs historical, bid-ask spreads, commissions, or overall market news/context.
-*   It cannot assess the probability of profit or the suitability of the strategy.
+#### 1️⃣ **Directional Bias and Sensitivities**  
+- **Delta Insight:**  
+  - What directional bias does the portfolio reflect? (bullish, bearish, or neutral)  
+  - How much P/L movement can be expected for a $1 move in the underlying?
+  - Is the Delta large enough to suggest a directional conviction or minor tilt?
 
-**Output Format:** Use clear headings (like "Overall Portfolio Sensitivities", "Dynamic Risk Factors", etc.) and concise bullet points. Focus on actionable interpretations *derived directly from the total Greek values*.
-"""
+- **Vega Insight:**  
+  - Is the portfolio positioned to benefit from a rise or fall in implied volatility?  
+  - Is Vega exposure large enough to be a primary risk/edge?  
+  - Comment on whether the trader is effectively "long or short volatility".
+
+- **Theta Insight:**  
+  - Does the portfolio gain or lose value daily from time decay?
+  - How impactful is this decay in dollar terms relative to the size of the position?
+
+---
+
+#### 2️⃣ **Convexity and Delta Stability (Gamma Analysis)**  
+- **Gamma Insight:**  
+  - Does Delta accelerate in the same direction as price movement (positive Gamma), or the opposite (negative Gamma)?  
+  - What does Gamma imply about **how often** the position will need re-hedging or adjustment?
+  - Is Gamma exposure consistent with an income-generating strategy or a directional play?
+
+- **Delta-Gamma Interaction:**  
+  - How does Gamma modify Delta during price moves?  
+  - Example: Positive Gamma + Positive Delta = gains accelerate on up-moves but slow losses on down-moves.
+
+---
+
+#### 3️⃣ **Interest Rate Sensitivity (Rho)**  
+- **Rho Insight:**  
+  - Does the portfolio benefit from rising or falling interest rates?  
+  - Is Rho exposure significant enough to impact strategy (usually minimal unless in longer-dated options)?
+
+---
+
+#### 4️⃣ **Synthesized Portfolio Risk Profile**  
+- **Summarize:**  
+  - What is the overall **strategic positioning** based on these Greeks (e.g., bullish with negative carry, Vega dependent, Gamma-scalping strategy)?
+  - Which Greeks are **dominant risk factors**, and which are secondary?
+  
+- **Trader Takeaways:**  
+  - What are the **key vulnerabilities** (e.g., large Theta decay, unstable Delta due to high Gamma, risk of Vega crush)?
+  - Mention **scenarios where this position thrives vs where it suffers**.
+
+---
+
+### ⚠️ **Assumptions & Limitations**  
+- This analysis is based *only* on the provided total Greeks.  
+- No assumptions are made about strike prices, expirations, implied volatility surfaces, current underlying price, or market context.  
+- This output is **not a recommendation**, but an **interpretation of risk and sensitivity metrics**.
+
+---
+
+### 📄 **Output Format Guidelines:**  
+Use **clear section headers** and **bullet points**. Avoid generic summaries – focus on **specific, actionable insights** based solely on the Greek values."""
 
     logger.debug(f"[{func_name}][{asset_symbol}] Generating Greeks analysis prompt...")
 

@@ -829,6 +829,47 @@ async function fetchPayoffChart() {
     } finally { if (updateButton) updateButton.disabled = false; logger.info("--- [fetchPayoffChart] END ---"); }
 }
 
+/** Helper function to set loading states during asset change */
+function setLoadingStateForAssetChange() {
+    logger.debug("Setting loading states for asset change..."); // Add log
+    // Use setElementState for consistent handling
+    setElementState(SELECTORS.expiryDropdown, 'loading', 'Loading Expiries...');
+    setElementState(SELECTORS.optionChainTableBody, 'loading', 'Loading Chain...');
+    setElementState(SELECTORS.analysisResultContainer, 'loading', 'Loading Analysis...');
+    setElementState(SELECTORS.newsResultContainer, 'loading', 'Loading News...');
+    setElementState(SELECTORS.spotPriceDisplay, 'loading', 'Spot: ...'); // Concise loading
+    setElementState(SELECTORS.globalErrorDisplay, 'hidden'); // Clear previous global error
+
+    // Reset calculation outputs as new asset means previous calcs are invalid
+    // Ensure resetCalculationOutputsUI is defined before this point
+    if (typeof resetCalculationOutputsUI === 'function') {
+        resetCalculationOutputsUI();
+    } else {
+        logger.error("resetCalculationOutputsUI function not defined when trying to set loading state!");
+    }
+}
+
+async function sendDebugAssetSelection(asset) {
+    // Ensure fetchAPI is defined before calling
+    if (typeof fetchAPI !== 'function') {
+        logger.error("fetchAPI is not defined. Cannot send debug asset selection.");
+        return; // Exit if fetchAPI is missing
+    }
+    try {
+        // Use fetchAPI to handle the request and potential errors
+        await fetchAPI('/debug/set_selected_asset', {
+             method: 'POST',
+             // Body is already stringified by fetchAPI if needed, just pass the object
+             body: JSON.stringify({ asset: asset })
+        });
+        // Log success as a warning as it's a debug feature
+        logger.warn(`Sent debug request to set backend selected_asset to ${asset}`);
+    } catch (debugErr) {
+        // Log error, but don't block UI flow as it's non-critical
+        logger.error("Failed to send debug asset selection:", debugErr.message);
+    }
+}
+
 
 /** Handles asset dropdown change */
 async function handleAssetChange() {
