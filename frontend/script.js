@@ -2334,128 +2334,112 @@ async function fetchAndDisplayGreeksAnalysis(asset, portfolioGreeksData) {
 // Misc Helpers
 // ===============================================================
 function gatherStrategyLegsFromTable() {
-    const logger = window.logger || window.console;
-    logger.debug("Gathering strategy legs from 'strategyPositions' array...");
-    
-    if (!Array.isArray(strategyPositions)) {
-      logger.error("Cannot gather legs: strategyPositions is not an array or not defined.");
-      return [];
-    }
-    if (strategyPositions.length === 0) {
-        logger.warn("Cannot gather legs: strategyPositions array is empty.");
-        return [];
-    }
-    
-    const validLegs = []; // Array to store only valid legs
-    let invalidLegCount = 0;
-    
-    strategyPositions.forEach((pos, index) => {
-       let legIsValid = true; // Assume valid initially for this leg
-       let validationError = null; // Store first error for logging
-    
-       // Validate essential data from the stored position object
-       if (!pos || typeof pos !== 'object') {
-            validationError = "Position data is not an object.";
-            legIsValid = false;
-       } else if (!pos.option_type || (pos.option_type !== 'CE' && pos.option_type !== 'PE')) {
-            validationError = `Invalid option_type: ${pos.option_type}`;
-            legIsValid = false;
-       } else if (!pos.strike_price || isNaN(parseFloat(pos.strike_price)) || parseFloat(pos.strike_price) <= 0) {
-            validationError = `Invalid strike_price: ${pos.strike_price}`;
-            legIsValid = false;
-       } else if (!pos.expiry_date || !/^\d{4}-\d{2}-\d{2}$/.test(pos.expiry_date)) {
-           validationError = `Invalid expiry_date: ${pos.expiry_date}`;
-           legIsValid = false;
-       } else if (pos.lots === undefined || pos.lots === null || isNaN(parseInt(pos.lots)) || parseInt(pos.lots) === 0) {
-            validationError = `Invalid lots: ${pos.lots}`;
-            legIsValid = false;
-       } else if (pos.last_price === undefined || pos.last_price === null || isNaN(parseFloat(pos.last_price)) || parseFloat(pos.last_price) < 0) {
-            validationError = `Invalid last_price: ${pos.last_price}`;
-            legIsValid = false;
-       }
-       // IV and lot_size are optional for backend, but DTE needs recalculation
-    
-       // --- Recalculate DTE ---
-       const currentDTE = calculateDaysToExpiry(pos.expiry_date);
-       if (currentDTE === null && legIsValid) { // Check DTE only if leg was valid so far
-           validationError = `Could not calculate DTE for expiry ${pos.expiry_date}.`;
-           legIsValid = false;
-       }
-    
-       // --- Determine Backend Option Type ---
-        let backendOpType = '';
-        if (legIsValid) { // Check op type only if leg is valid
-            const upperOptType = pos.option_type.toUpperCase();
-            if (upperOptType === 'CE') { backendOpType = 'c'; }
-            else if (upperOptType === 'PE') { backendOpType = 'p'; }
-            else { validationError = `Invalid stored option_type: ${pos.option_type}`; legIsValid = false; } // Should not happen if addPosition is correct
-        }
-    
-        // --- Handle IV ---
-        let ivToSend = null;
-        if (legIsValid && pos.iv !== null && pos.iv !== undefined && pos.iv !== '') {
-            const parsedIV = parseFloat(pos.iv);
-             if (!isNaN(parsedIV)) { ivToSend = parsedIV; }
-             else { logger.warn(`gatherStrategyLegs: Invalid IV found for leg ${index} ('${pos.iv}'), sending null.`); }
-        }
-    
-       // --- If Leg is Valid, Add to Array ---
-       if (legIsValid) {
-           validLegs.push({
-                // Data needed by backend (match StrategyLegInput in Pydantic)
-                op_type: backendOpType,
-                strike: String(pos.strike_price),
-                tr_type: parseInt(pos.lots) >= 0 ? 'b' : 's',
-                op_pr: String(pos.last_price),
-                lot: String(Math.abs(parseInt(pos.lots))),
-                lot_size: pos.lot_size ? String(pos.lot_size) : null,
-                iv: ivToSend,
-                days_to_expiry: currentDTE,
-                expiry_date: pos.expiry_date,
-           });
-       } else {
-            // Log the first validation error found for the skipped leg
-            logger.error(`gatherStrategyLegs: Skipping invalid position data at index ${index}. Reason: ${validationError}. Data:`, pos);
-            invalidLegCount++;
-       }
-    }); // End forEach
-    
-    if (invalidLegCount > 0) {
-       alert(`Error: ${invalidLegCount} invalid leg(s) found in the strategy and were ignored. Please check console for details.`);
-    }
-    
-    logger.debug(`Gathered ${validLegs.length} valid strategy legs from strategyPositions state (ignored ${invalidLegCount}).`);
-    // Return ONLY the valid legs
-    return validLegs;
-}
+      const logger = window.logger || window.console;
+      logger.debug("--- [gatherStrategyLegs] START ---"); // Mark start
 
-/** Finds the strike closest to the current spot price */
-function findATMStrikeAsStringKey(strikeStringKeys = [], spotPrice) {
-    if (!Array.isArray(strikeStringKeys) || strikeStringKeys.length === 0 || typeof spotPrice !== 'number' || spotPrice <= 0) {
-         logger.warn("Cannot find ATM strike key: Invalid strike keys array or spot price.", { strikeStringKeys, spotPrice });
-         return null;
-    }
+      if (!Array.isArray(strategyPositions)) {
+          logger.error("[gatherStrategyLegs] Aborted: strategyPositions is not an array or not defined.");
+          return [];
+      }
+      if (strategyPositions.length === 0) {
+           logger.warn("[gatherStrategyLegs] Aborted: strategyPositions array is empty.");
+           return [];
+      }
 
-    let closestKey = null;
-    let minDiff = Infinity;
+      const validLegs = [];
+      let invalidLegCount = 0;
 
-    for (const key of strikeStringKeys) {
-        const numericStrike = Number(key);
-        if (!isNaN(numericStrike)) {
-            const diff = Math.abs(numericStrike - spotPrice);
-            if (diff < minDiff) {
-                minDiff = diff;
-                closestKey = key;
+      strategyPositions.forEach((pos, index) => {
+           logger.debug(`[gatherStrategyLegs] Processing index ${index}, raw data:`, JSON.parse(JSON.stringify(pos))); // <<< Log raw pos data
+
+           let legIsValid = true;
+           let validationError = null;
+
+           // --- DEBUG: Log each property value BEFORE validation ---
+           logger.debug(`[gatherStrategyLegs] Index ${index} - Checking option_type:`, pos?.option_type);
+           logger.debug(`[gatherStrategyLegs] Index ${index} - Checking strike_price:`, pos?.strike_price);
+           logger.debug(`[gatherStrategyLegs] Index ${index} - Checking expiry_date:`, pos?.expiry_date);
+           logger.debug(`[gatherStrategyLegs] Index ${index} - Checking lots:`, pos?.lots);
+           logger.debug(`[gatherStrategyLegs] Index ${index} - Checking last_price:`, pos?.last_price);
+           // --- End DEBUG logging ---
+
+           // Validate essential data from the stored position object
+           if (!pos || typeof pos !== 'object') {
+                validationError = "Position data is not an object.";
+                legIsValid = false;
+           } else if (!pos.option_type || (pos.option_type !== 'CE' && pos.option_type !== 'PE')) {
+                validationError = `Invalid option_type: ${pos.option_type}`;
+                legIsValid = false;
+           } else if (!pos.strike_price || isNaN(parseFloat(pos.strike_price)) || parseFloat(pos.strike_price) <= 0) {
+                validationError = `Invalid strike_price: ${pos.strike_price}`;
+                legIsValid = false;
+           } else if (!pos.expiry_date || !/^\d{4}-\d{2}-\d{2}$/.test(pos.expiry_date)) {
+               validationError = `Invalid expiry_date: ${pos.expiry_date}`;
+               legIsValid = false;
+           } else if (pos.lots === undefined || pos.lots === null || isNaN(parseInt(pos.lots)) || parseInt(pos.lots) === 0) {
+                validationError = `Invalid lots: ${pos.lots}`;
+                legIsValid = false;
+           } else if (pos.last_price === undefined || pos.last_price === null || isNaN(parseFloat(pos.last_price)) || parseFloat(pos.last_price) < 0) {
+                validationError = `Invalid last_price: ${pos.last_price}`;
+                legIsValid = false;
+           }
+
+           // --- Recalculate DTE ---
+           const currentDTE = calculateDaysToExpiry(pos?.expiry_date); // Add safe access
+           if (currentDTE === null && legIsValid) {
+               validationError = `Could not calculate DTE for expiry ${pos?.expiry_date}.`;
+               legIsValid = false;
+           }
+
+           // --- Determine Backend Option Type ---
+            let backendOpType = '';
+            if (legIsValid) {
+                // Use safe access again just in case
+                const upperOptType = pos?.option_type?.toUpperCase();
+                if (upperOptType === 'CE') { backendOpType = 'c'; }
+                else if (upperOptType === 'PE') { backendOpType = 'p'; }
+                else { validationError = `Invalid stored option_type: ${pos?.option_type}`; legIsValid = false; }
             }
-        } else {
-             logger.warn(`Skipping non-numeric strike key '${key}' during ATM calculation.`);
-        }
-    }
 
-    logger.debug(`Calculated ATM strike key: ${closestKey} for spot price: ${spotPrice}`);
-    return closestKey;
-}
+            // --- Handle IV ---
+            let ivToSend = null;
+            if (legIsValid && pos.iv !== null && pos.iv !== undefined && pos.iv !== '') {
+                const parsedIV = parseFloat(pos.iv);
+                 if (!isNaN(parsedIV)) { ivToSend = parsedIV; }
+                 else { logger.warn(`[gatherStrategyLegs] Invalid IV found for leg ${index} ('${pos.iv}'), sending null.`); }
+            }
 
+           // --- If Leg is Valid, Add to Array ---
+           if (legIsValid) {
+               validLegs.push({
+                    // Data needed by backend
+                    op_type: backendOpType,
+                    strike: String(pos.strike_price),
+                    tr_type: parseInt(pos.lots) >= 0 ? 'b' : 's',
+                    op_pr: String(pos.last_price),
+                    lot: String(Math.abs(parseInt(pos.lots))),
+                    lot_size: pos.lot_size ? String(pos.lot_size) : null,
+                    iv: ivToSend,
+                    days_to_expiry: currentDTE,
+                    expiry_date: pos.expiry_date,
+               });
+           } else {
+                // Log the first validation error found
+                logger.error(`[gatherStrategyLegs] Skipping invalid position data at index ${index}. Reason: ${validationError || 'Unknown validation failure'}. Data:`, JSON.parse(JSON.stringify(pos)));
+                invalidLegCount++;
+           }
+      }); // End forEach
+
+      if (invalidLegCount > 0) {
+         // Alert moved to fetchPayoffChart to avoid multiple alerts if called elsewhere
+         // alert(`Error: ${invalidLegCount} invalid leg(s) found...`);
+         logger.warn(`[gatherStrategyLegs] Found ${invalidLegCount} invalid legs.`);
+      }
+
+      logger.debug(`[gatherStrategyLegs] Returning ${validLegs.length} valid legs. (Ignored ${invalidLegCount})`);
+      logger.debug("--- [gatherStrategyLegs] END ---");
+      return validLegs; // Return ONLY the valid legs
+ }
 const numericATMStrike = Number(atmStrikeObjectKey);
 logger.debug(`Attempting to find ATM row with data-strike="${numericATMStrike}". Tbody has ${currentTbody.rows.length} rows.`);
 const atmRow = currentTbody.querySelector(`tr[data-strike="${numericATMStrike}"]`);
