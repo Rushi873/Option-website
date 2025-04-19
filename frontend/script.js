@@ -2449,8 +2449,10 @@ function findATMStrikeAsStringKey(strikeStringKeys = [], spotPrice) {
 }
 
 const numericATMStrike = Number(atmStrikeObjectKey);
-logger.debug(`Attempting to find ATM row with data-strike="${numericATMStrike}". Tbody has ${currentTbody.rows.length} rows.`); // Add log
+logger.debug(`Attempting to find ATM row with data-strike="${numericATMStrike}". Tbody has ${currentTbody.rows.length} rows.`);
 const atmRow = currentTbody.querySelector(`tr[data-strike="${numericATMStrike}"]`);
-if (atmRow) { // ... scroll ...
-} else { `ATM strike row for key (${atmStrikeObjectKey} / ${numericATMStrike}) not found for scrolling.`);
+if (atmRow) {
+  // Scroll logic here...
+} else {
+  logger.debug(`ATM strike row for key (${atmStrikeObjectKey} / ${numericATMStrike}) not found for scrolling.`);
 }
