@@ -7,7 +7,7 @@
     <!-- Load Markdown parser -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <!-- Load Plotly -->
-    <script src="https://cdn.plot.ly/plotly-3.0.1.min.js" charset="utf-8"></script> <!-- Using latest Plotly -->
+    <script src="https://cdn.plot.ly/plotly-3.0.1.min.js" charset="utf-8"></script><!-- Use plotly-latest -->
     <!-- Favicon -->
     <link rel="icon" type="image/png" sizes="32x32" href="favicon/better.png"> <!-- Update path if needed -->
     <!-- Defer script loading -->
@@ -25,25 +25,28 @@
         <h1>Option Strategy Builder</h1>
     </header>
 
-    <!-- Global Error Display Area -->
-    <div id="globalError" class="error-message hidden"></div> <!-- Start hidden -->
-    <div id="statusMessage" class="status-message hidden"></div>
-    <div id="warningMessage" class="status-message warning hidden" style="color: orange; border: 1px solid orange; background-color: #fff3cd; padding: 10px; margin-bottom: 15px; border-radius: 4px;">
-         <!-- Warning text added by JS -->
-    </div>
+    <!-- Global User Feedback Areas -->
+    <div id="globalError" class="error-message hidden"></div> <!-- For critical errors -->
+    <div id="statusMessage" class="status-message hidden"></div> <!-- For general status -->
+    <div id="warningMessage" class="status-message warning hidden"></div> <!-- For warnings -->
+
     <div class="container">
 
+        <!-- ========================== -->
         <!-- Left Column: Option Chain -->
+        <!-- ========================== -->
         <section class="option-chain-container card">
             <h2 id="spotPriceDisplay">Spot Price: -</h2>
             <div class="controls-row">
                 <label for="asset">Asset:</label>
                 <select id="asset" aria-label="Select Asset">
                     <!-- Options added by JS -->
+                    <option>Loading...</option>
                 </select>
                 <label for="expiry">Expiry:</label>
                 <select id="expiry" aria-label="Select Expiry Date">
                     <!-- Options added by JS -->
+                    <option value="">-- Select Asset --</option>
                 </select>
             </div>
             <div class="table-wrapper thin-scrollbar">
@@ -61,37 +64,40 @@
                     </thead>
                     <tbody>
                          <!-- Rows added by JS -->
-                         <tr><td colspan="7" class="loading-text">Loading assets...</td></tr>
+                         <tr><td colspan="7" class="placeholder-text">Select Asset & Expiry</td></tr>
                     </tbody>
                 </table>
             </div>
         </section>
 
-        <!-- Right Column: Strategy Builder & Results -->
+        <!-- ============================================== -->
+        <!-- Right Column: Strategy Builder & Results      -->
+        <!-- ============================================== -->
         <section class="strategy-container card">
 
             <!-- Strategy Builder Input Table -->
             <div class="section-header">
                 <h2>Strategy Builder</h2>
-                <button id="clearStrategyBtn" class="button button-danger button-small">Clear</button>
+                <button id="clearStrategyBtn" class="button button-danger button-small">Clear All</button>
             </div>
             <div class="table-wrapper thin-scrollbar">
                 <table id="strategyTable" class="data-table strategy-legs-table">
-                    <thead>
-                        <tr>
-                            <th>Type</th>
-                            <th>Strike</th>
-                            <th>Expiry</th>
-                            <th>Lots</th>
-                            <th>Action</th>
-                            <th>Premium</th>
-                            <th>Remove</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <!-- Rows added by JS -->
-                        <tr><td colspan="7">No positions added. Click option prices in the chain to add.</td></tr>
-                    </tbody>
+                     <thead>
+                         <tr>
+                             <!-- Headers should match JS updateStrategyTable function -->
+                             <th title="Toggle Buy/Sell">Action</th>
+                             <th>Lots</th>
+                             <th>Type</th>
+                             <th>Strike</th>
+                             <th title="Last Traded Price">Price</th>
+                             <th title="Implied Volatility">IV %</th>
+                             <th>Remove</th>
+                         </tr>
+                     </thead>
+                     <tbody>
+                         <!-- Rows added by JS -->
+                         <tr><td colspan="7" class="placeholder-text">Click option prices to add legs...</td></tr>
+                     </tbody>
                 </table>
             </div>
 
@@ -110,36 +116,42 @@
             <section id="strategyMetricsSection" class="results-section card">
                 <h3 class="section-subheader">Strategy Metrics</h3>
                 <div id="strategyMetrics">
+                     <!-- UL Container for the list -->
                      <ul class="metrics-list">
+                        <!-- List items with IDs containing the label and value span -->
                         <li id="maxProfit"><span class="metric-label">Max Profit:</span> <span class="metric-value">N/A</span></li>
                         <li id="maxLoss"><span class="metric-label">Max Loss:</span> <span class="metric-value">N/A</span></li>
                         <li id="breakeven"><span class="metric-label">Breakeven Points:</span> <span class="metric-value">N/A</span></li>
                         <li id="rewardToRisk"><span class="metric-label">Reward:Risk Ratio:</span> <span class="metric-value">N/A</span></li>
                         <li id="netPremium"><span class="metric-label">Net Premium:</span> <span class="metric-value">N/A</span></li>
                     </ul>
-                     <!-- Cost Breakdown -->
-                    <details id="costBreakdownContainer" class="results-details hidden" style="margin-top: 15px;">
+                     <!-- Cost Breakdown (Collapsible) -->
+                    <!--
+                    <details id="costBreakdownContainer" class="results-details hidden">
                         <summary class="breakdown-header">Option Premium Breakdown</summary>
-                         <ul id="costBreakdownList" class="breakdown-list" style="padding: 10px;">
-                            <!-- Items added by JS -->
+                         
+                         <ul id="costBreakdownList" class="breakdown-list">
+                         
                          </ul>
-                    </details>
+                    </details> -->
                 </div>
             </section>
 
             <!-- Estimated Charges Section -->
             <section id="taxInfoSection" class="results-section card card-accent-warning">
-                 <h3 class="section-subheader">Estimated Charges</h3>
+                 <h3 class="section-subheader">Taxes and Charges</h3>
+                 <!-- Container for tax table/details added by JS -->
                  <div id="taxInfo" >
-                    <!-- Tax table/details added by JS -->
-                    <p class="loading-text">Update strategy to calculate charges.</p>
+                    <p class="placeholder-text">Update strategy to calculate charges.</p>
                  </div>
             </section>
 
             <!-- Option Greeks Table Section -->
+            <!-- Outer container/section for Greeks -->
              <section id="greeksSection" class="results-section card">
                 <h3 class="section-subheader">Options Greeks</h3>
                  <div class="table-wrapper thin-scrollbar">
+                    <!-- The actual table for Greeks data -->
                     <table id="greeksTable" class="data-table greeks-table">
                         <caption class="table-caption">Portfolio Option Greeks</caption>
                          <thead>
@@ -147,39 +159,41 @@
                          </thead>
                          <tbody>
                             <!-- Rows added by JS -->
-                            <tr><td colspan="9" class="placeholder-text">Update strategy to calculate Greeks.</td></tr> <!-- Updated placeholder -->
+                            <tr><td colspan="9" class="placeholder-text">Update strategy to calculate Greeks.</td></tr>
                          </tbody>
                          <tfoot>
                              <!-- Footer added by JS -->
                          </tfoot>
                     </table>
-                </div>
+                 </div>
             </section>
 
             <!-- Portfolio Greeks Analysis Section -->
-            <section id="greeksAnalysisSection" class="results-section card hidden"> <!-- Start hidden -->
+            <!-- Outer container/section for analysis 
+            <section id="greeksAnalysisSection" class="results-section card hidden"> 
                 <h3 class="section-subheader">Portfolio Greeks Analysis</h3>
+                <!-- Container where analysis text will be rendered -->
+            <!--
                 <div id="greeksAnalysisResult" class="analysis-container">
-                    <!-- Greeks analysis content added by JS -->
-                    <p class="placeholder-text">Update strategy to load Greeks analysis...</p> <!-- Updated placeholder -->
+                    <p class="placeholder-text">Update strategy to load Greeks analysis...</p>
                 </div>
-            </section>
+            </section> -->
 
             <!-- Latest News Section -->
             <section id="newsSection" class="results-section card">
                 <h3 class="section-subheader">Latest News</h3>
+                <!-- Container for news items -->
                 <div id="newsResult" class="news-container">
-                    <!-- News content added by JS -->
-                    <p class="placeholder-text">Select an asset to load news...</p> <!-- Updated placeholder -->
+                    <p class="placeholder-text">Select an asset to load news...</p>
                 </div>
             </section>
 
             <!-- Stock Analysis Section -->
              <section id="analysisSection" class="results-section card">
-                <h2 class="section-subheader">Stock Analysis (Market Context)</h2> <!-- Clarified title -->
+                <h2 class="section-subheader">Stock Analysis (Market Context)</h2>
+                 <!-- Container for stock analysis -->
                 <div id="analysisResult" class="analysis-container">
-                     <!-- Stock analysis content added by JS -->
-                    <p class="placeholder-text">Select an asset to load analysis...</p> <!-- Updated placeholder -->
+                    <p class="placeholder-text">Select an asset to load analysis...</p>
                 </div>
             </section>
 

@@ -1,3 +1,4 @@
+#For live hosting
 import os
 import logging
 from dotenv import load_dotenv
@@ -155,10 +156,12 @@ print("--- backend/database.py imported/reloaded ---") # Changed message slightl
 #     logger.info("Initializing database connection pool...")
 #     load_dotenv() # Load .env file
 
-#     password = os.getenv("MYSQL_PASSWORD")
-#     if not password:
-#         logger.error("MYSQL_PASSWORD environment variable not set.")
-#         raise ValueError("MYSQL_PASSWORD environment variable is required but not set.")
+#     #password = os.getenv("MYSQL_PASSWORD")
+#     password = DB_CONFIG['password']
+    
+#     # if not password:
+#     #     logger.error("MYSQL_PASSWORD environment variable not set.")
+#     #     raise ValueError("MYSQL_PASSWORD environment variable is required but not set.")
 
 #     pool_config = DB_CONFIG.copy()
 #     pool_config["password"] = password

@@ -15,7 +15,7 @@
 
     /* --- Neutrals --- */
     --light-bg: #f8f9fa;
-    --page-bg: #fdfdff; /* Slightly off-white page background */
+    --page-bg: #fdfdff;
     --card-bg: #ffffff;
     --dark-bg: #343a40;
     --text-light: #f8f9fa;
@@ -32,200 +32,55 @@
     --card-radius: 6px;
 
     /* --- Effects --- */
-    --highlight-bg: rgba(255, 255, 0, 0.4); /* Yellowish highlight */
+    --highlight-bg: rgba(255, 255, 0, 0.4);
     --highlight-duration: 1.5s;
 }
 
 * { box-sizing: border-box; }
-
-html { scroll-behavior: smooth; } /* Optional smooth scroll */
-
+html { scroll-behavior: smooth; }
 body {
     font-family: 'Source Sans 3', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    background-color: var(--page-bg);
-    color: var(--text-dark);
-    margin: 0;
-    padding: 0;
-    line-height: 1.6;
-    font-size: 15px;
-    min-height: 100vh;
-    -webkit-font-smoothing: antialiased; /* Improve font rendering */
-    -moz-osx-font-smoothing: grayscale;
+    background-color: var(--page-bg); color: var(--text-dark);
+    margin: 0; padding: 0; line-height: 1.6; font-size: 15px; min-height: 100vh;
+    -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
 }
-
-/* ===============================================================
-   Header
-   =============================================================== */
-header {
-    background: var(--dark-bg);
-    color: var(--text-light);
-    text-align: center;
-    padding: 0.9rem 1.5rem;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    margin-bottom: 25px;
-    position: sticky; /* Keep header visible */
-    top: 0;
-    z-index: 1000;
-}
+/* =============================================================== Header =============================================================== */
+header { background: var(--dark-bg); color: var(--text-light); text-align: center; padding: 0.9rem 1.5rem; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 25px; position: sticky; top: 0; z-index: 1000; }
 header h1 { margin: 0; font-size: 1.65rem; font-weight: 600; letter-spacing: 0.5px; }
-
-/* ===============================================================
-   Layout & Containers
-   =============================================================== */
-.container {
-    display: flex;
-    flex-wrap: wrap; /* Allow wrapping on smaller screens */
-    gap: 30px;
-    padding: 0 30px 30px 30px;
-    max-width: 1900px; /* Max width for very large screens */
-    margin: 0 auto;
-    align-items: flex-start; /* Align items to the top */
-}
-
-.option-chain-container {
-    flex: 1 1 550px; /* Flex basis, allow shrinking/growing */
-    min-width: 480px;
-    position: sticky; /* Make option chain sticky */
-    top: 80px; /* Adjust based on header height + desired gap */
-    align-self: flex-start; /* Ensure it sticks to the top */
-    max-height: calc(100vh - 110px); /* Limit height to prevent overflow */
-    overflow-y: hidden; /* Hide main scrollbar, internal table scrolls */
-}
-
-.strategy-container {
-    flex: 1 1 600px; /* Flex basis, allow shrinking/growing */
-    min-width: 500px;
-    display: flex; /* Make strategy container a flex column */
-    flex-direction: column;
-    gap: 30px; /* Spacing between result sections within strategy container */
-}
-
-
-.card {
-    padding: 25px;
-    background: var(--card-bg);
-    box-shadow: var(--card-shadow);
-    border-radius: var(--card-radius);
-    border: 1px solid var(--border-color);
-    display: flex; /* Make cards flex columns for easier internal spacing */
-    flex-direction: column;
-    gap: 20px; /* Inner spacing for card content */
-}
-
-/* Apply scrolling within the option chain card content */
-.option-chain-container > .table-wrapper {
-    max-height: calc(100vh - 250px); /* Adjust based on card padding, header, controls */
-    overflow-y: auto;
-}
-
-/* Section Headers */
-.section-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 5px; /* Reduced margin */
-    padding-bottom: 12px;
-    border-bottom: 1px solid var(--border-color);
-}
+/* =============================================================== Layout & Containers =============================================================== */
+.container { display: flex; flex-wrap: wrap; gap: 30px; padding: 0 30px 30px 30px; max-width: 1900px; margin: 0 auto; align-items: flex-start; }
+.option-chain-container { flex: 1 1 550px; min-width: 480px; position: sticky; top: 80px; align-self: flex-start; max-height: calc(100vh - 110px); overflow-y: hidden; }
+.strategy-container { flex: 1 1 600px; min-width: 500px; display: flex; flex-direction: column; gap: 30px; }
+.card { padding: 25px; background: var(--card-bg); box-shadow: var(--card-shadow); border-radius: var(--card-radius); border: 1px solid var(--border-color); display: flex; flex-direction: column; gap: 20px; }
+.option-chain-container > .table-wrapper { max-height: calc(100vh - 250px); overflow-y: auto; }
+.section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; padding-bottom: 12px; border-bottom: 1px solid var(--border-color); }
 h2, h3, .section-subheader { color: var(--text-dark); margin: 0; font-weight: 600; }
 h2 { font-size: 1.35rem; }
 h3, .section-subheader { font-size: 1.15rem; color: #495057; }
-/* Slightly reduced margin/padding for subheaders within result sections */
-.results-section > h3.section-subheader {
-    padding-bottom: 8px;
-    margin-bottom: 15px;
-    border-bottom: 1px solid #eee;
-}
-
-/* Global Error/Status Bar */
-#globalError, #statusMessage, #warningMessage {
-    border-radius: 4px;
-    margin: -15px 30px 20px 30px; /* Sit below header */
-    padding: 10px 20px;
-    font-weight: 500;
-}
-#globalError.hidden, #statusMessage.hidden, #warningMessage.hidden {
-    display: none;
-}
-/* Specific styles - JS will add text and remove 'hidden' class */
-#globalError {
-    background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb;
-}
-#statusMessage {
-    background-color: #e2e3e5; color: #383d41; border: 1px solid #d6d8db;
-}
-#statusMessage.success { /* Optional: Style for success status */
-     background-color: #d4edda; color: #155724; border-color: #c3e6cb;
-}
-#warningMessage {
-    color: orange; border: 1px solid orange; background-color: #fff3cd;
-}
-
-
-/* ===============================================================
-   Controls
-   =============================================================== */
+.results-section > h3.section-subheader { padding-bottom: 8px; margin-bottom: 15px; border-bottom: 1px solid #eee; }
+#globalError, #statusMessage, #warningMessage { border-radius: 4px; margin: -15px 30px 20px 30px; padding: 10px 20px; font-weight: 500; }
+#globalError.hidden, #statusMessage.hidden, #warningMessage.hidden { display: none; }
+#globalError { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+#statusMessage { background-color: #e2e3e5; color: #383d41; border: 1px solid #d6d8db; }
+#statusMessage.success { background-color: #d4edda; color: #155724; border-color: #c3e6cb; }
+#warningMessage { color: orange; border: 1px solid orange; background-color: #fff3cd; }
+/* =============================================================== Controls =============================================================== */
 .controls-row { display: flex; align-items: center; gap: 15px; flex-wrap: wrap; }
 label { font-weight: 500; font-size: 0.9rem; color: var(--text-secondary); margin-right: 4px; }
 select, input[type="number"], input[type="text"] { padding: 8px 12px; border: 1px solid #ced4da; border-radius: 4px; font-size: 0.9rem; background-color: #fff; transition: border-color .15s ease-in-out, box-shadow .15s ease-in-out; }
 select:focus, input:focus { border-color: var(--primary-color); outline: 0; box-shadow: 0 0 0 0.15rem rgba(74, 124, 89, 0.25); }
 select { min-width: 150px; cursor: pointer; }
-input[type="number"] { width: 75px; } /* General number input */
-input.number-input-small { width: 70px; text-align: right; padding: 6px; font-size: 0.9rem; } /* Specific class for lots */
-
-/* ===============================================================
-   Tables
-   =============================================================== */
-.table-wrapper { width: 100%; overflow-x: auto; border: 1px solid var(--border-color); border-radius: var(--card-radius); background-color: #fff; }
-.data-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; table-layout: fixed; /* Prevent columns resizing wildly */ }
-.data-table th, .data-table td { padding: 11px 14px; text-align: center; border-bottom: 1px solid var(--border-color); white-space: nowrap; vertical-align: middle; overflow: hidden; text-overflow: ellipsis; /* Prevent text overflow */ }
-.data-table th { background-color: var(--table-header-bg); color: var(--text-dark); font-weight: 600; border-bottom-width: 2px; border-color: #cdd4db; position: sticky; top: 0; z-index: 1; text-align: center !important; }
+input[type="number"] { width: 75px; }
+input.number-input-small { width: 70px; text-align: right; padding: 6px; font-size: 0.9rem; }
+/* =============================================================== Tables =============================================================== */
+.table-wrapper { width: 100%; overflow-x: auto; border: 1px solid var(--border-color); border-radius: var(--card-radius); background-color: #fff; display: block; }
+.data-table { width: 100%; min-width: max-content; border-collapse: collapse; font-size: 0.9rem; table-layout: auto; }
+.data-table th, .data-table td { padding: 11px 14px; text-align: center; border-bottom: 1px solid var(--border-color); white-space: nowrap; vertical-align: middle; overflow: visible; text-overflow: clip; }
+.data-table th { background-color: var(--table-header-bg); color: var(--text-dark); font-weight: 600; border-bottom-width: 2px; border-color: #cdd4db; position: sticky; top: 0; z-index: 1; }
 .data-table tbody tr:last-child td { border-bottom: none; }
 .data-table tbody tr:hover { background-color: var(--table-hover-bg); }
-
-/* Explicit Column Widths (Adjust as needed) */
-#optionChainTable th:nth-child(1), #optionChainTable td:nth-child(1) { width: 12%; } /* Call LTP */
-#optionChainTable th:nth-child(2), #optionChainTable td:nth-child(2) { width: 12%; } /* Call OI */
-#optionChainTable th:nth-child(3), #optionChainTable td:nth-child(3) { width: 11%; } /* Call IV */
-#optionChainTable th:nth-child(4), #optionChainTable td:nth-child(4) { width: 14%; font-weight: 600; } /* Strike */
-#optionChainTable th:nth-child(5), #optionChainTable td:nth-child(5) { width: 11%; } /* Put IV */
-#optionChainTable th:nth-child(6), #optionChainTable td:nth-child(6) { width: 12%; } /* Put OI */
-#optionChainTable th:nth-child(7), #optionChainTable td:nth-child(7) { width: 12%; } /* Put LTP */
-
-
-#strategyTable th:nth-child(1), #strategyTable td:nth-child(1) { width: 10%; } /* Type */
-#strategyTable th:nth-child(2), #strategyTable td:nth-child(2) { width: 15%; } /* Strike */
-#strategyTable th:nth-child(3), #strategyTable td:nth-child(3) { width: 20%; } /* Expiry */
-#strategyTable th:nth-child(4), #strategyTable td:nth-child(4) { width: 12%; } /* Lots */
-#strategyTable th:nth-child(5), #strategyTable td:nth-child(5) { width: 13%; } /* Action */
-#strategyTable th:nth-child(6), #strategyTable td:nth-child(6) { width: 15%; } /* Premium */
-#strategyTable th:nth-child(7), #strategyTable td:nth-child(7) { width: 10%; } /* Remove */
-
-.greeks-table th:nth-child(1), .greeks-table td:nth-child(1) { width: 10%; } /* Action */
-.greeks-table th:nth-child(2), .greeks-table td:nth-child(2) { width: 8%; } /* Lots */
-.greeks-table th:nth-child(3), .greeks-table td:nth-child(3) { width: 8%; } /* Type */
-.greeks-table th:nth-child(4), .greeks-table td:nth-child(4) { width: 14%; } /* Strike */
-.greeks-table th:nth-child(n+5), .greeks-table td:nth-child(n+5) { width: 12%; } /* Greeks */
-
-
-/* Right-align numeric data (Consider using a class like .text-right added by JS instead) */
-.data-table td.oi, /* Specific class for OI */
-#optionChainTable td:nth-child(1), /* Call LTP */
-#optionChainTable td:nth-child(3), /* Call IV */
-#optionChainTable td:nth-child(5), /* Put IV */
-#optionChainTable td:nth-child(7), /* Put LTP */
-#strategyTable td:nth-child(2), /* Strike */
-#strategyTable td:nth-child(4), /* Lots Input Container */
-#strategyTable td:nth-child(6), /* Premium */
-.charges-table td:not(.note), /* Tax table data cells */
-.greeks-table td:nth-child(n+4) /* Strike + Greeks */
- { text-align: right; font-feature-settings: "tnum"; /* Tabular nums */ }
-
-/* Align totals in footers */
-.charges-table tfoot td, .greeks-table tfoot td { text-align: right; }
-.charges-table tfoot td:first-child, .greeks-table tfoot td:first-child { text-align: right; } /* Align first cell too */
-
-/* Option Chain Specific */
+.data-table td.oi, #optionChainTable td:nth-child(1), #optionChainTable td:nth-child(3), #optionChainTable td:nth-child(5), #optionChainTable td:nth-child(7), #strategyTable td:nth-child(2), #strategyTable td:nth-child(4), #strategyTable td:nth-child(6), .charges-table td:not(:first-child):not(:nth-child(2)):not(.note), .greeks-table td:nth-child(n+4) { text-align: right; font-feature-settings: "tnum"; }
+#optionChainTable { table-layout: fixed; }
 .option-chain td { background-color: transparent; transition: background-color 0.3s ease-out; }
 .option-chain td.call { background-color: rgba(95, 173, 86, 0.08); }
 .option-chain td.put { background-color: rgba(200, 85, 61, 0.08); }
@@ -233,14 +88,8 @@ input.number-input-small { width: 70px; text-align: right; padding: 6px; font-si
 .option-chain td.oi { color: var(--text-muted); font-size: 0.82rem; }
 .option-chain .atm-strike td { background-color: #fefae0 !important; font-weight: bold !important; }
 .option-chain .atm-strike { border-top: 1px solid #faedcd; border-bottom: 1px solid #faedcd; }
-.option-chain .highlight-atm td { /* Temporary highlight for scrolled ATM row */
-    box-shadow: inset 0 0 0 2px var(--primary-color);
-    transition: box-shadow 0.3s ease-in-out;
-}
-
-
-/* Strategy Table Specific */
-#strategyTable td:nth-child(7) { padding: 5px; } /* Remove button cell */
+.option-chain .highlight-atm td { box-shadow: inset 0 0 0 2px var(--primary-color); transition: box-shadow 0.3s ease-in-out; }
+#strategyTable td:nth-child(7) { padding: 5px; }
 button.toggle-buy-sell { padding: 4px 8px; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; font-weight: bold; min-width: 55px; font-size: 0.78rem; transition: background-color 0.2s, border-color 0.2s, color 0.2s; }
 button.toggle-buy-sell.button-buy { background-color: rgba(95, 173, 86, 0.15); color: var(--success-color); border-color: rgba(95, 173, 86, 0.3); }
 button.toggle-buy-sell.button-buy:hover { background-color: rgba(95, 173, 86, 0.3); }
@@ -250,23 +99,25 @@ button.toggle-buy-sell.button-sell:hover { background-color: rgba(200, 85, 61, 0
 #strategyTable button.remove-btn:hover { color: var(--danger-hover); background-color: rgba(200, 85, 61, 0.05); }
 #strategyTable .long-position { border-left: 3px solid var(--success-color); }
 #strategyTable .short-position { border-left: 3px solid var(--danger-color); }
-
-/* Results Tables */
-.results-table tfoot tr, .totals-row { font-weight: 600; background-color: var(--table-total-bg); border-top: 2px solid #cdd4db; }
-/* Tax Table Specific */
-.charges-table caption { font-size: 0.9rem; color: var(--text-muted); padding-bottom: 10px; text-align: left; font-style: italic; }
-.charges-table td.note { max-width: 120px; font-size: 0.8rem; color: var(--text-muted); cursor: help; text-align: left !important; overflow: hidden; text-overflow: ellipsis; white-space: normal; line-height: 1.3; }
-/* Greeks Table Specific */
-.greeks-table caption { font-size: 0.9rem; color: var(--text-muted); padding-bottom: 10px; caption-side: top; text-align: left; font-style: italic; }
+.results-table tfoot tr, .totals-row { font-weight: 600; background-color: var(--table-total-bg); border-top: 2px solid #cdd4db; position: sticky; bottom: 0; z-index: 1; }
+.charges-table th, .charges-table td { white-space: nowrap; overflow: visible; text-overflow: clip; padding: 9px 12px; text-align: center; vertical-align: middle; border-bottom: 1px solid var(--border-color); }
+.charges-table tbody tr:last-child td { border-bottom: none; }
+.charges-table td:not(:first-child):not(:nth-child(2)):not(.note), .charges-table th:nth-child(n+3):not(:last-child) { text-align: right; }
+.charges-table th:first-child, .charges-table td:first-child, .charges-table th:nth-child(2), .charges-table td:nth-child(2) { text-align: left; }
+.charges-table td.note { white-space: normal; text-align: left; min-width: 150px; max-width: 300px; cursor: help; font-size: 0.8rem; color: var(--text-muted); line-height: 1.3; vertical-align: top; }
+.charges-table th:last-child { text-align: left; min-width: 150px; }
+.charges-table tfoot td { text-align: right; }
+.charges-table tfoot td[colspan="5"] { text-align: right; padding-right: 20px; }
+.charges-table tfoot td:last-child { font-weight: bold; }
+.greeks-table caption { /* Style caption */ }
 .greeks-table th[title], .greeks-table td[title] { cursor: help; }
-.greeks-table .totals-row td { background-color: var(--table-total-bg); font-weight: bold; }
-.greeks-table .greeks-skipped td { opacity: 0.6; font-style: italic; } /* Style skipped rows */
-
-
-/* ===============================================================
-   Buttons
-   =============================================================== */
-button { padding: 8px 16px; font-size: 0.92rem; border: 1px solid transparent; border-radius: var(--card-radius); cursor: pointer; transition: all 0.2s ease; font-weight: 500; line-height: 1.5; background-color: #6c757d; color: white; } /* Default button style */
+.greeks-table .totals-row td { font-weight: bold; }
+.greeks-table .greeks-skipped td { opacity: 0.6; font-style: italic; }
+.greeks-table td:nth-child(n+4) { text-align: right; }
+.greeks-table tfoot td { text-align: right; }
+.greeks-table tfoot td:first-child { text-align: right; }
+/* =============================================================== Buttons =============================================================== */
+button { padding: 8px 16px; font-size: 0.92rem; border: 1px solid transparent; border-radius: var(--card-radius); cursor: pointer; transition: all 0.2s ease; font-weight: 500; line-height: 1.5; background-color: #6c757d; color: white; }
 button:disabled { opacity: 0.65; cursor: not-allowed; }
 .button-primary { background-color: var(--primary-color); border-color: var(--primary-color); }
 .button-primary:hover:not(:disabled) { background-color: var(--primary-hover); border-color: var(--primary-hover); transform: translateY(-1px); box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
@@ -275,150 +126,44 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
 .button-wide { width: 100%; max-width: 240px; padding: 11px 0; font-size: 1.05rem; font-weight: 600; }
 .button-container { display: flex; justify-content: center; margin-top: 20px; }
 .button-small { font-size: 0.8rem; padding: 5px 10px; font-weight: 500; }
-
-/* ===============================================================
-   Payoff Chart & Results Sections
-   =============================================================== */
-#payoffChartContainer {
-  max-width: 1200px; /* Limit chart width */
-  width: 100%;
-  height: 450px;
-  margin: 1.5em auto; /* Center chart */
-  padding: 0;
-  border: 1px solid var(--border-color);
-  box-sizing: border-box;
-  position: relative; /* Needed for loading/error text */
-  overflow: hidden;
-  background-color: #fff; /* Ensure background */
-  border-radius: var(--card-radius); /* Match card radius */
-}
-
-/* Make Plotly completely fill the container */
-#payoffChartContainer .plotly,
-#payoffChartContainer .js-plotly-plot,
-#payoffChartContainer .plot-container {
-  width: 100% !important;
-  height: 100% !important;
-}
-#payoffChartContainer .main-svg {
-  width: 100% !important;
-  height: 100% !important;
-}
-
-/* Result Sections (Metrics, Tax, Greeks, Analysis wrappers) */
-.results-section { background-color: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--card-radius); padding: 20px 25px; box-shadow: none; } /* Removed margin-bottom, handled by container gap */
-
-/* Tax section accent */
-#taxInfoSection { /* Use the section ID */
-    background-color: var(--accent-warning-bg);
-    border-left: 4px solid var(--warning-color);
-}
-#taxInfoSection h3.section-subheader { /* Style header within tax section */
-    color: var(--accent-warning-text);
-    border-bottom-color: var(--accent-warning-border);
-}
-
-/* Metrics Card */
+/* =============================================================== Payoff Chart & Results Sections =============================================================== */
+#payoffChartContainer { max-width: 1200px; width: 100%; height: 450px; margin: 1.5em auto; padding: 0; border: 1px solid var(--border-color); box-sizing: border-box; position: relative; overflow: hidden; background-color: #fff; border-radius: var(--card-radius); }
+#payoffChartContainer .plotly, #payoffChartContainer .js-plotly-plot, #payoffChartContainer .plot-container { width: 100% !important; height: 100% !important; }
+#payoffChartContainer .main-svg { width: 100% !important; height: 100% !important; }
+.results-section { background-color: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--card-radius); padding: 20px 25px; box-shadow: none; }
+#taxInfoSection { background-color: var(--accent-warning-bg); border-left: 4px solid var(--warning-color); }
+#taxInfoSection h3.section-subheader { color: var(--accent-warning-text); border-bottom-color: var(--accent-warning-border); }
 #strategyMetricsSection { border-top: 3px solid var(--primary-color); background-color: #f8f9fa; }
 .metrics-list { padding-left: 0; list-style-type: none; margin: 0; }
 .metrics-list li { padding: 10px 5px; font-size: 0.95rem; color: #333; display: flex; justify-content: space-between; border-bottom: 1px solid #eee; align-items: center; }
 .metrics-list li:last-child { border-bottom: none; }
 .metrics-list .metric-label { color: var(--text-secondary); margin-right: 15px; flex-shrink: 0; }
-.metrics-list .metric-value { font-weight: 600; color: var(--text-dark); text-align: right; font-family: monospace, monospace; /* Monospace for numbers */ }
-
-/* Breakdown List (Inside Details) */
-.breakdown-header { /* This is the <summary> for breakdown */
-    font-size: 0.95rem;
-    font-weight: 600;
-    color: var(--text-secondary);
-    cursor: pointer;
-    display: block; /* Allow full width click */
-    padding: 10px 0; /* Add some padding */
-}
-.breakdown-list { list-style: none; padding-left: 0; margin: 10px 0 0 0; /* Space above list */ font-size: 0.9rem; color: #444; }
-.breakdown-list li { padding: 3px 0 3px 15px; position: relative; }
-.breakdown-list li::before { content: '–'; position: absolute; left: 0; color: var(--primary-color); font-weight: bold; }
-
-/* Collapsible Sections Styling (<details>) */
+.metrics-list .metric-value { font-weight: 600; color: var(--text-dark); text-align: right; font-family: monospace, monospace; }
+/* --- Cost Breakdown Styles REMOVED --- */
+/* .breakdown-header { ... } */
+/* .breakdown-list { ... } */
+/* .breakdown-list li { ... } */
+/* .breakdown-list li::before { ... } */
+/* #costBreakdownContainer summary { ... } */
+/* #costBreakdownContainer[open] summary { ... } */
+/* ------------------------------------ */
 .results-details { border: 1px solid var(--border-color); border-radius: var(--card-radius); margin-top: 15px; margin-bottom: 0; background-color: #fff; overflow: hidden; }
 .results-details summary { display: block; padding: 10px 15px; background-color: var(--table-header-bg); cursor: pointer; font-weight: 600; outline: none; border-bottom: 1px solid transparent; transition: background-color 0.2s ease, border-color 0.2s ease; position: relative; }
 .results-details[open] summary { border-bottom: 1px solid var(--border-color); }
 .results-details summary:hover { background-color: #e9ecef; }
 .results-details > *:not(summary) { padding: 15px; }
-/* Arrow for details/summary */
 .results-details summary::marker { content: ''; }
 .results-details summary::before { content: '►'; display: inline-block; margin-right: 8px; font-size: 0.8em; transition: transform 0.2s ease-in-out; }
 .results-details[open] summary::before { transform: rotate(90deg); }
-
-/* Specific Summary Styles */
 #taxInfoSection .results-details summary { color: var(--accent-warning-text); }
-#costBreakdownContainer summary { /* Style for cost breakdown */
-    font-size: 0.95rem;
-    color: var(--text-secondary);
-    padding: 10px 0;
-    border-bottom: 1px dashed #ddd; /* Simple separator */
-    margin-bottom: 10px;
-}
-#costBreakdownContainer[open] summary {
-    border-bottom-style: solid; /* Solid line when open */
-}
-
-/* ===============================================================
-   Analysis Sections (Stock & Greeks)
-   =============================================================== */
-#analysisSection, #greeksAnalysisSection {
-    background-color: #f8f9fa; /* Light background for contrast */
-    padding: 20px 25px;
-}
-
-/* Common container for markdown content */
-.analysis-container {
-    background-color: transparent;
-    border: none;
-    padding: 0; /* Padding is on parent */
-    margin-top: 0;
-    font-size: 0.95rem;
-    line-height: 1.7;
-    color: #333;
-    min-height: 100px; /* Ensure visibility */
-}
-/* Markdown Element Styling */
-.analysis-container h1, .analysis-container h2, .analysis-container h3, .analysis-container h4 { margin-top: 1.2em; margin-bottom: 0.6em; font-weight: 600; line-height: 1.3; color: #222; padding-bottom: 0.2em; border-bottom: 1px solid #eee; }
-.analysis-container h1 { font-size: 1.4rem; } .analysis-container h2 { font-size: 1.3rem; } .analysis-container h3 { font-size: 1.15rem; } .analysis-container h4 { font-size: 1.05rem; }
-.analysis-container p { margin-bottom: 1em; }
-.analysis-container ul, .analysis-container ol { margin-left: 0; padding-left: 25px; margin-bottom: 1em; }
-.analysis-container li { margin-bottom: 0.5em; }
-.analysis-container strong, .analysis-container b { font-weight: 600; }
-.analysis-container a { color: var(--primary-color); text-decoration: none; } .analysis-container a:hover { text-decoration: underline; }
-.analysis-container code { background-color: #e9ecef; padding: 0.2em 0.4em; margin: 0 2px; font-size: 85%; border-radius: 3px; font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; word-break: break-word; }
-.analysis-container pre { background-color: #e9ecef; padding: 15px; border-radius: 5px; overflow-x: auto; margin-bottom: 1em; } .analysis-container pre code { background-color: transparent; padding: 0; margin: 0; font-size: inherit; border-radius: 0; }
-.analysis-container blockquote { margin-left: 0; padding-left: 15px; border-left: 4px solid #ccc; color: #666; font-style: italic; margin-bottom: 1em; }
-/* Placeholder/Loading/Error inside analysis containers */
-.analysis-container .loading-text,
-.analysis-container .placeholder-text {
-    text-align: center; padding: 30px 15px; color: var(--text-muted); font-style: italic;
-}
-/* Specific error style for analysis containers */
-.analysis-container > p.error-message { /* Target p added by JS */
-     padding: 20px; text-align: center; background-color: rgba(200, 85, 61, 0.05);
-     border: 1px dashed var(--danger-color); border-radius: 4px; color: var(--danger-color);
-     font-weight: 500; font-style: normal; /* Override italic */
-}
-
-
-/* ===============================================================
-   News Section
-   =============================================================== */
-#newsSection {
-    background-color: #ffffff; /* Standard card background */
-}
-
-.news-container {
-    max-height: 400px; /* Limit height */
-    overflow-y: auto;
-    padding-right: 10px;
-    min-height: 100px;
-}
+/* =============================================================== Analysis Sections =============================================================== */
+#analysisSection, #greeksAnalysisSection { background-color: #f8f9fa; padding: 20px 25px; }
+.analysis-container { background-color: transparent; border: none; padding: 0; margin-top: 0; font-size: 0.95rem; line-height: 1.7; color: #333; min-height: 100px; }
+/* ... (Rest of analysis container styles) ... */
+.analysis-container h1, .analysis-container h2, .analysis-container h3, .analysis-container h4 { margin-top: 1.2em; margin-bottom: 0.6em; font-weight: 600; line-height: 1.3; color: #222; padding-bottom: 0.2em; border-bottom: 1px solid #eee; } .analysis-container h1 { font-size: 1.4rem; } .analysis-container h2 { font-size: 1.3rem; } .analysis-container h3 { font-size: 1.15rem; } .analysis-container h4 { font-size: 1.05rem; } .analysis-container p { margin-bottom: 1em; } .analysis-container ul, .analysis-container ol { margin-left: 0; padding-left: 25px; margin-bottom: 1em; } .analysis-container li { margin-bottom: 0.5em; } .analysis-container strong, .analysis-container b { font-weight: 600; } .analysis-container a { color: var(--primary-color); text-decoration: none; } .analysis-container a:hover { text-decoration: underline; } .analysis-container code { background-color: #e9ecef; padding: 0.2em 0.4em; margin: 0 2px; font-size: 85%; border-radius: 3px; font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; word-break: break-word; } .analysis-container pre { background-color: #e9ecef; padding: 15px; border-radius: 5px; overflow-x: auto; margin-bottom: 1em; } .analysis-container pre code { background-color: transparent; padding: 0; margin: 0; font-size: inherit; border-radius: 0; } .analysis-container blockquote { margin-left: 0; padding-left: 15px; border-left: 4px solid #ccc; color: #666; font-style: italic; margin-bottom: 1em; } .analysis-container .loading-text, .analysis-container .placeholder-text { text-align: center; padding: 30px 15px; color: var(--text-muted); font-style: italic; } .analysis-container > p.error-message { padding: 20px; text-align: center; background-color: rgba(200, 85, 61, 0.05); border: 1px dashed var(--danger-color); border-radius: 4px; color: var(--danger-color); font-weight: 500; font-style: normal; }
+/* =============================================================== News Section =============================================================== */
+#newsSection { background-color: #ffffff; }
+.news-container { max-height: 400px; overflow-y: auto; padding-right: 10px; min-height: 100px; }
 .news-list { list-style: none; padding-left: 0; margin: 0; }
 .news-item { padding: 12px 0; border-bottom: 1px dashed var(--border-color); }
 .news-item:last-child { border-bottom: none; }
@@ -426,175 +171,39 @@ button:disabled { opacity: 0.65; cursor: not-allowed; }
 .news-headline a { color: var(--primary-hover); text-decoration: none; font-size: 1.05rem; }
 .news-headline a:hover { text-decoration: underline; color: var(--primary-color); }
 .news-summary { font-size: 0.9rem; color: var(--text-secondary); line-height: 1.5; margin: 0; }
-/* Placeholder/Loading/Error inside news container */
-.news-container .loading-text,
-.news-container .placeholder-text {
-    text-align: center; padding: 30px 15px; color: var(--text-muted); font-style: italic;
-}
-.news-container > p.error-message { /* Target p added by JS */
-    padding: 20px; text-align: center; color: var(--danger-color); font-weight: 500; font-style: normal;
-}
-
-
-/* ===============================================================
-   Scrollbar (Optional Thin Scrollbar)
-   =============================================================== */
+.news-container .loading-text, .news-container .placeholder-text { text-align: center; padding: 30px 15px; color: var(--text-muted); font-style: italic; }
+.news-container > p.error-message { padding: 20px; text-align: center; color: var(--danger-color); font-weight: 500; font-style: normal; }
+/* =============================================================== Scrollbar =============================================================== */
 .thin-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
 .thin-scrollbar::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 3px; }
 .thin-scrollbar::-webkit-scrollbar-thumb { background: #c1c1c1; border-radius: 3px; }
 .thin-scrollbar::-webkit-scrollbar-thumb:hover { background: #a8a8a8; }
-
-/* Apply to news container too */
 .news-container::-webkit-scrollbar { width: 6px; }
 .news-container::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 3px; }
 .news-container::-webkit-scrollbar-thumb { background: #c1c1c1; border-radius: 3px; }
 .news-container::-webkit-scrollbar-thumb:hover { background: #a8a8a8; }
-
-/* ===============================================================
-   Utility & State Classes (Managed by JS via setElementState)
-   =============================================================== */
-/* Hidden State */
-.hidden { display: none; } /* Removed !important */
-
-/* Loading State Placeholder Text*/
-.loading-text {
-    color: var(--text-muted);
-    font-style: italic;
-    text-align: center;
-    width: 100%;
-    padding: 25px;
-}
-/* Apply loading style to specific elements via JS using .loading class */
-.loading select,
-.loading input { /* Style parent container when loading */
-    opacity: 0.7;
-    cursor: wait;
-}
-.loading select:disabled,
-.loading input:disabled { /* Style disabled elements during load */
-    background-color: #e9ecef;
-}
-
-/* Style containers during loading */
-.loading > *:not(.loading-text):not(.section-subheader):not(.section-header):not(caption) {
-     /* Let the JS handle replacing content with loading text */
-     /* Optionally add opacity: opacity: 0.5; */
-}
-/* Ensure loading text shows correctly in table bodies */
-tbody.loading tr td.loading-text { /* Target TD inside loading tbody */
-    display: table-cell; /* Ensure it displays correctly */
-}
-
-/* Error State using .error class */
-.error { /* Applied to the container element by JS */
-    border-color: var(--danger-color) !important; /* Highlight border for containers, keep !important */
-}
-.error select,
-.error input { /* Style inputs inside error container */
-     border-color: var(--danger-color);
-     background-color: #fdeeee;
-}
-/* Error message styling - applied to the text content by JS */
+/* Optional: Scrollbar for charges table wrapper */
+.charges-table-wrapper::-webkit-scrollbar { height: 8px; background-color: #f1f1f1; }
+.charges-table-wrapper::-webkit-scrollbar-thumb { background: #ccc; border-radius: 4px; }
+.charges-table-wrapper::-webkit-scrollbar-thumb:hover { background: #a8a8a8; }
+/* =============================================================== Utility & State Classes =============================================================== */
+.hidden { display: none; }
+.loading-text { color: var(--text-muted); font-style: italic; text-align: center; width: 100%; padding: 25px; }
+.loading select, .loading input { opacity: 0.7; cursor: wait; }
+.loading select:disabled, .loading input:disabled { background-color: #e9ecef; }
+.loading > *:not(.loading-text):not(.section-subheader):not(.section-header):not(caption) { }
+tbody.loading tr td.loading-text { display: table-cell; }
+.error { border-color: var(--danger-color) !important; }
+.error select, .error input { border-color: var(--danger-color); background-color: #fdeeee; }
 .error-message { color: var(--danger-color); font-weight: 500; }
-/* Ensure error message shows correctly in table cells */
-td.error-message {
-    background-color: rgba(200, 85, 61, 0.08);
-    text-align: center !important; /* Override default alignment */
-    padding: 15px;
-    color: var(--danger-color);
-    font-weight: 500;
-    white-space: normal; /* Allow error message to wrap */
-}
-
-
-/* Value Change Highlight */
-#spotPriceDisplay.value-changed,
-#optionChainTable td.value-changed {
-    animation: value-flash var(--highlight-duration) ease-out forwards; /* Use forwards to hold end state if needed, or remove */
-    background-color: transparent; /* Start transparent */
-}
-@keyframes value-flash {
-    0% { background-color: var(--highlight-bg); }
-    70% { background-color: var(--highlight-bg); } /* Hold longer */
-    100% { background-color: transparent; } /* Fade back to original (set by cell class) */
-}
-
-/* Placeholder Text */
-.placeholder-text {
-    text-align: center;
-    color: var(--text-muted); /* Use variable */
-    padding: 40px 20px;
-    border: 1px dashed #ccc;
-    margin: 10px 0;
-    width: 100%;
-    font-style: italic;
-    border-radius: var(--card-radius);
-    background-color: #fdfdfd; /* Slightly different background */
-}
-/* Remove placeholder border when inside specific containers */
-.analysis-container .placeholder-text,
-.news-container .placeholder-text,
-#payoffChartContainer .placeholder-text,
-#taxInfo .placeholder-text /* Placeholder inside tax info div */
- {
-    border: none;
-    margin: 0;
-    padding: 30px 15px;
-    background-color: transparent;
-}
-#greeksTable .placeholder-text, /* Placeholder inside greeks table body */
-#strategyTable .placeholder-text /* Placeholder inside strategy table body */
-{
-    border: none;
-    padding: 20px;
-    display: table-cell;
-    text-align: center;
-    width: 100%;
-    background-color: transparent;
-}
-
-
-/* ===============================================================
-   Responsive Design
-   =============================================================== */
-@media screen and (max-width: 1200px) {
-    .container { flex-direction: column; gap: 25px; padding: 0 25px 25px 25px; }
-    .option-chain-container { position: static; max-height: none; } /* Unstick option chain */
-    .option-chain-container, .strategy-container { min-width: initial; }
-    .option-chain-container > .table-wrapper { max-height: 50vh; } /* Limit height when stacked */
-}
-@media screen and (max-width: 768px) {
-    body { font-size: 14px; }
-    header { position: static; margin-bottom: 20px;} /* Unstick header */
-    header h1 { font-size: 1.4rem; }
-    .container { padding: 0 15px 15px 15px; gap: 20px;}
-    .card, .results-section { padding: 18px; }
-    h2 { font-size: 1.25rem; }
-    h3, .section-subheader { font-size: 1.1rem; }
-    .data-table { font-size: 0.85rem; table-layout: auto; } /* Allow table to resize */
-    .data-table th, .data-table td { padding: 9px 10px; white-space: normal; } /* Allow wrapping */
-    button { font-size: 0.9rem; padding: 8px 12px; }
-    .button-wide { max-width: 220px; padding: 11px 0; }
-    #payoffChartContainer { height: 350px; } /* Adjust chart height */
-    .controls-row { gap: 12px; }
-    select, input[type="number"], input[type="text"] { padding: 7px 10px; font-size: 0.9rem;} /* Adjust input padding */
-    #globalError, #statusMessage, #warningMessage { margin-left: 15px; margin-right: 15px;} /* Adjust margins */
-}
-@media screen and (max-width: 576px) {
-    body { font-size: 13.5px; }
-    header h1 { font-size: 1.25rem; }
-    .container { padding: 0 10px 10px 10px; gap: 15px;}
-    .card, .results-section { padding: 15px; }
-    .data-table { font-size: 0.8rem; }
-    .data-table th, .data-table td { padding: 7px 8px; }
-    button { font-size: 0.85rem; padding: 7px 10px; }
-    #clearStrategyBtn { font-size: 0.8rem; padding: 5px 8px; }
-    .metrics-list li { font-size: 0.9rem; padding: 8px 0; flex-wrap: wrap; } /* Allow metrics to wrap */
-    .metrics-list .metric-label { margin-right: 8px; }
-    .analysis-container { font-size: 0.9rem; }
-    .table-wrapper { border-radius: 4px; }
-    #payoffChartContainer { height: 300px; } /* Further adjust chart height */
-    .controls-row { flex-direction: column; align-items: stretch; gap: 10px; } /* Stack controls vertically */
-    select, input[type="number"].number-input-small { width: 100%; } /* Make controls full width */
-    #globalError, #statusMessage, #warningMessage { margin-left: 10px; margin-right: 10px;}
-}
+td.error-message { background-color: rgba(200, 85, 61, 0.08); text-align: center !important; padding: 15px; color: var(--danger-color); font-weight: 500; white-space: normal; }
+#spotPriceDisplay.value-changed, #optionChainTable td.value-changed { animation: value-flash var(--highlight-duration) ease-out forwards; background-color: transparent; }
+@keyframes value-flash { 0% { background-color: var(--highlight-bg); } 70% { background-color: var(--highlight-bg); } 100% { background-color: transparent; } }
+.placeholder-text { text-align: center; color: var(--text-muted); padding: 40px 20px; border: 1px dashed #ccc; margin: 10px 0; width: 100%; font-style: italic; border-radius: var(--card-radius); background-color: #fdfdfd; }
+.analysis-container .placeholder-text, .news-container .placeholder-text, #payoffChartContainer .placeholder-text, #taxInfo .placeholder-text { border: none; margin: 0; padding: 30px 15px; background-color: transparent; }
+#greeksTable .placeholder-text, #strategyTable .placeholder-text { border: none; padding: 20px; display: table-cell; text-align: center; width: 100%; background-color: transparent; }
+/* =============================================================== Responsive Design =============================================================== */
+@media screen and (max-width: 1200px) { .container { flex-direction: column; gap: 25px; padding: 0 25px 25px 25px; } .option-chain-container { position: static; max-height: none; } .option-chain-container, .strategy-container { min-width: initial; } .option-chain-container > .table-wrapper { max-height: 50vh; } }
+@media screen and (max-width: 768px) { body { font-size: 14px; } header { position: static; margin-bottom: 20px;} header h1 { font-size: 1.4rem; } .container { padding: 0 15px 15px 15px; gap: 20px;} .card, .results-section { padding: 18px; } h2 { font-size: 1.25rem; } h3, .section-subheader { font-size: 1.1rem; } .data-table { font-size: 0.85rem; table-layout: auto; } .data-table th, .data-table td { padding: 9px 10px; white-space: normal; } button { font-size: 0.9rem; padding: 8px 12px; } .button-wide { max-width: 220px; padding: 11px 0; } #payoffChartContainer { height: 350px; } .controls-row { gap: 12px; } select, input[type="number"], input[type="text"] { padding: 7px 10px; font-size: 0.9rem;} #globalError, #statusMessage, #warningMessage { margin-left: 15px; margin-right: 15px;} }
+@media screen and (max-width: 576px) { body { font-size: 13.5px; } header h1 { font-size: 1.25rem; } .container { padding: 0 10px 10px 10px; gap: 15px;} .card, .results-section { padding: 15px; } .data-table { font-size: 0.8rem; } .data-table th, .data-table td { padding: 7px 8px; } button { font-size: 0.85rem; padding: 7px 10px; } #clearStrategyBtn { font-size: 0.8rem; padding: 5px 8px; } .metrics-list li { font-size: 0.9rem; padding: 8px 0; flex-wrap: wrap; } .metrics-list .metric-label { margin-right: 8px; } .analysis-container { font-size: 0.9rem; } .table-wrapper { border-radius: 4px; } #payoffChartContainer { height: 300px; } .controls-row { flex-direction: column; align-items: stretch; gap: 10px; } select, input[type="number"].number-input-small { width: 100%; } #globalError, #statusMessage, #warningMessage { margin-left: 10px; margin-right: 10px;} }
+"
