@@ -1,9 +1,9 @@
 // ===============================================================
 // Configuration & Constants
 // ===============================================================
-const API_BASE = "http://localhost:8000"; // For Local Hosting
-//const API_BASE = "http://localhost:8080";
-//const API_BASE = "https://option-strategy-website.onrender.com"; // For Production
+//const API_BASE = "http://localhost:8000"; // For Local Hosting
+//const API_BASE = "http://localhost:8080";    Not for use 
+const API_BASE = "https://option-website.onrender.com"; // For Production
 const REFRESH_INTERVAL_MS = 3000; // Auto-refresh interval (3 seconds )
 const HIGHLIGHT_DURATION_MS = 1500; // How long highlights last
 
