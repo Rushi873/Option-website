@@ -3838,12 +3838,13 @@ if __name__ == "__main__":
 
     logger.info(f"Starting Uvicorn server on http://{host}:{port} (Reload: {reload}, LogLevel: {log_level})")
     uvicorn.run(
-        "app:app", # Point to the FastAPI app instance
+        "backend.app:app", # Point to the FastAPI app instance
         host=host,
         port=port,
         reload=reload, # Enable auto-reload for local development if needed
         log_level=log_level
         # Consider adding reload_dirs=["."] if reload=True and you have other modules
+    )
 #===============================================================
 
 
