@@ -3825,52 +3825,45 @@ async def get_greeks_analysis_endpoint(request: GreeksAnalysisRequest):
 
 
 # ===============================================================
-# Main Execution Block (Keep as is)
+# Main Execution Block 
 # ===============================================================
 # # For live hosting
-# if __name__ == "__main__":
-#     host = os.getenv("HOST", "0.0.0.0") # Bind to 0.0.0.0 for external access (like Render)
-#     port = int(os.getenv("PORT", 8000)) # Render typically sets PORT env var
-#     reload = os.getenv("RELOAD", "false").lower() == "true"
-
-#     # Set log level based on environment?
-#     log_level = "debug" if reload else "info"
-
-#     logger.info(f"Starting Uvicorn server on http://{host}:{port} (Reload: {reload}, LogLevel: {log_level})")
-#     uvicorn.run(
-#         "app:app", # Point to the FastAPI app instance
-#         host=host,
-#         port=port,
-#         reload=reload, # Enable auto-reload for local development if needed
-#         log_level=log_level
-#         # Consider adding reload_dirs=["."] if reload=True and you have other modules
-# ===============================================================
-
-
-# Local hosting
 if __name__ == "__main__":
-    # --- CHANGE FOR LOCALHOST ---
-    # Bind to 127.0.0.1 for local access only, instead of 0.0.0.0
-    host = os.getenv("HOST", "127.0.0.1") # <--- MODIFIED HERE
-    # ----------------------------
-
-    port = int(os.getenv("PORT", 8000)) # Keep port 8000 unless it conflicts locally
-
-    # --- RECOMMENDATION FOR LOCAL DEVELOPMENT ---
-    # Set RELOAD=true in your .env file or environment for auto-reload
-    reload = os.getenv("RELOAD", "true").lower() == "true" # <--- Defaulting to 'true' for local dev is often convenient
-    # ---------------------------------------------
+    host = os.getenv("HOST", "0.0.0.0") # Bind to 0.0.0.0 for external access (like Render)
+    port = int(os.getenv("PORT", 8000)) # Render typically sets PORT env var
+    reload = os.getenv("RELOAD", "false").lower() == "true"
 
     # Set log level based on environment?
-    log_level = "debug" if reload else "info" # Keep this logic
+    log_level = "debug" if reload else "info"
 
     logger.info(f"Starting Uvicorn server on http://{host}:{port} (Reload: {reload}, LogLevel: {log_level})")
     uvicorn.run(
-        "backend.app:app", # Point to the FastAPI app instance
+        "app:app", # Point to the FastAPI app instance
         host=host,
         port=port,
         reload=reload, # Enable auto-reload for local development if needed
         log_level=log_level
         # Consider adding reload_dirs=["."] if reload=True and you have other modules
-    )
+#===============================================================
+
+
+# Local hosting
+# if __name__ == "__main__":
+#     host = os.getenv("HOST", "127.0.0.1") 
+#     # ----------------------------
+#     port = int(os.getenv("PORT", 8000)) 
+#     reload = os.getenv("RELOAD", "true").lower() == "true" 
+#     # ---------------------------------------------
+
+#     log_level = "debug" if reload else "info" # Keep this logic
+
+#     logger.info(f"Starting Uvicorn server on http://{host}:{port} (Reload: {reload}, LogLevel: {log_level})")
+#     uvicorn.run(
+#         "backend.app:app", # Point to the FastAPI app instance
+#         host=host,
+#         port=port,
+#         reload=reload, # Enable auto-reload for local development if needed
+#         log_level=log_level
+#         # Consider adding reload_dirs=["."] if reload=True and you have other modules
 #     )
+
