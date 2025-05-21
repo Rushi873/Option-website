@@ -1190,7 +1190,9 @@ ALLOWED_ORIGINS = [
     "https://option-strategy-vaqz.onrender.com",
     "https://option-strategy-website.onrender.com",
     "http://localhost:8080",   # Common alternative dev server port - Add if needed
-    "http://127.0.0.1:8000"
+    "http://127.0.0.1:8000",
+    "https://option-website-frontend.onrender.com",
+    "https://option-website-dazh.onrender.com"
     # Add any other specific origins if needed
 ]
 logger.info(f"Configuring CORS for origins: {ALLOWED_ORIGINS}")
