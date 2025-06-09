@@ -2,11 +2,16 @@
 
 A comprehensive web application for visualizing and analyzing options trading strategies with AI-powered market insights. This project provides traders with an intuitive platform to build, analyze, and optimize options strategies while leveraging real-time market data and artificial intelligence.
 
-# Images
-![image](https://github.com/user-attachments/assets/13933d56-3a3d-468e-bb14-7637d45f075d)
-![image](https://github.com/user-attachments/assets/f4d25e55-e8f4-4c16-99bb-c4392f8f8272)
-![image](https://github.com/user-attachments/assets/ed151032-1fc5-425b-9110-63a91ae840dd)
-![image](https://github.com/user-attachments/assets/b1d1ccbf-dc05-47bd-ae16-530a78a740ad)
+<table>
+  <tr>
+    <td><img src="https://github.com/user-attachments/assets/13933d56-3a3d-468e-bb14-7637d45f075d" width="300"/></td>
+    <td><img src="https://github.com/user-attachments/assets/f4d25e55-e8f4-4c16-99bb-c4392f8f8272" width="300"/></td>
+  </tr>
+  <tr>
+    <td><img src="https://github.com/user-attachments/assets/ed151032-1fc5-425b-9110-63a91ae840dd" width="300"/></td>
+    <td><img src="https://github.com/user-attachments/assets/b1d1ccbf-dc05-47bd-ae16-530a78a740ad" width="300"/></td>
+  </tr>
+</table>
 
 
 ## 📋 Table of Contents
